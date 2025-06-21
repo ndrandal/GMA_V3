@@ -1,0 +1,60 @@
+# ----- CMake generated files -----
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+install_manifest.txt
+
+# ----- Build output folders -----
+/build/
+/bin/
+/lib/
+
+# ----- Compiled object files -----
+*.o
+*.obj
+
+# ----- Libraries and executables -----
+*.so
+*.a
+*.lib
+*.dll
+*.dylib
+*.exe
+*.out
+
+# ----- Debug files -----
+*.log
+*.tmp
+*.pch
+
+# ----- Profiling and coverage -----
+*.gcda
+*.gcno
+*.lcov
+
+# ----- Indexing -----
+compile_commands.json
+
+# ----- IDE and editor folders/files -----
+.vscode/
+.idea/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+
+# ----- OS generated files -----
+.DS_Store
+Thumbs.db
+
+# ----- Backup and swap files -----
+*~
+*.swp
+*.swo
+
+# ----- Ignore contents of external/ but keep the folder itself -----
+/external/**
+
+# If you ever want to track a specific file in external/ (e.g. .gitkeep),
+# you can add an exception, for example:
+# !/external/.gitkeep
