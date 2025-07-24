@@ -69,20 +69,29 @@ TreeBuilder::buildInternal(const rapidjson::Value& nodeJson,
         JsonValidator::requireMember(nodeJson, "symbol", rapidjson::kStringType);
         JsonValidator::requireMember(nodeJson, "field",  rapidjson::kStringType);
 
+        // First build any downstream subtree
         std::shared_ptr<INode> next = downstream;
         if (nodeJson.HasMember("downstream")) {
             JsonValidator::requireMember(nodeJson, "downstream", rapidjson::kObjectType);
             next = buildInternal(nodeJson["downstream"], ctx, dispatcher, downstream);
         }
 
+        // Pull out config
         auto symbol = nodeJson["symbol"].GetString();
         auto field  = nodeJson["field"].GetString();
-        return std::make_shared<AtomicAccessor>(
+
+        // Instantiate the accessor node
+        auto accessor = std::make_shared<AtomicAccessor>(
             symbol,
             field,
             ctx->store(),
             next
         );
+
+        // **NEW**: subscribe it so it gets fired whenever we compute that atomic
+        dispatcher->addListener(symbol, field, accessor);
+
+        return accessor;
     }
 
     //

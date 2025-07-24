@@ -3,6 +3,8 @@
 #include "gma/AtomicStore.hpp"
 #include "gma/FunctionMap.hpp"    // for FunctionMap::getAll()
 #include "gma/nodes/INode.hpp"
+#include "gma/SymbolValue.hpp"
+#include "gma/AtomicFunctions.hpp"
 #include <algorithm>
 #include <variant>
 
