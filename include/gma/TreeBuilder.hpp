@@ -7,6 +7,9 @@ namespace gma {
   class ExecutionContext;
   class MarketDispatcher;
   class INode;
+  class AtomicStore;
+
+  namespace nodes { class AtomicAccessor; class Worker; class Aggregate; class SymbolSplit; class Interval; }
 
   /// Builds a processing tree of INode instances from JSON.
   class TreeBuilder {
