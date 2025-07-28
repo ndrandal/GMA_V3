@@ -86,9 +86,31 @@ MarketDispatcher::getHistoryCopy(const std::string& symbol) const
 void MarketDispatcher::computeAndStoreAtomics(const std::string& symbol,
                                               const std::deque<double>& history)
 {
-  // Use the new getAll() API
   for (auto const& [fieldName, func] : FunctionMap::instance().getAll()) {
     double val = func(std::vector<double>(history.begin(), history.end()));
     _store->set(symbol, fieldName, val);
+
+    // Gather any listeners for this (symbol, fieldName)
+    std::vector<std::shared_ptr<INode>> subs;
+    {
+      std::shared_lock lock(_mutex);
+      auto sit = _listeners.find(symbol);
+      if (sit != _listeners.end()) {
+        auto& fieldMap = sit->second;
+        auto fit = fieldMap.find(fieldName);
+        if (fit != fieldMap.end()) {
+          for (auto& weakL : fit->second) {
+            if (auto l = weakL.lock()) subs.push_back(l);
+          }
+        }
+      }
+    }
+
+    // Dispatch the new atomic value to each subscriber
+    for (auto& l : subs) {
+      _threadPool->post([l, symbol, val]() {
+        l->onValue(SymbolValue{ symbol, val });
+      });
+    }
   }
 }
