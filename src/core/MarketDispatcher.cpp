@@ -7,6 +7,7 @@
 #include "gma/AtomicFunctions.hpp"
 #include <algorithm>
 #include <variant>
+#include <mutex>
 
 using namespace gma;
 
@@ -93,19 +94,19 @@ void MarketDispatcher::computeAndStoreAtomics(const std::string& symbol,
     // Gather any listeners for this (symbol, fieldName)
     std::vector<std::shared_ptr<INode>> subs;
     {
-      std::shared_lock lock(_mutex);
-      auto sit = _listeners.find(symbol);
-      if (sit != _listeners.end()) {
-        auto& fieldMap = sit->second;
-        auto fit = fieldMap.find(fieldName);
-        if (fit != fieldMap.end()) {
-          for (auto& weakL : fit->second) {
-            if (auto l = weakL.lock()) subs.push_back(l);
-          }
+        std::shared_lock lock(_mutex);
+        auto sit = _listeners.find(symbol);
+        if (sit != _listeners.end()) {
+            auto& fieldMap = sit->second;
+            auto fit = fieldMap.find(fieldName);
+            if (fit != fieldMap.end()) {
+                // listeners are stored as shared_ptr, so push them directly
+                for (auto& listenerPtr : fit->second) {
+                    subs.push_back(listenerPtr);
+                }
+            }
         }
-      }
     }
-
     // Dispatch the new atomic value to each subscriber
     for (auto& l : subs) {
       _threadPool->post([l, symbol, val]() {

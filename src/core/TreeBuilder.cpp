@@ -11,6 +11,7 @@
 #include "gma/nodes/Aggregate.hpp"
 #include "gma/nodes/SymbolSplit.hpp"
 #include "gma/nodes/Interval.hpp"
+#include "gma/FunctionMap.hpp"
 
 using namespace gma;
 using namespace gma::nodes;
@@ -89,7 +90,7 @@ TreeBuilder::buildInternal(const rapidjson::Value& nodeJson,
         );
 
         // **NEW**: subscribe it so it gets fired whenever we compute that atomic
-        dispatcher->addListener(symbol, field, accessor);
+        dispatcher->registerListener(symbol, field, accessor);
 
         return accessor;
     }
@@ -108,8 +109,27 @@ TreeBuilder::buildInternal(const rapidjson::Value& nodeJson,
             }
         }
         // look up the function
+        // look up the function by name (use the correct API)
+        // look up the raw atomic function: vector<double> -> double
         auto fnName = nodeJson["function"].GetString();
-        auto fn = FunctionMap::instance().get(fnName);  // or .invoke
+        auto rawFn = FunctionMap::instance().getFunction(fnName);
+
+        // wrap it in a Worker::Function (Span<const ArgType> -> ArgType)
+        Worker::Function fn = [rawFn](Span<const ArgType> args) -> ArgType {
+            std::vector<double> nums;
+            nums.reserve(args.size());
+            for (auto const& arg : args) {
+                if (auto pd = std::get_if<double>(&arg)) {
+                    nums.push_back(*pd);
+                } else {
+                    // fallback for non‐double ArgType
+                    nums.push_back(0.0);
+                }
+            }
+            double result = rawFn(nums);
+            return ArgType{ result };
+        };
+
         return std::make_shared<Worker>(fn, std::move(children));
     }
 
@@ -131,12 +151,11 @@ TreeBuilder::buildInternal(const rapidjson::Value& nodeJson,
     //
     if (type == "SymbolSplit") {
         JsonValidator::requireMember(nodeJson, "template", rapidjson::kObjectType);
-        auto tmpl = nodeJson["template"];
-        // factory: clones the template subtree, each time
-        auto factory = [=](const std::string& sym) {
+        const auto& tmpl = nodeJson["template"];
+        // factory: clones the template subtree each time (capture tmpl by reference)
+        auto factory = [=, &tmpl](const std::string& sym) {
             return buildInternal(tmpl, ctx, dispatcher, downstream);
         };
-        return std::make_shared<SymbolSplit>(factory);
     }
 
     //

@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <rapidjson/document.h>
+#include "gma/FunctionMap.hpp"
 
 namespace gma {
   class ExecutionContext;
@@ -20,6 +21,9 @@ namespace gma {
     static std::shared_ptr<INode> build(const rapidjson::Document& json,
                                         ExecutionContext* ctx,
                                         MarketDispatcher* dispatcher);
+    void addListener(const std::string& symbol,
+                     const std::string& field,
+                     std::shared_ptr<INode> node);
 
   private:
     /// Recursively builds nodes, chaining \p downstream at the tail.

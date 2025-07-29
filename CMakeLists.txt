@@ -40,6 +40,7 @@ target_include_directories(gma
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     ${PROJECT_SOURCE_DIR}/lib/boost
+    ${PROJECT_SOURCE_DIR}/lib/rapidjson
 )
 
 # Link Threads transitively
