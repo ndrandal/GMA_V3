@@ -6,6 +6,7 @@
 #include "gma/FunctionMap.hpp"
 #include "gma/Config.hpp"
 #include "gma/server/WebSocketServer.hpp"
+#include "gma/server/FeedServer.hpp"
 #include <boost/asio.hpp>
 #include <iostream>
 #include <string>
@@ -13,6 +14,7 @@
 
 int main(int argc, char* argv[]) {
     // Default port for WebSocketServer
+
     unsigned short port = 9002;
     if (argc > 1) {
         try {
@@ -186,6 +188,10 @@ int main(int argc, char* argv[]) {
     boost::asio::io_context ioc;
     gma::WebSocketServer server(ioc, &ctx, &dispatcher, port);
     server.run();
+
+        // Tick server
+    server::FeedServer feedSrv{ioc, dispatcher, 9001};
+    feedSrv.run();
 
     std::cout << "gma WebSocket server listening on port " << port << std::endl;
     ioc.run();

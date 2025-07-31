@@ -1,15 +1,17 @@
 #include "gma/MarketDispatcher.hpp"
 #include "gma/ThreadPool.hpp"
 #include "gma/AtomicStore.hpp"
-#include "gma/FunctionMap.hpp"    // for FunctionMap::getAll()
+#include "gma/FunctionMap.hpp"
 #include "gma/nodes/INode.hpp"
 #include "gma/SymbolValue.hpp"
 #include "gma/AtomicFunctions.hpp"
+#include "gma/SymbolTick.hpp"
 #include <algorithm>
-#include <variant>
-#include <mutex>
+#include <shared_mutex>
+#include <deque>
 
 using namespace gma;
+
 
 MarketDispatcher::MarketDispatcher(ThreadPool* threadPool,
                                    AtomicStore* store)
@@ -23,7 +25,7 @@ void MarketDispatcher::registerListener(const std::string& symbol,
                                         const std::string& field,
                                         std::shared_ptr<INode> listener)
 {
-  std::unique_lock lock(_mutex);
+  std::unique_lock<std::shared_mutex> lock(_mutex);
   _listeners[symbol][field].emplace_back(std::move(listener));
 }
 
@@ -31,7 +33,7 @@ void MarketDispatcher::unregisterListener(const std::string& symbol,
                                           const std::string& field,
                                           std::shared_ptr<INode> listener)
 {
-  std::unique_lock lock(_mutex);
+  std::unique_lock<std::shared_mutex> lock(_mutex);
   auto symIt = _listeners.find(symbol);
   if (symIt == _listeners.end()) return;
   auto& fieldMap = symIt->second;
@@ -43,74 +45,76 @@ void MarketDispatcher::unregisterListener(const std::string& symbol,
   if (fieldMap.empty()) _listeners.erase(symIt);
 }
 
-void MarketDispatcher::onTick(const SymbolValue& tick)
-{
-  std::vector<std::shared_ptr<INode>> toNotify;
+void MarketDispatcher::onTick(const SymbolTick& tick) {
+  // Collect (field, listener) pairs for this symbol
+  std::vector<std::pair<std::string, std::shared_ptr<INode>>> toNotify;
   {
-    std::shared_lock lock(_mutex);
-
-    // Extract raw double
-    double raw = 0.0;
-    if (auto pd = std::get_if<double>(&tick.value)) {
-      raw = *pd;
-    }
-
-    auto& history = _histories[tick.symbol];
-    history.push_back(raw);
-    if (history.size() > 1000) history.pop_front();
-
+    std::shared_lock<std::shared_mutex> lock(_mutex);
     auto lit = _listeners.find(tick.symbol);
     if (lit != _listeners.end()) {
       for (auto& [field, vec] : lit->second) {
-        toNotify.insert(toNotify.end(), vec.begin(), vec.end());
+        for (auto& node : vec) {
+          toNotify.emplace_back(field, node);
+        }
       }
     }
   }
 
-  _threadPool->post([=]() {
-    auto histCopy = getHistoryCopy(tick.symbol);
-    computeAndStoreAtomics(tick.symbol, histCopy);
-    for (auto& listener : toNotify) {
-      listener->onValue(tick);
+  // Offload extraction, history update, computation, and notification
+  _threadPool->post([this, tick, toNotify = std::move(toNotify)]() {
+    for (auto& [field, node] : toNotify) {
+      // 1) Extract the desired numeric value from the JSON payload
+      double raw = 0.0;
+      try {
+        double raw = (*tick.payload)[field.c_str()].GetDouble();
+      } catch (...) {
+        continue;
+      }
+
+      // 2) Update per-(symbol,field) history
+      auto& hist = _histories[tick.symbol][field];
+      hist.push_back(raw);
+      if (hist.size() > MAX_HISTORY) hist.pop_front();
+
+      // 3) Recompute all atomic functions for this (symbol,field)
+      computeAndStoreAtomics(tick.symbol, field, hist);
+
+      // 4) Notify the raw-value listener
+      SymbolValue out{ tick.symbol, raw };
+      node->onValue(out);
     }
   });
 }
 
-std::deque<double>
-MarketDispatcher::getHistoryCopy(const std::string& symbol) const
-{
-  std::shared_lock lock(_mutex);
-  auto it = _histories.find(symbol);
-  return (it == _histories.end() ? std::deque<double>() : it->second);
-}
-
 void MarketDispatcher::computeAndStoreAtomics(const std::string& symbol,
+                                              const std::string& field,
                                               const std::deque<double>& history)
 {
-  for (auto const& [fieldName, func] : FunctionMap::instance().getAll()) {
-    double val = func(std::vector<double>(history.begin(), history.end()));
-    _store->set(symbol, fieldName, val);
+  // Iterate all registered atomic functions
+  for (auto const& [fnName, fnPtr] : FunctionMap::instance().getAll()) {
+    // Compute indicator value on this field's history
+    double result = fnPtr(std::vector<double>(history.begin(), history.end()));
 
-    // Gather any listeners for this (symbol, fieldName)
+    // Store into AtomicStore under (symbol, fnName)
+    _store->set(symbol, fnName, result);
+
+    // Gather listeners who subscribed to this atomic (by fnName)
     std::vector<std::shared_ptr<INode>> subs;
     {
-        std::shared_lock lock(_mutex);
-        auto sit = _listeners.find(symbol);
-        if (sit != _listeners.end()) {
-            auto& fieldMap = sit->second;
-            auto fit = fieldMap.find(fieldName);
-            if (fit != fieldMap.end()) {
-                // listeners are stored as shared_ptr, so push them directly
-                for (auto& listenerPtr : fit->second) {
-                    subs.push_back(listenerPtr);
-                }
-            }
+      std::shared_lock<std::shared_mutex> lock(_mutex);
+      auto sit = _listeners.find(symbol);
+      if (sit != _listeners.end()) {
+        auto fit = sit->second.find(fnName);
+        if (fit != sit->second.end()) {
+          subs = fit->second;
         }
+      }
     }
-    // Dispatch the new atomic value to each subscriber
-    for (auto& l : subs) {
-      _threadPool->post([l, symbol, val]() {
-        l->onValue(SymbolValue{ symbol, val });
+
+    // Dispatch the atomic result to each subscriber
+    for (auto& listener : subs) {
+      _threadPool->post([listener, symbol, result]() {
+        listener->onValue(SymbolValue{ symbol, result });
       });
     }
   }

@@ -1,54 +1,73 @@
 #pragma once
 
 #include <string>
-#include <memory>
-#include <unordered_map>
+#include <map>
 #include <vector>
-#include <shared_mutex>
 #include <deque>
+#include <unordered_map>
+#include <shared_mutex>
+#include <memory>
+
+#include "gma/SymbolTick.hpp"
+#include "gma/nodes/INode.hpp"
+#include "gma/SymbolValue.hpp"
 
 namespace gma {
-  struct SymbolValue;
-  class ThreadPool;
-  class AtomicStore;
-  class INode;                   // forward‑declared so we can use shared_ptr
 
-  namespace nodes { class Listener; }
+class ThreadPool;
+class AtomicStore;
 
-  /// Dispatches raw ticks into symbol‑/field‑scoped listeners.
-  class MarketDispatcher {
-  public:
+/// Dispatches raw JSON ticks and computed atomic values to symbol/field-scoped listeners.
+class MarketDispatcher {
+public:
     MarketDispatcher(ThreadPool* threadPool, AtomicStore* store);
     ~MarketDispatcher();
 
+    /// Subscribe a listener to receive raw tick values for a specific symbol/field.
     void registerListener(const std::string& symbol,
                           const std::string& field,
                           std::shared_ptr<INode> listener);
+
+    /// Unsubscribe a listener from raw tick values.
     void unregisterListener(const std::string& symbol,
                             const std::string& field,
                             std::shared_ptr<INode> listener);
 
-    void onTick(const SymbolValue& tick);
-    void computeAndStoreAtomics(const std::string& symbol, const std::deque<double>& history);
-    
-    std::deque<double> getHistoryCopy(const std::string& symbol) const;
-    void addListener(const std::string& symbol,
-                     const std::string& field,
-                     std::shared_ptr<INode> node);
+    /// Ingest a full JSON tick and dispatch field-specific updates.
+    void onTick(const SymbolTick& tick);
 
-  private:
-    // Copy of recent raw values per symbol
-    std::unordered_map<std::string, std::deque<double>> _histories;
+    /// Compute all atomic indicators for the given history and notify subscribers.
+    void computeAndStoreAtomics(const std::string& symbol,
+                                const std::string& field,
+                                const std::deque<double>& history);
 
-    // Map: symbol → field → vector of listener nodes
-    std::unordered_map<std::string,
-      std::unordered_map<std::string,
-        std::vector<std::shared_ptr<INode>>>>
-      _listeners;
+    /// Retrieve a copy of the history buffer for a given symbol and field.
+    std::deque<double> getHistoryCopy(const std::string& symbol,
+                                      const std::string& field) const;
 
-    mutable std::shared_mutex _mutex;
-    ThreadPool*   _threadPool;
-    AtomicStore*  _store;
+private:
+    // History buffers per (symbol, field)
+    std::unordered_map<
+        std::string, // symbol
+        std::unordered_map<
+            std::string,       // field name
+            std::deque<double> // history entries
+        >
+    > _histories;
 
-  };
-}
+    // Listener lists per (symbol, field)
+    std::unordered_map<
+        std::string, // symbol
+        std::map<
+            std::string,                     // field name
+            std::vector<std::shared_ptr<INode>> // subscribers
+        >
+    > _listeners;
+
+    mutable std::shared_mutex _mutex;  // protects _histories and _listeners
+    ThreadPool* _threadPool;           // for offloading work
+    AtomicStore* _store;               // where atomic results are written
+    static constexpr size_t MAX_HISTORY = 1000;
+};
+
+} // namespace gma
