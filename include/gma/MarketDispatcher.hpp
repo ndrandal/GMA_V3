@@ -32,6 +32,9 @@ namespace gma {
     void computeAndStoreAtomics(const std::string& symbol, const std::deque<double>& history);
     
     std::deque<double> getHistoryCopy(const std::string& symbol) const;
+    void addListener(const std::string& symbol,
+                     const std::string& field,
+                     std::shared_ptr<INode> node);
 
   private:
     // Copy of recent raw values per symbol
