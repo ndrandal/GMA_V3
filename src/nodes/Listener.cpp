@@ -21,13 +21,6 @@ Listener::~Listener() {
   shutdown();
 }
 
-void Listener::onValue(const SymbolValue& sv) {
-  // Enqueue the full SymbolValue for later processing
-  std::lock_guard lock(_mutex);
-  if (_pending.size() >= 1000) _pending.pop();
-  _pending.push(sv);
-  schedule();
-}
 
 void Listener::schedule() {
   bool expected = false;
@@ -52,11 +45,76 @@ void Listener::schedule() {
   });
 }
 
-void Listener::shutdown() noexcept {
-  try {
-    _dispatcher->unregisterListener(_symbol, _field, shared_from_this());
-  } catch (...) {}
-  // Clear pending queue
-  std::queue<SymbolValue> empty;
-  std::swap(_pending, empty);
+#include "gma/rt/ThreadPool.hpp"
+
+void Listener::onValue(const SymbolValue& v) {
+  // Fast, non-blocking enqueue
+  if (!q_.try_push(v)) {
+    // backpressure: drop oldest and push again (keeps latest)
+    if (q_.drop_one() && q_.try_push(v)) {
+      dropped_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      // Worst-case: count a drop and return
+      dropped_.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+  }
+  enq_.fetch_add(1, std::memory_order_relaxed);
+
+  // Schedule one pump if not already scheduled
+  bool expected=false;
+  if (scheduled_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    gma::gThreadPool->post([self = shared_from_this()]{
+      // drain in batches to avoid monopolizing a worker
+      constexpr size_t kBatch = 512;
+      size_t processed = 0;
+      for (;;) {
+        size_t n = self->q_.drain([&](SymbolValue sv){
+          self->emitDownstream(sv);
+        }, kBatch);
+        self->deq_.fetch_add(n, std::memory_order_relaxed);
+        processed += n;
+        if (n < kBatch) break; // queue likely empty
+      }
+      self->scheduled_.store(false, std::memory_order_release);
+
+      // Race: if new items arrived after we set scheduled_=false, reschedule
+      if (!self->q_.empty()) {
+        bool expected=false;
+        if (self->scheduled_.compare_exchange_strong(expected, true)) {
+          gma::gThreadPool->post([self]{ /* tail call: same body */ 
+            constexpr size_t kBatch = 512;
+            size_t nProcessed=0;
+            for (;;) {
+              size_t n = self->q_.drain([&](SymbolValue sv){ self->emitDownstream(sv); }, kBatch);
+              self->deq_.fetch_add(n, std::memory_order_relaxed);
+              nProcessed += n;
+              if (n < kBatch) break;
+            }
+            self->scheduled_.store(false, std::memory_order_release);
+            if (!self->q_.empty()) {
+              bool e=false; if (self->scheduled_.compare_exchange_strong(e, true)) {
+                gma::gThreadPool->post([self]{ /* final resched */ 
+                  constexpr size_t kBatch = 512;
+                  for (;;) {
+                    size_t n = self->q_.drain([&](SymbolValue sv){ self->emitDownstream(sv); }, kBatch);
+                    self->deq_.fetch_add(n, std::memory_order_relaxed);
+                    if (n < kBatch) break;
+                  }
+                  self->scheduled_.store(false, std::memory_order_release);
+                });
+              }
+            }
+          });
+        }
+      }
+    });
+  }
 }
+
+void Listener::shutdown() {
+  try { dispatcher_->unregisterListener(symbol_, field_, this); } catch (...) {}
+  // best-effort drain (optional)
+  q_.drain([&](SymbolValue sv){ /* drop */ });
+}
+
