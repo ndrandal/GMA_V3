@@ -12,7 +12,7 @@
 #include "nodes/Interval.hpp"
 #include "nodes/Worker.hpp"
 #include "nodes/Listener.hpp"
-
+#include "util/Metrics.hpp"
 // If you have a TreeBuilder, include it and use it in buildPipelineFromRequest.
 
 namespace gma::ws {
@@ -56,6 +56,11 @@ void ClientConnection::onTextMessage(const std::string& jsonText){
     handleCancel(clientId, jsonText);
     return;
   }
+  if (type == "status") {
+    auto snap = gma::util::MetricRegistry::instance().snapshotJson();
+    sendText_(std::string("{\"type\":\"status\",\"metrics\":") + snap + "}");
+    return;
+    }
   // Optional: ping
   if (type == "ping") {
     sendText_(R"({"type":"pong"})");
