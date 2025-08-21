@@ -20,6 +20,8 @@ public:
                    std::shared_ptr<MarketDispatcher> dispatcher,
                    std::shared_ptr<AtomicStore> store,
                    SendFn sendText);
+  ~ClientConnection() { onClose(); }
+
 
   // Call these from your WS server
   void onTextMessage(const std::string& jsonText);

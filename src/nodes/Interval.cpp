@@ -25,9 +25,10 @@ void Interval::onValue(const SymbolValue&) {
   // No-op: doesn't accept upstream input
 }
 
-void Interval::shutdown() noexcept {
-  _running = false;
-  _child.reset();
+void Interval::shutdown() {
+  running_.store(false, std::memory_order_release);
+  if (t_.joinable()) t_.join();
 }
+
 
 } // namespace gma

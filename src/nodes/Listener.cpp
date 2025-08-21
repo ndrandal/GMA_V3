@@ -1,5 +1,6 @@
 #include "gma/nodes/Listener.hpp"
 #include "gma/MarketDispatcher.hpp"
+#include "gma/rt/ThreadPool.hpp"
 
 using namespace gma::nodes;
 
@@ -45,66 +46,39 @@ void Listener::schedule() {
   });
 }
 
-#include "gma/rt/ThreadPool.hpp"
 
 void Listener::onValue(const SymbolValue& v) {
-  // Fast, non-blocking enqueue
+  if (stopping_.load(std::memory_order_acquire)) return;
+
   if (!q_.try_push(v)) {
-    // backpressure: drop oldest and push again (keeps latest)
-    if (q_.drop_one() && q_.try_push(v)) {
-      dropped_.fetch_add(1, std::memory_order_relaxed);
-    } else {
-      // Worst-case: count a drop and return
-      dropped_.fetch_add(1, std::memory_order_relaxed);
-      return;
-    }
+    if (q_.drop_one() && q_.try_push(v)) { dropped_.fetch_add(1, std::memory_order_relaxed); }
+    else { dropped_.fetch_add(1, std::memory_order_relaxed); return; }
   }
   enq_.fetch_add(1, std::memory_order_relaxed);
 
-  // Schedule one pump if not already scheduled
   bool expected=false;
   if (scheduled_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-    gma::gThreadPool->post([self = shared_from_this()]{
-      // drain in batches to avoid monopolizing a worker
-      constexpr size_t kBatch = 512;
-      size_t processed = 0;
+    gma::gThreadPool->post([self=shared_from_this()]{
+      if (self->stopping_.load(std::memory_order_acquire)) { self->scheduled_.store(false); return; }
+      constexpr size_t kBatch=512;
       for (;;) {
-        size_t n = self->q_.drain([&](SymbolValue sv){
-          self->emitDownstream(sv);
-        }, kBatch);
+        size_t n = self->q_.drain([&](SymbolValue sv){ self->emitDownstream(sv); }, kBatch);
         self->deq_.fetch_add(n, std::memory_order_relaxed);
-        processed += n;
-        if (n < kBatch) break; // queue likely empty
+        if (n < kBatch) break;
       }
       self->scheduled_.store(false, std::memory_order_release);
-
-      // Race: if new items arrived after we set scheduled_=false, reschedule
-      if (!self->q_.empty()) {
-        bool expected=false;
-        if (self->scheduled_.compare_exchange_strong(expected, true)) {
-          gma::gThreadPool->post([self]{ /* tail call: same body */ 
-            constexpr size_t kBatch = 512;
-            size_t nProcessed=0;
+      if (!self->stopping_.load(std::memory_order_acquire) && !self->q_.empty()) {
+        bool e=false;
+        if (self->scheduled_.compare_exchange_strong(e, true)) {
+          gma::gThreadPool->post([self]{ /* tail pump (same as above, minus duplication) */
+            if (self->stopping_.load(std::memory_order_acquire)) { self->scheduled_.store(false); return; }
+            constexpr size_t kBatch=512;
             for (;;) {
               size_t n = self->q_.drain([&](SymbolValue sv){ self->emitDownstream(sv); }, kBatch);
               self->deq_.fetch_add(n, std::memory_order_relaxed);
-              nProcessed += n;
               if (n < kBatch) break;
             }
             self->scheduled_.store(false, std::memory_order_release);
-            if (!self->q_.empty()) {
-              bool e=false; if (self->scheduled_.compare_exchange_strong(e, true)) {
-                gma::gThreadPool->post([self]{ /* final resched */ 
-                  constexpr size_t kBatch = 512;
-                  for (;;) {
-                    size_t n = self->q_.drain([&](SymbolValue sv){ self->emitDownstream(sv); }, kBatch);
-                    self->deq_.fetch_add(n, std::memory_order_relaxed);
-                    if (n < kBatch) break;
-                  }
-                  self->scheduled_.store(false, std::memory_order_release);
-                });
-              }
-            }
           });
         }
       }
@@ -113,8 +87,7 @@ void Listener::onValue(const SymbolValue& v) {
 }
 
 void Listener::shutdown() {
+  stopping_.store(true, std::memory_order_release);
   try { dispatcher_->unregisterListener(symbol_, field_, this); } catch (...) {}
-  // best-effort drain (optional)
-  q_.drain([&](SymbolValue sv){ /* drop */ });
+  q_.drain([&](SymbolValue){ /* drop */ });
 }
-

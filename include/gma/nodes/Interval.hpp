@@ -23,6 +23,8 @@ private:
   ThreadPool* _pool;
 
   std::atomic<bool> _running{true};
+
+  std::atomic<bool> stopping_{false};
 };
 
 } // namespace gma
