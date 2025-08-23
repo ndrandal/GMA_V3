@@ -184,9 +184,7 @@ int main(int argc, char* argv[]) {
     "ob",
     [obProvider](const std::string& sym, const std::string& fullKey){
       return obProvider->get(sym, fullKey);
-    }
-  );
-
+    });
   // Optional materialization (push hot keys into the store + notify). Safe to enable even if OB is sparse.
   auto obMat = std::make_shared<gma::ob::Materializer>(snapshotSrc, writeFn, notifyFn);
   gma::ob::MaterializeConfig obCfg;
@@ -197,6 +195,15 @@ int main(int argc, char* argv[]) {
   obCfg.notifyOnWrite   = true;
   obMat->start(obCfg);
   gShutdown.registerStep("ob-materializer", 20, [obMat]{ obMat->stop(); });
+
+  gShutdown.registerStep("ws-stop-accept",   5,  [ws]{ try{ ws->stopAccept(); }catch(...){} });
+  gShutdown.registerStep("ws-close-sessions",40, [ws]{ try{ ws->closeAll(); }catch(...){} }); // or via your SessionManager
+  gShutdown.registerStep("ob-mat-stop",      50, [obMat]{ try{ obMat->stop(); }catch(...){} });
+  gShutdown.registerStep("feed-stop",        55, [feed]{ try{ feed->stop(); }catch(...){} });
+  gShutdown.registerStep("asio-stop",        60, [&ioc]{ ioc.stop(); });
+  gShutdown.registerStep("metrics-stop",     70, []{ gma::util::MetricRegistry::instance().stopReporter(); });
+  gShutdown.registerStep("pool-drain",       80, []{ if (gma::gThreadPool) gma::gThreadPool->drain(); });
+  gShutdown.registerStep("pool-destroy",     85, []{ gma::gThreadPool.reset(); });
 
   // 7) I/O (ASIO) + servers
   boost::asio::io_context ioc;

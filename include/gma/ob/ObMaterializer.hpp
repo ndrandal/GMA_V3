@@ -47,6 +47,15 @@ private:
   std::mutex mx_;
   bool running_ = false;
 
+
+  // in ObMaterializer.hpp
+  std::atomic<bool> stopping_{false};
+  std::thread       thr_;
+  std::mutex        mx_;
+  std::condition_variable cv_;
+  bool              wake_{false};    // set true to force a pass
+
+
   struct State {
     std::chrono::steady_clock::time_point last{};
   };

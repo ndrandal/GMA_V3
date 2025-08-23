@@ -1,29 +1,28 @@
-// src/nodes/Worker.cpp
 #include "gma/nodes/Worker.hpp"
 
 namespace gma {
 
-Worker::Worker(Function fn, std::vector<std::shared_ptr<INode>> children)
-  : _function(std::move(fn)), _children(std::move(children)) {}
+Worker::Worker(Fn fn, std::shared_ptr<INode> downstream)
+  : fn_(std::move(fn)), downstream_(std::move(downstream)) {}
 
 void Worker::onValue(const SymbolValue& sv) {
-  auto& state = _buffer[sv.symbol];
-  state.inputs.push_back(sv.value);
-  state.count++;
+  auto& vec = acc_[sv.symbol];
+  vec.push_back(sv.value);
 
-  if (state.count >= 2) { // TODO: dynamic arity
-    ArgType result = _function(Span<const ArgType>(state.inputs.data(), state.inputs.size()));
-    for (const auto& child : _children) {
-      if (child) child->onValue({sv.symbol, result});
-    }
-    state.inputs.clear();
-    state.count = 0;
+  // Here we assume batches arrive “naturally” (e.g., via Aggregate):
+  // whenever a batch completes (heuristic: empty symbol marks flush; or fixed size),
+  // you can decide to compute. Simplest: compute on every push if vector not empty.
+  // For deterministic N-ary, prefer wiring: Aggregate(N) -> Worker(fn).
+  if (auto ds = downstream_.lock()) {
+    ArgType out = fn_(Span<const ArgType>(vec.data(), vec.size()));
+    ds->onValue(SymbolValue{ sv.symbol, out });
   }
+  vec.clear();
 }
 
 void Worker::shutdown() noexcept {
-  _children.clear();
-  _buffer.clear();
+  downstream_.reset();
+  acc_.clear();
 }
 
 } // namespace gma

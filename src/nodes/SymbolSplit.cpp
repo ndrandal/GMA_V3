@@ -2,32 +2,30 @@
 
 namespace gma {
 
-SymbolSplit::SymbolSplit(Factory factory)
-  : _factory(std::move(factory)) {}
+SymbolSplit::SymbolSplit(Factory makeChild)
+  : makeChild_(std::move(makeChild)) {}
 
 void SymbolSplit::onValue(const SymbolValue& sv) {
-  std::shared_ptr<INode> target;
-
+  std::shared_ptr<INode> child;
   {
-    std::scoped_lock lock(_mutex);
-    auto it = _instances.find(sv.symbol);
-    if (it != _instances.end()) {
-      target = it->second;
+    std::scoped_lock lk(mx_);
+    auto it = children_.find(sv.symbol);
+    if (it == children_.end()) {
+      child = makeChild_(sv.symbol);
+      children_.emplace(sv.symbol, child);
     } else {
-      target = _factory(sv.symbol);
-      _instances[sv.symbol] = target;
+      child = it->second;
     }
   }
-
-  if (target) target->onValue(sv);
+  if (child) child->onValue(sv);
 }
 
 void SymbolSplit::shutdown() noexcept {
-  std::scoped_lock lock(_mutex);
-  for (auto& [_, node] : _instances) {
+  std::scoped_lock lk(mx_);
+  for (auto& [_, node] : children_) {
     if (node) node->shutdown();
   }
-  _instances.clear();
+  children_.clear();
 }
 
 } // namespace gma

@@ -1,29 +1,29 @@
 #pragma once
+#include <functional>
+#include <memory>
+#include <unordered_map>
+#include <vector>
 #include "gma/nodes/INode.hpp"
 #include "gma/Span.hpp"
-#include <functional>
-#include <vector>
-#include <unordered_map>
 
 namespace gma {
 
+// A simple "apply(fn(values_for_symbol)) -> one value" node
 class Worker final : public INode {
 public:
-  using Function = std::function<ArgType(Span<const ArgType>)>;
+  using Fn = std::function<ArgType(Span<const ArgType>)>;
 
-  Worker(Function fn, std::vector<std::shared_ptr<INode>> children);
+  Worker(Fn fn, std::shared_ptr<INode> downstream);
+
   void onValue(const SymbolValue& sv) override;
   void shutdown() noexcept override;
 
 private:
-  struct SymbolState {
-    std::vector<ArgType> inputs;
-    std::size_t count = 0;
-  };
+  Fn fn_;
+  std::weak_ptr<INode> downstream_;
 
-  Function _function;
-  std::vector<std::shared_ptr<INode>> _children;
-  std::unordered_map<std::string, SymbolState> _buffer;
+  // Per-symbol accumulation (feed it via Aggregate or by multiple upstreams)
+  std::unordered_map<std::string, std::vector<ArgType>> acc_;
 };
 
 } // namespace gma

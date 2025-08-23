@@ -18,9 +18,20 @@ void Materializer::start(const MaterializeConfig& cfg){
   cfg_ = cfg;
   running_ = true;
 }
-void Materializer::stop(){
-  std::lock_guard<std::mutex> lk(mx_);
-  running_ = false;
+
+void Materializer::stop() {
+  bool expected = false;
+  if (!stopping_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    return; // already stopping/stopped
+  }
+  {
+    std::lock_guard<std::mutex> lk(mx_);
+    wake_ = true;              // make sure the loop wakes if it's sleeping
+  }
+  cv_.notify_all();
+  if (thr_.joinable()) {
+    try { thr_.join(); } catch (...) {}
+  }
 }
 
 void Materializer::onOrderBookUpdate(const std::string& symbol, Mode mode){

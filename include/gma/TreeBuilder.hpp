@@ -1,35 +1,38 @@
 #pragma once
-
 #include <memory>
-#include <rapidjson/document.h>
-#include "gma/FunctionMap.hpp"
+#include <string>
+
+// Forward decls
+class INode;
+namespace rapidjson { class Value; }
 
 namespace gma {
-  class ExecutionContext;
-  class MarketDispatcher;
-  class INode;
   class AtomicStore;
-
-  namespace nodes { class AtomicAccessor; class Worker; class Aggregate; class SymbolSplit; class Interval; }
-
-  /// Builds a processing tree of INode instances from JSON.
-  class TreeBuilder {
-  public:
-    /// \param json       The full request JSON (must contain a "tree" object).
-    /// \param ctx        Supplies thread‑pool and store.
-    /// \param dispatcher Where to register Listener nodes.
-    static std::shared_ptr<INode> build(const rapidjson::Document& json,
-                                        ExecutionContext* ctx,
-                                        MarketDispatcher* dispatcher);
-    void addListener(const std::string& symbol,
-                     const std::string& field,
-                     std::shared_ptr<INode> node);
-
-  private:
-    /// Recursively builds nodes, chaining \p downstream at the tail.
-    static std::shared_ptr<INode> buildInternal(const rapidjson::Value&   nodeJson,
-                                                 ExecutionContext*          ctx,
-                                                 MarketDispatcher*         dispatcher,
-                                                 std::shared_ptr<INode>    downstream);
-  };
+  class MarketDispatcher;
+  namespace rt { class ThreadPool; }
 }
+
+namespace gma::tree {
+
+struct Deps {
+  gma::AtomicStore*         store   {nullptr};
+  gma::MarketDispatcher*    dispatcher {nullptr};
+  gma::rt::ThreadPool*      pool    {nullptr};
+};
+
+// Build from a JSON node spec and return the **root** that you should attach to your graph.
+// `defaultSymbol` is used if a spec omits "symbol".
+// `terminal` is the downstream tail (e.g., a WS responder); TreeBuilder will wire nodes **toward** it.
+std::shared_ptr<INode> buildNode(const rapidjson::Value& spec,
+                                 const std::string& defaultSymbol,
+                                 const Deps& deps,
+                                 std::shared_ptr<INode> terminal);
+
+// Convenience: short-form builder used by WS for {symbol, field, pollMs}
+std::shared_ptr<INode> buildSimple(const std::string& symbol,
+                                   const std::string& field,
+                                   int pollMs,  // <=0 means push mode (no Interval)
+                                   const Deps& deps,
+                                   std::shared_ptr<INode> terminal);
+
+} // namespace gma::tree

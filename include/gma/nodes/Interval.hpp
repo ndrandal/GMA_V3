@@ -1,30 +1,30 @@
 #pragma once
-
-#include "gma/nodes/INode.hpp"
-#include "gma/ThreadPool.hpp"
+#include <atomic>
 #include <chrono>
 #include <memory>
-#include <atomic>
-#include <thread>
+#include "gma/nodes/INode.hpp"
+#include "gma/rt/ThreadPool.hpp"
 
 namespace gma {
 
-class Interval final : public INode {
+class Interval final : public INode,
+                       public std::enable_shared_from_this<Interval> {
 public:
-  Interval(std::chrono::milliseconds delay, std::shared_ptr<INode> child, ThreadPool* pool);
-  void onValue(const SymbolValue&) override; // unused
+  Interval(std::chrono::milliseconds period,
+           std::shared_ptr<INode> child,
+           gma::rt::ThreadPool* pool);
+
+  void onValue(const SymbolValue&) override; // no-op
   void shutdown() noexcept override;
 
 private:
-  void startLoop();
+  void tickOnce();
 
-  std::chrono::milliseconds _delay;
-  std::shared_ptr<INode> _child;
-  ThreadPool* _pool;
-
-  std::atomic<bool> _running{true};
-
+  const std::chrono::milliseconds period_;
+  std::weak_ptr<INode> child_;
+  gma::rt::ThreadPool* pool_;
   std::atomic<bool> stopping_{false};
+  std::atomic<bool> scheduled_{false};
 };
 
 } // namespace gma
