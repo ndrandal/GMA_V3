@@ -66,7 +66,9 @@ void MarketDispatcher::onTick(const SymbolTick& tick) {
       // 1) Extract the desired numeric value from the JSON payload
       double raw = 0.0;
       try {
-        double raw = (*tick.payload)[field.c_str()].GetDouble();
+        const auto& v = (*tick.payload)[field.c_str()];
+        if (!v.IsNumber()) { continue; }
+        raw = v.GetDouble();
       } catch (...) {
         continue;
       }
