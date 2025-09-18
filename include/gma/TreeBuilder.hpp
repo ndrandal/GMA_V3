@@ -1,38 +1,50 @@
 #pragma once
 #include <memory>
-#include <string>
 
-// Forward decls
-class INode;
+// Forward decls to avoid heavy includes here
 namespace rapidjson { class Value; }
 
 namespace gma {
-  class AtomicStore;
-  class MarketDispatcher;
-  namespace rt { class ThreadPool; }
+class INode;
+class AtomicStore;
+class ThreadPool;
+class MarketDispatcher;
 }
 
 namespace gma::tree {
 
+// Dependencies that the builder needs to wire nodes
 struct Deps {
-  gma::AtomicStore*         store   {nullptr};
-  gma::MarketDispatcher*    dispatcher {nullptr};
-  gma::rt::ThreadPool*      pool    {nullptr};
+  gma::AtomicStore*     store       = nullptr;
+  gma::ThreadPool*      pool        = nullptr;
+  gma::MarketDispatcher* dispatcher = nullptr;
 };
 
-// Build from a JSON node spec and return the **root** that you should attach to your graph.
-// `defaultSymbol` is used if a spec omits "symbol".
-// `terminal` is the downstream tail (e.g., a WS responder); TreeBuilder will wire nodes **toward** it.
-std::shared_ptr<INode> buildNode(const rapidjson::Value& spec,
-                                 const std::string& defaultSymbol,
-                                 const Deps& deps,
-                                 std::shared_ptr<INode> terminal);
+// The result of composing a request pipeline that will be fed by MarketDispatcher
+struct BuiltChain {
+  std::shared_ptr<gma::INode> head;   // register this with (symbol, field)
+};
 
-// Convenience: short-form builder used by WS for {symbol, field, pollMs}
-std::shared_ptr<INode> buildSimple(const std::string& symbol,
-                                   const std::string& field,
-                                   int pollMs,  // <=0 means push mode (no Interval)
-                                   const Deps& deps,
-                                   std::shared_ptr<INode> terminal);
+// Build a single node graph described by 'spec', ending at 'terminal'
+std::shared_ptr<gma::INode>
+buildNode(const rapidjson::Value& spec,
+          const std::string& defaultSymbol,
+          const Deps& deps,
+          std::shared_ptr<gma::INode> terminal);
+
+// Convenience: AtomicAccessor (optionally polled by Interval) -> terminal
+std::shared_ptr<gma::INode>
+buildSimple(const std::string& symbol,
+            const std::string& field,
+            int pollMs,
+            const Deps& deps,
+            std::shared_ptr<gma::INode> terminal);
+
+// NEW: Build a dispatcher-facing Listener head for requestJson ("symbol","field"),
+// optionally prepend a pipeline, and finish at 'terminal' (e.g., Responder).
+BuiltChain
+buildForRequest(const rapidjson::Value& requestJson,
+                const Deps& deps,
+                std::shared_ptr<gma::INode> terminal);
 
 } // namespace gma::tree

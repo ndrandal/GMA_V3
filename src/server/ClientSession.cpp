@@ -12,6 +12,13 @@
 #include <iostream>
 #include <string>
 
+#include <boost/asio/post.hpp>
+#include <boost/beast/websocket.hpp>
+#include <boost/beast/core/error.hpp>
+
+namespace websocket = boost::beast::websocket;
+namespace beast = boost::beast;
+
 namespace gma {
 
 ClientSession::ClientSession(tcp::socket&& socket,
@@ -151,6 +158,25 @@ void ClientSession::close() noexcept {
     if (ec && ec != beast::errc::not_connected) {
         Logger::warn(std::string("ClientSession: error shutting down socket: ") + ec.message());
     }
+}
+
+void ClientSession::stop() noexcept {
+  // Make this safe to call multiple times and from any thread.
+  if (stopped_.exchange(true, std::memory_order_acq_rel)) return;
+
+  auto self = shared_from_this();  // keep alive until close posts
+  boost::asio::post(ws_.get_executor(), [self]() {
+    beast::error_code ec;
+    if (self->ws_.is_open()) {
+      websocket::close_reason cr(websocket::close_code::normal);
+      cr.reason = "server_shutdown";
+      self->ws_.close(cr, ec);  // synchronous, but on correct strand/executor
+    }
+    // Inform server that this session is done.
+    if (self->server_) {
+      try { self->server_->unregisterSession(self.get()); } catch (...) {}
+    }
+  });
 }
 
 } // namespace gma
