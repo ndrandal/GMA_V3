@@ -1,115 +1,69 @@
-# Rewritten CMakeLists.txt for GMA_V3 (main project)
-
-cmake_minimum_required(VERSION 3.18)  # Using a newer CMake for modern features
+# File: CMakeLists.txt (drop-in)
+cmake_minimum_required(VERSION 3.18)
 project(GMA_V3 LANGUAGES CXX)
 
-# 1. Project-wide settings
+# -------- Basics --------
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(BUILD_TESTS "Enable building of unit tests" ON)
-option(BUILD_SERVER "Build WebSocket server component" ON)
+option(BUILD_TESTS  "Build tests"            OFF)   # Per user: ignore tests
+option(BUILD_SERVER "Build server executable" ON)
 
-# 2. Dependencies
+# -------- Dependencies --------
 find_package(Threads REQUIRED)
 
-# Find Boost (for Beast/Asio). We require headers and possibly Boost.System
-# If Boost is not installed, we'll fall back to header-only mode using project lib.
-set(Boost_USE_STATIC_LIBS ON)
-find_package(Boost 1.70 COMPONENTS system REQUIRED)  # Require Boost.System
-# Note: If Boost is header-only (Beast, Asio) and system is unavailable,
-# you can adjust the REQUIRED flag or provide Boost headers via include paths.
+# Boost: need at least System (Beast depends on it). We intentionally don't require headers-only components.
+# If your system Boost is older than 1.70, upgrade (Beast is bundled with Boost).
+find_package(Boost 1.70 REQUIRED COMPONENTS system)
 
-# Find RapidJSON (header-only)
-find_package(RapidJSON QUIET)
-# If not found, assume RapidJSON is provided in project (e.g., lib/rapidjson include path)
-if(NOT RapidJSON_FOUND)
-    message(STATUS "RapidJSON not found via find_package, assuming it's in project lib.")
-    set(RAPIDJSON_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/lib/rapidjson")
+# RapidJSON (header-only). Try package first, else fall back to a local vendor/rapidjson include.
+find_path(RAPIDJSON_INCLUDE_DIR rapidjson/document.h
+  HINTS ${RAPIDJSON_ROOT} /usr/include /usr/local/include
+)
+if (NOT RAPIDJSON_INCLUDE_DIR)
+  message(FATAL_ERROR "RapidJSON headers not found. Install rapidjson-dev or set RAPIDJSON_ROOT.")
 endif()
 
-# 3. Source files
-# Explicitly list sources for clarity (you can update this when adding files)
-set(GMA_CORE_SOURCES
-    src/core/AtomicFunctions.cpp
-    src/core/AtomicStore.cpp
-    src/core/ClientConnection.cpp
-    src/core/FunctionMap.cpp
-    src/core/JsonValidator.cpp
-    src/core/MarketDispatcher.cpp
-    src/core/OrderBookManager.cpp
-    src/core/RequestRegistry.cpp
-    src/core/ThreadPool.cpp
-    src/core/TreeBuilder.cpp
-    src/nodes/Aggregate.cpp
-    src/nodes/AtomicAccessor.cpp
-    src/nodes/Interval.cpp
-    src/nodes/Listener.cpp
-    src/nodes/Responder.cpp
-    src/nodes/SymbolSplit.cpp
-    src/nodes/Worker.cpp
-    src/ob/ObEngine.cpp
-    src/ob/ObKey.cpp
-    src/ob/ObMaterializer.cpp
-    src/ob/ObProvider.cpp
-    # ... (add other core .cpp files here)
-    src/ta/TAComputer.cpp
-    src/util/Config.cpp
-    src/util/Logger.cpp
-    src/util/Metrics.cpp
+# -------- Sources --------
+# Pull all non-test .cpp files under src/
+file(GLOB_RECURSE GMA_SRC
+  CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
-set(GMA_SERVER_SOURCES
-    src/server/ClientSession.cpp
-    src/server/FeedServer.cpp
-    src/server/WebSocketServer.cpp
-    src/ws/ClientConnection.cpp
-    src/ws/RequestRegistry.cpp
-    src/ws/WSResponder.cpp
-    src/ws/WsBridge.cpp
-)
-# Combine sources based on BUILD_SERVER option
-if(BUILD_SERVER)
-    list(APPEND GMA_CORE_SOURCES ${GMA_SERVER_SOURCES})
-endif()
 
-# 4. Define Library Target
-add_library(gma STATIC)
-target_sources(gma PRIVATE ${GMA_CORE_SOURCES})
+# If you want to exclude specific legacy files, do it here, e.g.:
+# list(REMOVE_ITEM GMA_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/core/ThreadPool.cpp")
+# list(REMOVE_ITEM GMA_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/core/OrderBookManager.cpp")
+
+# -------- Library --------
+add_library(gma STATIC ${GMA_SRC})
+
 target_include_directories(gma
-    PUBLIC 
-        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
-        ${PROJECT_SOURCE_DIR}/include  # ensure headers visible for this build
-        ${RAPIDJSON_INCLUDE_DIR}
-    PRIVATE 
-        ${PROJECT_SOURCE_DIR}/src  # if any source-specific includes
+  PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${RAPIDJSON_INCLUDE_DIR}
+    ${Boost_INCLUDE_DIRS}
 )
-# If Boost was found, use its include dirs; else, use vendored headers
-if(Boost_FOUND)
-    target_include_directories(gma PUBLIC ${Boost_INCLUDE_DIRS})
-else()
-    target_include_directories(gma PUBLIC ${PROJECT_SOURCE_DIR}/lib/boost)
+
+target_link_libraries(gma
+  PUBLIC
+    Threads::Threads
+    Boost::system
+)
+
+target_compile_definitions(gma
+  PRIVATE
+    $<$<CONFIG:Debug>:GMA_DEBUG_BUILD=1>
+)
+
+# -------- Executable --------
+if (BUILD_SERVER)
+  add_executable(gma_main src/main.cpp)
+  target_link_libraries(gma_main PRIVATE gma)
 endif()
 
-# Link required libraries
-target_link_libraries(gma 
-    PUBLIC 
-        Threads::Threads 
-        # Link Boost.System if available (Beast/Asio need it for error_code)
-        $<$<BOOL:${Boost_SYSTEM_LIBRARY}>:${Boost_SYSTEM_LIBRARY}>
-)
-# Note: The generator expression above links Boost::system if it’s found as a library.
-# If header-only mode, Boost_SYSTEM_LIBRARY might be empty, and this does nothing.
-
-# 5. Define Executable (main program)
-if(BUILD_SERVER)
-    add_executable(gma_main src/main.cpp)
-    target_link_libraries(gma_main PRIVATE gma)
-    # You could also embed some version info or link other libs as needed.
-endif()
-
-# 6. Tests (if enabled, add subdirectory)
-if(BUILD_TESTS)
-    add_subdirectory(tests)
+# -------- Tests (disabled for D1) --------
+if (BUILD_TESTS)
+  add_subdirectory(tests)
 endif()

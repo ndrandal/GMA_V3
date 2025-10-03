@@ -33,6 +33,9 @@ ClientSession::ClientSession(tcp::socket&& socket,
 {}
 
 void ClientSession::start() {
+  if (server_) {
+    try { server_->registerSession(shared_from_this()); } catch (...) {}
+  }
   _ws.async_accept(
     beast::bind_front_handler(&ClientSession::onAccept, shared_from_this()));
 }

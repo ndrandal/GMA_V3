@@ -24,7 +24,7 @@
 #include "gma/ta/AtomicNames.hpp"
 
 // -------- OB (T4) --------
-#include "gma/atomic/AtomicProviderRegistry.hpp"
+#include "gma/atomic/AtomicProveiderRegistry.hpp"
 // If you enabled the order book provider/materializer in your tree, keep these includes;
 // if not yet, you can temporarily comment them out.
 #include "gma/ob/FunctionalSnapshotSource.hpp"
