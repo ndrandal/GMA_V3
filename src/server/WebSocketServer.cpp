@@ -1,102 +1,75 @@
 #include "gma/server/WebSocketServer.hpp"
-#include "gma/server/ClientSession.hpp"
 
 #include <boost/asio.hpp>
-#include <iostream>
-
+#include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
-#include <boost/beast/core/error.hpp>
+#include <memory>
+#include <utility>
 
 using tcp = boost::asio::ip::tcp;
-namespace websocket = boost::beast::websocket;
 namespace beast = boost::beast;
+namespace websocket = beast::websocket;
 
 namespace gma {
-using boost::asio::ip::tcp;
 
 WebSocketServer::WebSocketServer(boost::asio::io_context& ioc,
-                                 ExecutionContext* ctx,
-                                 MarketDispatcher* dispatcher,
-                                 unsigned short port)
-  : _acceptor(ioc, tcp::endpoint(tcp::v4(), port)),
-    _ctx(ctx),
-    _dispatcher(dispatcher)
-{}
+                                 const tcp::endpoint& endpoint,
+                                 SessionFactory session_factory)
+  : ioc_(ioc)
+  , acceptor_(ioc)
+  , endpoint_(endpoint)
+  , session_factory_(std::move(session_factory))
+  , is_stopped_(false) {}
 
-void WebSocketServer::run() {
-  accepting_.store(true, std::memory_order_relaxed);
+void WebSocketServer::start() {
+  beast::error_code ec;
+
+  acceptor_.open(endpoint_.protocol(), ec);
+  if (ec) return;
+
+  acceptor_.set_option(boost::asio::socket_base::reuse_address(true), ec);
+  if (ec) return;
+
+  acceptor_.bind(endpoint_, ec);
+  if (ec) return;
+
+  acceptor_.listen(boost::asio::socket_base::max_listen_connections, ec);
+  if (ec) return;
+
   doAccept();
 }
 
-void WebSocketServer::doAccept() {
-  _acceptor.async_accept(
-    [this](boost::system::error_code ec, tcp::socket socket) {
-      onAccept(ec, std::move(socket));
-    });
-}
-
-void WebSocketServer::doAccept() {
-  if (!accepting_.load(std::memory_order_relaxed)) return;
-  acceptor_.async_accept(
-      [this](beast::error_code ec, tcp::socket socket) {
-        if (!accepting_.load(std::memory_order_relaxed)) return;
-        if (ec) {
-          // Only continue loop if still accepting
-          if (accepting_.load(std::memory_order_relaxed)) {
-            doAccept();
-          }
-          return;
-        }
-        // construct your ClientSession from socket here (existing code)
-        // session->start();
-        // and loop:
-        if (accepting_.load(std::memory_order_relaxed)) {
-          doAccept();
-        }
-      });
-}
-
-
-void WebSocketServer::registerSession(const std::shared_ptr<ClientSession>& s) {
-  if (!s) return;
-  std::lock_guard<std::mutex> lk(sessions_mu_);
-  sessions_[s.get()] = s;
-}
-
-void WebSocketServer::unregisterSession(ClientSession* s) noexcept {
-  std::lock_guard<std::mutex> lk(sessions_mu_);
-  (void)sessions_.erase(s);
-}
-
-void WebSocketServer::stopAccept() noexcept {
-  accepting_.store(false, std::memory_order_relaxed);
+void WebSocketServer::stop() {
+  is_stopped_.store(true);
   beast::error_code ec;
-  // Cancel any pending async_accept and close the acceptor; both are idempotent.
-  // If acceptor_ is already closed, these are no-ops.
-  acceptor_.cancel(ec);
   acceptor_.close(ec);
 }
 
-void WebSocketServer::closeAll() noexcept {
-  // Snapshot to call stop() without holding the mutex (avoid re-entrancy/deadlocks)
-  std::vector<std::shared_ptr<ClientSession>> to_close;
-  {
-    std::lock_guard<std::mutex> lk(sessions_mu_);
-    to_close.reserve(sessions_.size());
-    for (auto& kv : sessions_) {
-      if (auto sp = kv.second.lock()) {
-        to_close.emplace_back(std::move(sp));
-      }
-    }
-  }
-  // Politely close each session. Each session will call unregisterSession(this) on close.
-  for (auto& s : to_close) {
+void WebSocketServer::doAccept() {
+  if (is_stopped_.load()) return;
+
+  acceptor_.async_accept(
+      boost::asio::make_strand(ioc_),
+      [this](beast::error_code ec, tcp::socket socket) {
+        onAccept(ec, std::move(socket));
+      });
+}
+
+void WebSocketServer::onAccept(beast::error_code ec, tcp::socket socket) {
+  if (!ec) {
     try {
-      s->stop(); // noexcept
+      if (session_factory_) {
+        // Let the factory construct and launch the session (shared_ptr)
+        auto session = session_factory_(std::move(socket));
+        if (session) {
+          session->run();
+        }
+      }
     } catch (...) {
-      // Never throw during shutdown.
+      // swallow to keep server alive
     }
   }
+  doAccept(); // accept the next connection no matter what
 }
 
 } // namespace gma

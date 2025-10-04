@@ -1,69 +1,79 @@
-# File: CMakeLists.txt (drop-in)
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.20)
 project(GMA_V3 LANGUAGES CXX)
 
-# -------- Basics --------
-set(CMAKE_CXX_STANDARD 20)
+# ---- Options ----
+option(GMA_BUILD_TESTS "Build unit tests in tests/" OFF)
+option(GMA_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+
+# ---- C++ standard ----
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(BUILD_TESTS  "Build tests"            OFF)   # Per user: ignore tests
-option(BUILD_SERVER "Build server executable" ON)
-
-# -------- Dependencies --------
-find_package(Threads REQUIRED)
-
-# Boost: need at least System (Beast depends on it). We intentionally don't require headers-only components.
-# If your system Boost is older than 1.70, upgrade (Beast is bundled with Boost).
-find_package(Boost 1.70 REQUIRED COMPONENTS system)
-
-# RapidJSON (header-only). Try package first, else fall back to a local vendor/rapidjson include.
-find_path(RAPIDJSON_INCLUDE_DIR rapidjson/document.h
-  HINTS ${RAPIDJSON_ROOT} /usr/include /usr/local/include
-)
-if (NOT RAPIDJSON_INCLUDE_DIR)
-  message(FATAL_ERROR "RapidJSON headers not found. Install rapidjson-dev or set RAPIDJSON_ROOT.")
+# ---- Platform defs (Beast/Asio on Windows) ----
+if (WIN32)
+  add_definitions(-D_WIN32_WINNT=0x0A00) # Windows 10
 endif()
 
-# -------- Sources --------
-# Pull all non-test .cpp files under src/
-file(GLOB_RECURSE GMA_SRC
-  CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+# ---- Dependencies: Boost (Beast uses Asio inside Boost), Threads ----
+find_package(Threads REQUIRED)
+find_package(Boost 1.75 REQUIRED COMPONENTS system)
+
+# ---- RapidJSON (header-only) ----
+# If you have a third_party/rapidjson include, prefer it; else rely on system include paths.
+set(RAPIDJSON_ROOT_HINT "${CMAKE_SOURCE_DIR}/third_party/rapidjson")
+if (EXISTS "${RAPIDJSON_ROOT_HINT}/include/rapidjson")
+  add_library(RapidJSON::rapidjson INTERFACE IMPORTED)
+  target_include_directories(RapidJSON::rapidjson INTERFACE "${RAPIDJSON_ROOT_HINT}/include")
+else()
+  # Fallback: create an interface target; include dirs rely on compiler's default paths
+  add_library(RapidJSON::rapidjson INTERFACE IMPORTED)
+endif()
+
+# ---- Sources ----
+# We intentionally glob to make this resilient while refactoring.
+# If you prefer explicit lists later, you can replace this with target_sources.
+file(GLOB_RECURSE GMA_SOURCES
+  "${CMAKE_SOURCE_DIR}/src/*.cpp"
+)
+file(GLOB_RECURSE GMA_PUBLIC_HEADERS
+  "${CMAKE_SOURCE_DIR}/include/**/*.hpp"
+  "${CMAKE_SOURCE_DIR}/include/*.hpp"
 )
 
-# If you want to exclude specific legacy files, do it here, e.g.:
-# list(REMOVE_ITEM GMA_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/core/ThreadPool.cpp")
-# list(REMOVE_ITEM GMA_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/core/OrderBookManager.cpp")
-
-# -------- Library --------
-add_library(gma STATIC ${GMA_SRC})
-
-target_include_directories(gma
-  PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${RAPIDJSON_INCLUDE_DIR}
-    ${Boost_INCLUDE_DIRS}
+add_library(gma STATIC ${GMA_SOURCES} ${GMA_PUBLIC_HEADERS})
+target_include_directories(gma PUBLIC
+  "${CMAKE_SOURCE_DIR}/include"
 )
-
 target_link_libraries(gma
   PUBLIC
-    Threads::Threads
     Boost::system
+    Threads::Threads
+    RapidJSON::rapidjson
 )
 
-target_compile_definitions(gma
-  PRIVATE
-    $<$<CONFIG:Debug>:GMA_DEBUG_BUILD=1>
-)
-
-# -------- Executable --------
-if (BUILD_SERVER)
-  add_executable(gma_main src/main.cpp)
-  target_link_libraries(gma_main PRIVATE gma)
+# ---- Warnings ----
+if (MSVC)
+  target_compile_options(gma PRIVATE /W4)
+  if (GMA_WARNINGS_AS_ERRORS)
+    target_compile_options(gma PRIVATE /WX)
+  endif()
+else()
+  target_compile_options(gma PRIVATE -Wall -Wextra -Wpedantic)
+  if (GMA_WARNINGS_AS_ERRORS)
+    target_compile_options(gma PRIVATE -Werror)
+  endif()
 endif()
 
-# -------- Tests (disabled for D1) --------
-if (BUILD_TESTS)
-  add_subdirectory(tests)
+# ---- Example app (optional) ----
+# If you have a main() somewhere (e.g., apps/server_main.cpp), you can enable it later.
+
+# ---- Tests (opt-in) ----
+if (GMA_BUILD_TESTS)
+  enable_testing()
+  file(GLOB_RECURSE GMA_TEST_SOURCES "${CMAKE_SOURCE_DIR}/tests/*.cpp")
+  add_executable(gma_tests ${GMA_TEST_SOURCES})
+  target_include_directories(gma_tests PRIVATE "${CMAKE_SOURCE_DIR}/include")
+  target_link_libraries(gma_tests PRIVATE gma Boost::system Threads::Threads RapidJSON::rapidjson)
+  add_test(NAME gma_tests COMMAND gma_tests)
 endif()

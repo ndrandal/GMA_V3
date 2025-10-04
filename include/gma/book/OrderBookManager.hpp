@@ -1,7 +1,7 @@
 #pragma once
 #include "gma/book/OrderBook.hpp"
 #include "gma/book/DepthTypes.hpp"
-#include "gma/core/Metrics.hpp"
+#include "gma/Metrics.hpp"
 #include <unordered_map>
 #include <shared_mutex>
 #include <string>

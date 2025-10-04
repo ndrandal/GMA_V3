@@ -4,22 +4,18 @@
 #include "gma/FunctionMap.hpp"
 #include "gma/nodes/INode.hpp"
 #include "gma/SymbolValue.hpp"
-#include "gma/AtomicFunctions.hpp"
 #include "gma/SymbolTick.hpp"
+
 #include <algorithm>
 #include <shared_mutex>
 #include <deque>
 
 using namespace gma;
 
-
 MarketDispatcher::MarketDispatcher(ThreadPool* threadPool,
                                    AtomicStore* store)
   : _threadPool(threadPool)
-  , _store(store)
-{}
-
-MarketDispatcher::~MarketDispatcher() = default;
+  , _store(store) {}
 
 void MarketDispatcher::registerListener(const std::string& symbol,
                                         const std::string& field,
@@ -46,61 +42,91 @@ void MarketDispatcher::unregisterListener(const std::string& symbol,
 }
 
 void MarketDispatcher::onTick(const SymbolTick& tick) {
-  // Collect (field, listener) pairs for this symbol
+  // Collect (field, listener) pairs for this symbol — we’ll notify outside the lock
   std::vector<std::pair<std::string, std::shared_ptr<INode>>> toNotify;
+
   {
     std::shared_lock<std::shared_mutex> lock(_mutex);
     auto lit = _listeners.find(tick.symbol);
     if (lit != _listeners.end()) {
-      for (auto& [field, vec] : lit->second) {
-        for (auto& node : vec) {
-          toNotify.emplace_back(field, node);
+      // If any subscribers registered to specific raw fields, they must exist as keys
+      for (auto& kv : lit->second) {
+        const std::string& field = kv.first;
+        for (auto& sp : kv.second) {
+          // Capture only raw fields that appear in the payload; function results will be
+          // dispatched later by computeAndStoreAtomics using their function names.
+          if (tick.payload && tick.payload->HasMember(field.c_str())) {
+            toNotify.emplace_back(field, sp);
+          }
         }
       }
     }
   }
 
-  // Offload extraction, history update, computation, and notification
-  _threadPool->post([this, tick, toNotify = std::move(toNotify)]() {
+  // Process raw values for the (symbol, field) and update history
+  if (tick.payload) {
     for (auto& [field, node] : toNotify) {
-      // 1) Extract the desired numeric value from the JSON payload
       double raw = 0.0;
       try {
         const auto& v = (*tick.payload)[field.c_str()];
-        if (!v.IsNumber()) { continue; }
+        if (!v.IsNumber()) continue;
         raw = v.GetDouble();
       } catch (...) {
         continue;
       }
 
-      // 2) Update per-(symbol,field) history
-      auto& hist = _histories[tick.symbol][field];
-      hist.push_back(raw);
-      if (hist.size() > MAX_HISTORY) hist.pop_front();
+      // Update per-(symbol,field) history
+      std::deque<double>* histPtr = nullptr;
+      {
+        std::unique_lock<std::shared_mutex> lock(_mutex);
+        auto& hist = _histories[tick.symbol][field];
+        hist.push_back(raw);
+        if (hist.size() > MAX_HISTORY) hist.pop_front();
+        histPtr = &hist;
+      }
 
-      // 3) Recompute all atomic functions for this (symbol,field)
-      computeAndStoreAtomics(tick.symbol, field, hist);
+      // Recompute all atomic functions for this (symbol,field)
+      computeAndStoreAtomics(tick.symbol, field, *histPtr);
 
-      // 4) Notify the raw-value listener
+      // Notify the raw-value subscriber
       SymbolValue out{ tick.symbol, raw };
-      node->onValue(out);
+      if (_threadPool) {
+        _threadPool->post([node, out]() {
+          if (node) node->onValue(out);
+        });
+      } else {
+        if (node) node->onValue(out);
+      }
     }
-  });
+  }
 }
 
 void MarketDispatcher::computeAndStoreAtomics(const std::string& symbol,
                                               const std::string& field,
                                               const std::deque<double>& history)
 {
-  // Iterate all registered atomic functions
-  for (auto const& [fnName, fnPtr] : FunctionMap::instance().getAll()) {
-    // Compute indicator value on this field's history
-    double result = fnPtr(std::vector<double>(history.begin(), history.end()));
+  // Snapshot registered atomic functions
+  std::vector<std::pair<std::string, Func>> funcs = FunctionMap::instance().getAll();
 
-    // Store into AtomicStore under (symbol, fnName)
-    _store->set(symbol, fnName, result);
+  for (auto& [fnName, fn] : funcs) {
+    // Defensive: skip empty
+    if (!fn) continue;
 
-    // Gather listeners who subscribed to this atomic (by fnName)
+    // Compute atomic result
+    std::vector<double> vec(history.begin(), history.end());
+    double result = 0.0;
+    try {
+      result = fn(vec);
+    } catch (...) {
+      continue;
+    }
+
+    // Store under key == function name (users subscribe to fnName)
+    if (_store) {
+      _store->set(symbol, fnName, result);
+    }
+
+    // Collect subscribers for (symbol, fnName)
     std::vector<std::shared_ptr<INode>> subs;
     {
       std::shared_lock<std::shared_mutex> lock(_mutex);
@@ -115,9 +141,13 @@ void MarketDispatcher::computeAndStoreAtomics(const std::string& symbol,
 
     // Dispatch the atomic result to each subscriber
     for (auto& listener : subs) {
-      _threadPool->post([listener, symbol, result]() {
-        listener->onValue(SymbolValue{ symbol, result });
-      });
+      if (_threadPool) {
+        _threadPool->post([listener, symbol, result]() {
+          if (listener) listener->onValue(SymbolValue{ symbol, result });
+        });
+      } else {
+        if (listener) listener->onValue(SymbolValue{ symbol, result });
+      }
     }
   }
 }
