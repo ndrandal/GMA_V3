@@ -1,7 +1,7 @@
 #pragma once
 #include <functional>
 #include <string>
-#include "INode.hpp"
+#include "gma/nodes/INode.hpp"
 
 namespace gma::ws {
 

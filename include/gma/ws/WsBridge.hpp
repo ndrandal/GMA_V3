@@ -5,6 +5,8 @@
 #include <unordered_map>
 #include <mutex>
 #include "gma/ws/ClientConnection.hpp"
+#include "gma/MarketDispatcher.hpp"
+#include "gma/AtomicStore.hpp"
 
 namespace gma::ws {
 

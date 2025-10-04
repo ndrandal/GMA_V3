@@ -1,10 +1,14 @@
 // src/server/FeedServer.cpp
-#include "FeedServer.hpp"
+#include "gma/server/FeedServer.hpp"
 
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
 #include <rapidjson/document.h>
 #include <iostream>
+
+#include "gma/server/WebSocketServer.hpp" // if needed by implementation
+#include <boost/asio/io_context.hpp>
+
 
 using tcp = boost::asio::ip::tcp;
 namespace websocket = boost::beast::websocket;

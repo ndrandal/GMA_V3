@@ -1,37 +1,35 @@
-// src/server/FeedServer.hpp
 #pragma once
+#include <memory>
+#include <atomic>
+#include <thread>
+#include <functional>
 
 #include <boost/asio/io_context.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/asio/strand.hpp>
-#include <memory>
-#include "gma/MarketDispatcher.hpp"
 
-namespace server {
+namespace gma {
 
-class FeedSession;
-  
-/// Listens for incoming WebSocket connections and spawns FeedSession for each.
+class WebSocketServer; // fwd-declare to avoid heavy includes
+
 class FeedServer {
 public:
-    /// @param ioc         your io_context
-    /// @param dispatcher  your MarketDispatcher instance
-    /// @param port        TCP port to listen on (e.g. 9001)
-    FeedServer(boost::asio::io_context& ioc,
-               gma::MarketDispatcher& dispatcher,
-               unsigned short port);
+  using OnStart = std::function<void()>;
+  using OnStop  = std::function<void()>;
 
-    /// Start accepting connections (non-blocking).
-    void run();
+  explicit FeedServer(std::shared_ptr<WebSocketServer> ws)
+  : ws_(std::move(ws)) {}
+
+  // Start the IO context + WS server on a background thread.
+  void start(OnStart onStart = nullptr);
+
+  // Stop and join.
+  void stop(OnStop onStop = nullptr);
+
+  bool running() const { return running_.load(std::memory_order_relaxed); }
 
 private:
-    void doAccept();
-    void onAccept(boost::system::error_code ec,
-                  boost::asio::ip::tcp::socket socket);
-
-    boost::asio::ip::tcp::acceptor _acceptor;
-    boost::asio::io_context&      _ioc;
-    gma::MarketDispatcher&        _dispatcher;
+  std::shared_ptr<WebSocketServer> ws_;
+  std::atomic<bool> running_{false};
+  std::thread       thr_;
 };
 
-} // namespace server
+} // namespace gma

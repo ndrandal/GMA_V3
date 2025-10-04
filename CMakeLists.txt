@@ -15,42 +15,94 @@ if (WIN32)
   add_definitions(-D_WIN32_WINNT=0x0A00) # Windows 10
 endif()
 
-# ---- Dependencies: Boost (Beast uses Asio inside Boost), Threads ----
-find_package(Threads REQUIRED)
-find_package(Boost 1.75 REQUIRED COMPONENTS system)
-
-# ---- RapidJSON (header-only) ----
-# If you have a third_party/rapidjson include, prefer it; else rely on system include paths.
-set(RAPIDJSON_ROOT_HINT "${CMAKE_SOURCE_DIR}/third_party/rapidjson")
-if (EXISTS "${RAPIDJSON_ROOT_HINT}/include/rapidjson")
-  add_library(RapidJSON::rapidjson INTERFACE IMPORTED)
-  target_include_directories(RapidJSON::rapidjson INTERFACE "${RAPIDJSON_ROOT_HINT}/include")
-else()
-  # Fallback: create an interface target; include dirs rely on compiler's default paths
-  add_library(RapidJSON::rapidjson INTERFACE IMPORTED)
+# ---- Third-party root (your local unpacked libs)
+#     Override with: -DTHIRD_PARTY_ROOT=C:/wherever
+if (NOT DEFINED THIRD_PARTY_ROOT)
+  if (WIN32)
+    set(THIRD_PARTY_ROOT "C:/thirdparty")
+  else()
+    set(THIRD_PARTY_ROOT "${CMAKE_SOURCE_DIR}/third_party")
+  endif()
 endif()
 
-# ---- Sources ----
-# We intentionally glob to make this resilient while refactoring.
-# If you prefer explicit lists later, you can replace this with target_sources.
-file(GLOB_RECURSE GMA_SOURCES
-  "${CMAKE_SOURCE_DIR}/src/*.cpp"
-)
+# ---- Threads (always needed)
+find_package(Threads REQUIRED)
+
+# ---- Try to find Boost normally first
+set(Boost_USE_STATIC_LIBS ON)
+set(Boost_USE_STATIC_RUNTIME OFF)
+find_package(Boost 1.75 QUIET COMPONENTS system)
+
+set(USE_HEADER_ONLY_BOOST OFF)
+if (NOT Boost_FOUND)
+  # Fallback to header-only mode using your local folders
+  set(BOOST_FALLBACK_INCLUDE
+      "${THIRD_PARTY_ROOT}/boost_1_88_0")
+  if (EXISTS "${BOOST_FALLBACK_INCLUDE}/boost/beast/core.hpp")
+    message(STATUS "Using header-only Boost from: ${BOOST_FALLBACK_INCLUDE}")
+    set(USE_HEADER_ONLY_BOOST ON)
+
+    # Create dummy INTERFACE targets so downstream link lines still work
+    add_library(Boost::headers INTERFACE IMPORTED)
+    target_include_directories(Boost::headers INTERFACE "${BOOST_FALLBACK_INCLUDE}")
+
+    add_library(Boost::system INTERFACE IMPORTED) # header-only error_code
+    target_link_libraries(Boost::system INTERFACE Boost::headers)
+
+  else()
+    message(FATAL_ERROR
+      "Boost not found and no fallback at ${BOOST_FALLBACK_INCLUDE}. "
+      "Install Boost or set -DTHIRD_PARTY_ROOT=C:/thirdparty")
+  endif()
+else()
+  message(STATUS "Found Boost: ${Boost_INCLUDE_DIRS}")
+endif()
+
+# ---- RapidJSON (header-only)
+# Prefer your local C:/thirdparty/rapidjson/include if present
+set(RAPIDJSON_FALLBACK_INCLUDE "${THIRD_PARTY_ROOT}/rapidjson/include")
+add_library(RapidJSON::rapidjson INTERFACE IMPORTED)
+if (EXISTS "${RAPIDJSON_FALLBACK_INCLUDE}/rapidjson/document.h")
+  target_include_directories(RapidJSON::rapidjson INTERFACE "${RAPIDJSON_FALLBACK_INCLUDE}")
+else()
+  # Let compiler/system include provide it if installed
+  message(STATUS "Using system RapidJSON includes")
+endif()
+
+# ---- Sources (library) ----
+# Build the library from all sources EXCEPT main.cpp
+set(MAIN_SRC "${CMAKE_SOURCE_DIR}/src/main.cpp")
+
+file(GLOB_RECURSE GMA_SOURCES "${CMAKE_SOURCE_DIR}/src/*.cpp")
+if (EXISTS "${MAIN_SRC}")
+  list(REMOVE_ITEM GMA_SOURCES "${MAIN_SRC}")
+endif()
+
 file(GLOB_RECURSE GMA_PUBLIC_HEADERS
   "${CMAKE_SOURCE_DIR}/include/**/*.hpp"
   "${CMAKE_SOURCE_DIR}/include/*.hpp"
 )
 
 add_library(gma STATIC ${GMA_SOURCES} ${GMA_PUBLIC_HEADERS})
-target_include_directories(gma PUBLIC
-  "${CMAKE_SOURCE_DIR}/include"
-)
-target_link_libraries(gma
-  PUBLIC
-    Boost::system
-    Threads::Threads
-    RapidJSON::rapidjson
-)
+target_include_directories(gma PUBLIC "${CMAKE_SOURCE_DIR}/include")
+
+# If we have a full Boost install use it; else use header-only targets
+if (Boost_FOUND)
+  target_include_directories(gma PUBLIC ${Boost_INCLUDE_DIRS})
+  target_link_libraries(gma PUBLIC Boost::system)
+else()
+  target_link_libraries(gma PUBLIC Boost::system) # our INTERFACE dummy
+  # Header-only mode: no Boost libs required; add safe defines
+  target_compile_definitions(gma PUBLIC
+    BOOST_ALL_NO_LIB
+    BOOST_ERROR_CODE_HEADER_ONLY
+    BOOST_SYSTEM_NO_DEPRECATED
+    BOOST_ASIO_NO_DEPRECATED
+    BOOST_BEAST_USE_STD_STRING_VIEW
+  )
+endif()
+
+target_link_libraries(gma PUBLIC Threads::Threads RapidJSON::rapidjson)
 
 # ---- Warnings ----
 if (MSVC)
@@ -65,8 +117,25 @@ else()
   endif()
 endif()
 
-# ---- Example app (optional) ----
-# If you have a main() somewhere (e.g., apps/server_main.cpp), you can enable it later.
+# ---- App executable (uses your existing src/main.cpp) ----
+if (EXISTS "${MAIN_SRC}")
+  add_executable(gma_server "${MAIN_SRC}")
+  target_include_directories(gma_server PRIVATE "${CMAKE_SOURCE_DIR}/include")
+  if (Boost_FOUND)
+    target_include_directories(gma_server PRIVATE ${Boost_INCLUDE_DIRS})
+    target_link_libraries(gma_server PRIVATE gma Boost::system)
+  else()
+    target_link_libraries(gma_server PRIVATE gma Boost::system)
+    target_compile_definitions(gma_server PRIVATE
+      BOOST_ALL_NO_LIB
+      BOOST_ERROR_CODE_HEADER_ONLY
+      BOOST_SYSTEM_NO_DEPRECATED
+      BOOST_ASIO_NO_DEPRECATED
+      BOOST_BEAST_USE_STD_STRING_VIEW
+    )
+  endif()
+  target_link_libraries(gma_server PRIVATE Threads::Threads RapidJSON::rapidjson)
+endif()
 
 # ---- Tests (opt-in) ----
 if (GMA_BUILD_TESTS)
@@ -74,6 +143,19 @@ if (GMA_BUILD_TESTS)
   file(GLOB_RECURSE GMA_TEST_SOURCES "${CMAKE_SOURCE_DIR}/tests/*.cpp")
   add_executable(gma_tests ${GMA_TEST_SOURCES})
   target_include_directories(gma_tests PRIVATE "${CMAKE_SOURCE_DIR}/include")
-  target_link_libraries(gma_tests PRIVATE gma Boost::system Threads::Threads RapidJSON::rapidjson)
+  if (Boost_FOUND)
+    target_include_directories(gma_tests PRIVATE ${Boost_INCLUDE_DIRS})
+    target_link_libraries(gma_tests PRIVATE gma Boost::system)
+  else()
+    target_link_libraries(gma_tests PRIVATE gma Boost::system)
+    target_compile_definitions(gma_tests PRIVATE
+      BOOST_ALL_NO_LIB
+      BOOST_ERROR_CODE_HEADER_ONLY
+      BOOST_SYSTEM_NO_DEPRECATED
+      BOOST_ASIO_NO_DEPRECATED
+      BOOST_BEAST_USE_STD_STRING_VIEW
+    )
+  endif()
+  target_link_libraries(gma_tests PRIVATE Threads::Threads RapidJSON::rapidjson)
   add_test(NAME gma_tests COMMAND gma_tests)
 endif()

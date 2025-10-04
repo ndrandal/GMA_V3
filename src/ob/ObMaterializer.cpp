@@ -1,4 +1,6 @@
 #include "gma/ob/ObMaterializer.hpp"
+#include "gma/ob/ObEngine.hpp"     // if your implementation needs engine types
+#include "gma/ob/ObKey.hpp"        // for ObKey
 #include "gma/ob/ObProvider.hpp"
 #include <limits>
 

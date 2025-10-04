@@ -1,73 +1,45 @@
-#include "gma/server/WebSocketServer.hpp"
+#pragma once
 
-#include <boost/asio.hpp>
+#include <memory>
+#include <atomic>
+#include <mutex>
+#include <unordered_map>
+
+#include <boost/asio/ip/tcp.hpp>
 #include <boost/beast/core/error.hpp>
 
 namespace gma {
 
-using tcp   = boost::asio::ip::tcp;
-namespace beast = boost::beast;
+class ClientSession; // fwd-declare your session type
 
-void WebSocketServer::start() {
-  beast::error_code ec;
+class WebSocketServer {
+public:
+  using tcp   = boost::asio::ip::tcp;
+  using error_code = boost::system::error_code;
 
-  _acceptor.open(_endpoint.protocol(), ec);
-  if (ec) return;
+  WebSocketServer(boost::asio::io_context& ioc, const tcp::endpoint& endpoint)
+  : _ioc(ioc), _endpoint(endpoint), _acceptor(ioc), _stopped(false) {}
 
-  _acceptor.set_option(boost::asio::socket_base::reuse_address(true), ec);
-  if (ec) return;
+  // Factory setter so server can construct sessions from accepted sockets
+  template<typename F>
+  void set_session_factory(F&& f) { session_factory_ = std::forward<F>(f); }
 
-  _acceptor.bind(_endpoint, ec);
-  if (ec) return;
+  void start();
+  void stop();
 
-  _acceptor.listen(boost::asio::socket_base::max_listen_connections, ec);
-  if (ec) return;
+private:
+  void doAccept();
 
-  doAccept();
-}
+  boost::asio::io_context& _ioc;
+  tcp::endpoint            _endpoint;
+  tcp::acceptor            _acceptor;
+  std::atomic<bool>        _stopped;
 
-void WebSocketServer::stop() noexcept {
-  _stopped.store(true);
-  beast::error_code ec;
-  _acceptor.close(ec);
+  std::mutex _sessions_mu;
+  std::unordered_map<void*, std::shared_ptr<ClientSession>> _sessions;
 
-  // Optionally walk sessions and stop them
-  std::vector<std::shared_ptr<ClientSession>> toStop;
-  {
-    std::lock_guard<std::mutex> lk(_sessions_mu);
-    for (auto it = _sessions.begin(); it != _sessions.end(); ++it) {
-      if (auto sp = it->second.lock()) {
-        toStop.emplace_back(std::move(sp));
-      }
-    }
-    _sessions.clear();
-  }
-  for (auto& s : toStop) {
-    try { s->stop(); } catch (...) {}
-  }
-}
-
-void WebSocketServer::doAccept() {
-  if (_stopped.load()) return;
-  _acceptor.async_accept(
-      boost::asio::make_strand(_ioc),
-      [this](beast::error_code ec, tcp::socket socket) {
-        onAccept(ec, std::move(socket));
-      });
-}
-
-void WebSocketServer::onAccept(beast::error_code ec, tcp::socket socket) {
-  if (!_stopped.load() && !ec) {
-    auto session = ClientSession::create(std::move(socket), _ctx, _dispatcher);
-    {
-      std::lock_guard<std::mutex> lk(_sessions_mu);
-      _sessions[session.get()] = session;
-    }
-    session->run();
-  }
-  if (!_stopped.load()) {
-    doAccept();
-  }
-}
+  // function: std::shared_ptr<ClientSession>(tcp::socket&&)
+  std::function<std::shared_ptr<ClientSession>(tcp::socket&&)> session_factory_;
+};
 
 } // namespace gma

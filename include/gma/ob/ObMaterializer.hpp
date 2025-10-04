@@ -1,80 +1,47 @@
 #pragma once
-
-#include <unordered_map>
-#include <vector>
-#include <string>
-#include <memory>
-#include <mutex>
-#include <thread>
-#include <condition_variable>
-#include <chrono>
+#include <cstdint>
 #include <optional>
-#include <functional>
-#include <atomic>
 
-#include "gma/ob/ObSnapshot.hpp"
-#include "gma/ob/ObEngine.hpp"
-#include "gma/ob/ObKey.hpp"
+namespace gma { namespace ob {
 
-namespace gma::ob {
+// ---- Forward declarations of types used here (so we don't drag heavy headers) ----
+struct ObKey;              // defined elsewhere in your ob module
+class  ObEngine;           // order book engine providing snapshots/ticks
 
-struct MaterializeConfig {
-  // Which keys to materialize. If `keysBySymbol` has an entry, that wins; otherwise use defaultKeys.
-  std::vector<std::string>              defaultKeys;
-  std::unordered_map<std::string, std::vector<std::string>> keysBySymbol;
-
-  // Limits for snapshots
-  size_t maxLevelsPer = 20;  // per-order snapshot depth
-  size_t maxLevelsAgg = 20;  // aggregated snapshot depth
-
-  // Periodic coalescing (ms). If 0, materialize immediately when notified.
-  int    intervalMs   = 250;
+// Simple specs/types referenced in your .cpp (names taken from error log)
+struct LevelPx {
+  enum class Side : uint8_t { Bid = 0, Ask = 1 };
+  Side side{Side::Bid};
+  int  level{0};           // 0 = best, 1 = L2, etc.
 };
 
+struct RangePxSpec {
+  // percentage offsets from mid or best (semantics implemented in .cpp)
+  double pct1{0.0};
+  double pct2{0.0};
+};
+
+struct Range {
+  int from{0};             // inclusive
+  int to{0};               // inclusive
+};
+
+// ---- Materializer interface expected by your .cpp ----
 class Materializer {
 public:
-  using WriteFn  = std::function<void(const std::string& symbol, const std::string& key, double value, int64_t tsMs)>;
-  using NotifyFn = std::function<void(const std::string& symbol, const std::string& key)>;
+  explicit Materializer(ObEngine& engine) noexcept : src_(&engine) {}
 
-  Materializer() = default;
-
-  void setSource(ObEngine* engine) { src_ = engine; }
-  void setWrite(WriteFn fn) { write_ = std::move(fn); }
-  void setNotify(NotifyFn fn) { notify_ = std::move(fn); }
-
-  // Start with a config (spawns a thread if intervalMs > 0)
-  void start(const MaterializeConfig& cfg);
-  void stop();
-
-  // On incoming order book update for a symbol, compute all configured keys once.
-  enum class Mode { Per, Agg };
-  void onOrderBookUpdate(const std::string& symbol, Mode mode);
+  // Functions/signatures as used by ObMaterializer.cpp per compiler errors:
+  double levelPx(int uptoLevels, LevelPx spec, const double midHint);
+  double rangePxReduce(int uptoLevels, RangePxSpec spec, const double midHint);
+  double spreadPx(int uptoLevels, const double midHint);
+  double midPx(int uptoLevels, const double fallback);
+  int    imbalanceLevels(int uptoLevels, Range r);
+  double imbalanceBand(int uptoLevels, double pct1, double pct2, const double midHint);
+  ObKey  eval(int uptoLevels, const ObKey& key);
 
 private:
-  // helpers
-  static double levelPx(const ObSnapshot& snap, size_t level, double tick);
-  static double rangePxReduce(const ObSnapshot& snap, std::pair<size_t,size_t> lv, double tick);
-  static double spreadPx(const ObSnapshot& snap, double tick);
-  static double midPx(const ObSnapshot& snap, double tick);
-  static double imbalanceLevels(const ObSnapshot& snap, size_t uptoLevels);
-  static double imbalanceBand(const ObSnapshot& snap, double pct1, double pct2, double tick);
-  static double eval(const ObSnapshot& snap, const ParsedObKey& keySpec);
-
-private:
-  ObEngine* src_{nullptr};
-  WriteFn   write_{};
-  NotifyFn  notify_{};
-  MaterializeConfig cfg_;
-
-  std::atomic<bool> running_{false};
-  std::atomic<bool> stopping_{false};
-  std::thread       thr_;
-  std::mutex        mx_;
-  std::condition_variable cv_;
-  bool              wake_{false};    // set true to force a pass
-
-  struct State { std::chrono::steady_clock::time_point last{}; };
-  std::unordered_map<std::string, State> perState_; // per symbol coalescing
+  ObEngine* src_; // non-owning; engine outlives materializer
 };
 
-} // namespace gma::ob
+}} // namespace gma::ob

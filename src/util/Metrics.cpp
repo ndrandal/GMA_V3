@@ -2,6 +2,7 @@
 #include "gma/util/Logger.hpp"
 #include <sstream>
 #include <chrono>
+#include <thread>
 
 namespace gma::util {
 
@@ -16,6 +17,7 @@ Counter& MetricRegistry::counter(const std::string& name) {
   if (!p) p = std::make_unique<Counter>();
   return *p;
 }
+
 Gauge& MetricRegistry::gauge(const std::string& name) {
   std::lock_guard<std::mutex> lk(mx_);
   auto& p = gauges_[name];
@@ -23,38 +25,41 @@ Gauge& MetricRegistry::gauge(const std::string& name) {
   return *p;
 }
 
-void MetricRegistry::startReporter(int intervalSec) {
+void MetricRegistry::startReporter(unsigned periodMs) {
   stopReporter();
-  stopping_.store(false);
-  thr_ = std::thread([this, intervalSec]{
-    using namespace std::chrono;
-    while (!stopping_.load()) {
-      std::this_thread::sleep_for(std::chrono::seconds(intervalSec));
-      if (stopping_.load()) break;
-      GLOG_INFO("metrics", {{"snapshot", snapshotJson()}});
+  stopping_.store(false, std::memory_order_relaxed);
+  thr_ = std::thread([this, periodMs]{
+    while (!stopping_.load(std::memory_order_relaxed)) {
+      // Optional: push a snapshot to logs
+      // GLOG_INFO("metrics", {{"snapshot", snapshotJson()}});
+      std::this_thread::sleep_for(std::chrono::milliseconds(periodMs));
     }
   });
 }
 
 void MetricRegistry::stopReporter() {
-  stopping_.store(true);
-  if (thr_.joinable()) thr_.join();
+  if (thr_.joinable()) {
+    stopping_.store(true, std::memory_order_relaxed);
+    thr_.join();
+  }
 }
 
 std::string MetricRegistry::snapshotJson() const {
   std::lock_guard<std::mutex> lk(mx_);
   std::ostringstream oss;
-  oss << "{";
+  oss << "{\"counters\":{";
   bool first=true;
   for (auto& kv : counters_) {
     if (!first) oss << ","; first=false;
     oss << "\"" << kv.first << "\":" << kv.second->get();
   }
+  oss << "},\"gauges\":{";
+  first=true;
   for (auto& kv : gauges_) {
     if (!first) oss << ","; first=false;
     oss << "\"" << kv.first << "\":" << kv.second->get();
   }
-  oss << "}";
+  oss << "}}";
   return oss.str();
 }
 

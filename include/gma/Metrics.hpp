@@ -1,82 +1,56 @@
 #pragma once
 #include <atomic>
-#include <cstdint>
-#include <mutex>
 #include <string>
 #include <unordered_map>
+#include <mutex>
+#include <thread>
+#include <memory>
 #include <vector>
 
-namespace gma {
+namespace gma::util {
 
-struct MetricsSnapshot {
-    // global counters
-    uint64_t adds=0, updates=0, deletes=0, trades=0, priorities=0, summaries=0, snapshots=0;
-    uint64_t seqGaps=0, seqResets=0, staleTransitions=0;
-    uint64_t droppedMalformed=0, droppedStale=0, deltasPublished=0;
-
-    struct PerSymbol {
-        std::string symbol;
-        uint64_t deltasPublished=0;
-    };
-    std::vector<PerSymbol> perSymbol;
+struct Counter {
+  std::atomic<uint64_t> v{0};
+  void inc(uint64_t d=1) { v.fetch_add(d, std::memory_order_relaxed); }
+  uint64_t get() const   { return v.load(std::memory_order_relaxed); }
 };
 
-class Metrics {
+struct Gauge {
+  std::atomic<double> v{0.0};
+  void set(double d) { v.store(d, std::memory_order_relaxed); }
+  double get() const { return v.load(std::memory_order_relaxed); }
+};
+
+class MetricRegistry {
 public:
-    // Increments (global)
-    void incAdds()               { adds_.fetch_add(1, std::memory_order_relaxed); }
-    void incUpdates()            { updates_.fetch_add(1, std::memory_order_relaxed); }
-    void incDeletes()            { deletes_.fetch_add(1, std::memory_order_relaxed); }
-    void incTrades()             { trades_.fetch_add(1, std::memory_order_relaxed); }
-    void incPriorities()         { priorities_.fetch_add(1, std::memory_order_relaxed); }
-    void incSummaries()          { summaries_.fetch_add(1, std::memory_order_relaxed); }
-    void incSnapshots()          { snapshots_.fetch_add(1, std::memory_order_relaxed); }
+  static MetricRegistry& instance();
 
-    void incSeqGap()             { seqGaps_.fetch_add(1, std::memory_order_relaxed); }
-    void incSeqReset()           { seqResets_.fetch_add(1, std::memory_order_relaxed); }
-    void incStaleTransition()    { staleTransitions_.fetch_add(1, std::memory_order_relaxed); }
+  Counter& counter(const std::string& name);
+  Gauge&   gauge(const std::string& name);
 
-    void incDroppedMalformed()   { droppedMalformed_.fetch_add(1, std::memory_order_relaxed); }
-    void incDroppedStale()       { droppedStale_.fetch_add(1, std::memory_order_relaxed); }
+  // background reporter (optional; no-ops unless started)
+  void startReporter(unsigned periodMs);
+  void stopReporter();
 
-    // Per-symbol delta publication
-    void incDeltasPublished(const std::string& symbol) {
-        deltasPublished_.fetch_add(1, std::memory_order_relaxed);
-        std::lock_guard<std::mutex> lk(mx_);
-        perSymDeltas_[symbol] += 1;
-    }
-
-    MetricsSnapshot snapshot() const {
-        MetricsSnapshot s;
-        s.adds             = adds_.load(std::memory_order_relaxed);
-        s.updates          = updates_.load(std::memory_order_relaxed);
-        s.deletes          = deletes_.load(std::memory_order_relaxed);
-        s.trades           = trades_.load(std::memory_order_relaxed);
-        s.priorities       = priorities_.load(std::memory_order_relaxed);
-        s.summaries        = summaries_.load(std::memory_order_relaxed);
-        s.snapshots        = snapshots_.load(std::memory_order_relaxed);
-        s.seqGaps          = seqGaps_.load(std::memory_order_relaxed);
-        s.seqResets        = seqResets_.load(std::memory_order_relaxed);
-        s.staleTransitions = staleTransitions_.load(std::memory_order_relaxed);
-        s.droppedMalformed = droppedMalformed_.load(std::memory_order_relaxed);
-        s.droppedStale     = droppedStale_.load(std::memory_order_relaxed);
-        s.deltasPublished  = deltasPublished_.load(std::memory_order_relaxed);
-
-        std::lock_guard<std::mutex> lk(mx_);
-        s.perSymbol.reserve(perSymDeltas_.size());
-        for (const auto& kv : perSymDeltas_) s.perSymbol.push_back({kv.first, kv.second});
-        return s;
-    }
+  // simple JSON snapshot: {"counters":{k:v,...},"gauges":{k:v,...}}
+  std::string snapshotJson() const;
 
 private:
-    // global counters
-    std::atomic<uint64_t> adds_{0}, updates_{0}, deletes_{0}, trades_{0}, priorities_{0}, summaries_{0}, snapshots_{0};
-    std::atomic<uint64_t> seqGaps_{0}, seqResets_{0}, staleTransitions_{0};
-    std::atomic<uint64_t> droppedMalformed_{0}, droppedStale_{0}, deltasPublished_{0};
+  MetricRegistry() = default;
+  MetricRegistry(const MetricRegistry&) = delete;
+  MetricRegistry& operator=(const MetricRegistry&) = delete;
 
-    // per-symbol
-    mutable std::mutex mx_;
-    std::unordered_map<std::string, uint64_t> perSymDeltas_;
+  mutable std::mutex mx_;
+  std::unordered_map<std::string, std::unique_ptr<Counter>> counters_;
+  std::unordered_map<std::string, std::unique_ptr<Gauge>>   gauges_;
+
+  std::atomic<bool> stopping_{false};
+  std::thread       thr_;
 };
 
-} // namespace gma
+} // namespace gma::util
+
+// Shorthand macros
+#define METRIC_INC(name, d) ::gma::util::MetricRegistry::instance().counter(name).inc(d)
+#define METRIC_HIT(name)    ::gma::util::MetricRegistry::instance().counter(name).inc(1)
+#define METRIC_SET(name, v) ::gma::util::MetricRegistry::instance().gauge(name).set(v)
