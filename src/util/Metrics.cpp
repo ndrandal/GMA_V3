@@ -1,66 +1,74 @@
 #include "gma/util/Metrics.hpp"
-#include "gma/util/Logger.hpp"
-#include <sstream>
+
 #include <chrono>
-#include <thread>
+#include <iostream>
 
-namespace gma::util {
+namespace gma {
+namespace util {
 
-MetricRegistry& MetricRegistry::instance() {
-  static MetricRegistry M;
-  return M;
-}
-
-Counter& MetricRegistry::counter(const std::string& name) {
-  std::lock_guard<std::mutex> lk(mx_);
-  auto& p = counters_[name];
-  if (!p) p = std::make_unique<Counter>();
-  return *p;
-}
-
-Gauge& MetricRegistry::gauge(const std::string& name) {
-  std::lock_guard<std::mutex> lk(mx_);
-  auto& p = gauges_[name];
-  if (!p) p = std::make_unique<Gauge>();
-  return *p;
-}
-
-void MetricRegistry::startReporter(unsigned periodMs) {
+MetricRegistry::~MetricRegistry() {
   stopReporter();
-  stopping_.store(false, std::memory_order_relaxed);
-  thr_ = std::thread([this, periodMs]{
-    while (!stopping_.load(std::memory_order_relaxed)) {
-      // Optional: push a snapshot to logs
-      // GLOG_INFO("metrics", {{"snapshot", snapshotJson()}});
-      std::this_thread::sleep_for(std::chrono::milliseconds(periodMs));
-    }
+}
+
+void MetricRegistry::startReporter(unsigned int intervalSeconds) {
+  // If already running, restart with new interval.
+  stopReporter();
+
+  running_.store(true, std::memory_order_release);
+  thr_ = std::thread([this, intervalSeconds]{
+    reporterLoop(intervalSeconds);
   });
 }
 
 void MetricRegistry::stopReporter() {
-  if (thr_.joinable()) {
-    stopping_.store(true, std::memory_order_relaxed);
-    thr_.join();
+  bool expected = true;
+  if (running_.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
+    // We flipped from true->false and need to join.
+    if (thr_.joinable()) thr_.join();
+  } else {
+    // Already stopped; still join if thread exists to be safe.
+    if (thr_.joinable()) thr_.join();
   }
 }
 
-std::string MetricRegistry::snapshotJson() const {
-  std::lock_guard<std::mutex> lk(mx_);
-  std::ostringstream oss;
-  oss << "{\"counters\":{";
-  bool first=true;
-  for (auto& kv : counters_) {
-    if (!first) oss << ","; first=false;
-    oss << "\"" << kv.first << "\":" << kv.second->get();
-  }
-  oss << "},\"gauges\":{";
-  first=true;
-  for (auto& kv : gauges_) {
-    if (!first) oss << ","; first=false;
-    oss << "\"" << kv.first << "\":" << kv.second->get();
-  }
-  oss << "}}";
-  return oss.str();
+void MetricRegistry::increment(const std::string& name, double v) {
+  std::lock_guard<std::mutex> lk(mu_);
+  counters_[name] += v;
 }
 
-} // namespace gma::util
+void MetricRegistry::setGauge(const std::string& name, double v) {
+  std::lock_guard<std::mutex> lk(mu_);
+  gauges_[name] = v;
+}
+
+void MetricRegistry::reporterLoop(unsigned int intervalSeconds) {
+  using namespace std::chrono;
+  auto sleep_dur = seconds(intervalSeconds > 0 ? intervalSeconds : 10);
+
+  while (running_.load(std::memory_order_acquire)) {
+    std::this_thread::sleep_for(sleep_dur);
+
+    // Snapshot under lock
+    std::unordered_map<std::string, double> c;
+    std::unordered_map<std::string, double> g;
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      c = counters_;
+      g = gauges_;
+      // Optionally zero the counters after emission
+      counters_.clear();
+    }
+
+    // Emit (stdout for now; plug your logger here)
+    if (!c.empty() || !g.empty()) {
+      std::cout << "[metrics] counters:";
+      for (auto& kv : c) std::cout << " " << kv.first << "=" << kv.second;
+      std::cout << " | gauges:";
+      for (auto& kv : g) std::cout << " " << kv.first << "=" << kv.second;
+      std::cout << std::endl;
+    }
+  }
+}
+
+} // namespace util
+} // namespace gma

@@ -135,6 +135,11 @@ else()
   endif()
 endif()
 
+if (WIN32)
+  add_definitions(-D_WIN32_WINNT=0x0A00 -DNOMINMAX)
+endif()
+
+
 # App executable (if src/main.cpp exists)
 if (EXISTS "${MAIN_SRC}")
   add_executable(gma_server "${MAIN_SRC}")

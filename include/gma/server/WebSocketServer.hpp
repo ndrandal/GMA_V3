@@ -1,45 +1,67 @@
 #pragma once
 
 #include <memory>
-#include <atomic>
 #include <mutex>
 #include <unordered_map>
 
 #include <boost/asio/ip/tcp.hpp>
-#include <boost/beast/core/error.hpp>
 
 namespace gma {
 
-class ClientSession; // fwd-declare your session type
+// Forward declarations to keep this header stable
+class ExecutionContext;
+class MarketDispatcher;
 
+class ClientSession; // forward-declared; defined in gma/server/ClientSession.hpp
+
+/// Simple websocket server wrapper that accepts connections and
+/// delegates per-connection work to ClientSession.
 class WebSocketServer {
 public:
-  using tcp   = boost::asio::ip::tcp;
-  using error_code = boost::system::error_code;
+  using tcp = boost::asio::ip::tcp;
 
-  WebSocketServer(boost::asio::io_context& ioc, const tcp::endpoint& endpoint)
-  : _ioc(ioc), _endpoint(endpoint), _acceptor(ioc), _stopped(false) {}
+  /// Construct a server bound to `port` on all interfaces.
+  /// - ioc: external IO context that the owner runs
+  /// - exec: optional execution context (can be nullptr)
+  /// - dispatcher: optional pointer passed to sessions (can be nullptr)
+  WebSocketServer(boost::asio::io_context& ioc,
+                  ExecutionContext* exec,
+                  MarketDispatcher* dispatcher,
+                  unsigned short port);
 
-  // Factory setter so server can construct sessions from accepted sockets
-  template<typename F>
-  void set_session_factory(F&& f) { session_factory_ = std::forward<F>(f); }
+  WebSocketServer(const WebSocketServer&) = delete;
+  WebSocketServer& operator=(const WebSocketServer&) = delete;
 
-  void start();
-  void stop();
+  /// Start accepting connections.
+  void run();
+
+  /// Stop accepting new connections (does not close existing ones).
+  void stopAccept();
+
+  /// Close all active sessions.
+  void closeAll();
+
+  /// Called by a session to register itself; returns a numeric id.
+  std::size_t registerSession(const std::shared_ptr<ClientSession>& sp);
+
+  /// Called by a session to unregister itself by id.
+  void unregisterSession(std::size_t id);
 
 private:
   void doAccept();
+  void onAccept(boost::system::error_code ec, tcp::socket socket);
 
-  boost::asio::io_context& _ioc;
-  tcp::endpoint            _endpoint;
-  tcp::acceptor            _acceptor;
-  std::atomic<bool>        _stopped;
+private:
+  boost::asio::io_context& ioc_;
+  tcp::acceptor            acceptor_;
+  bool                     accepting_{false};
 
-  std::mutex _sessions_mu;
-  std::unordered_map<void*, std::shared_ptr<ClientSession>> _sessions;
+  ExecutionContext*        exec_;        // not owned
+  MarketDispatcher*        dispatcher_;  // not owned
 
-  // function: std::shared_ptr<ClientSession>(tcp::socket&&)
-  std::function<std::shared_ptr<ClientSession>(tcp::socket&&)> session_factory_;
+  std::mutex                                                   sessions_mu_;
+  std::unordered_map<std::size_t, std::weak_ptr<ClientSession>> sessions_;
+  std::size_t                                                 next_session_id_{1};
 };
 
 } // namespace gma

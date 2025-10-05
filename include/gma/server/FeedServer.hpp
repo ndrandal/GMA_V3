@@ -1,35 +1,47 @@
 #pragma once
-#include <memory>
-#include <atomic>
-#include <thread>
-#include <functional>
 
-#include <boost/asio/io_context.hpp>
+#include <memory>
+#include <mutex>
+#include <unordered_set>
+
+#include <boost/asio/ip/tcp.hpp>
 
 namespace gma {
 
-class WebSocketServer; // fwd-declare to avoid heavy includes
+class MarketDispatcher;   // fwd-declare to keep header light
 
+/// Minimal TCP feed server that accepts producer connections and forwards
+/// incoming messages to a MarketDispatcher. The actual deserialization is
+/// done inside the session implementation (cpp), not exposed here.
 class FeedServer {
 public:
-  using OnStart = std::function<void()>;
-  using OnStop  = std::function<void()>;
+  using tcp = boost::asio::ip::tcp;
 
-  explicit FeedServer(std::shared_ptr<WebSocketServer> ws)
-  : ws_(std::move(ws)) {}
+  FeedServer(boost::asio::io_context& ioc,
+             MarketDispatcher* dispatcher,
+             unsigned short port);
 
-  // Start the IO context + WS server on a background thread.
-  void start(OnStart onStart = nullptr);
+  FeedServer(const FeedServer&) = delete;
+  FeedServer& operator=(const FeedServer&) = delete;
 
-  // Stop and join.
-  void stop(OnStop onStop = nullptr);
-
-  bool running() const { return running_.load(std::memory_order_relaxed); }
+  void run();
+  void stop();
 
 private:
-  std::shared_ptr<WebSocketServer> ws_;
-  std::atomic<bool> running_{false};
-  std::thread       thr_;
+  class FeedSession; // pimpl session
+
+  void doAccept();
+  void onAccept(boost::system::error_code ec, tcp::socket socket);
+
+private:
+  boost::asio::io_context& ioc_;
+  tcp::acceptor            acceptor_;
+  bool                     accepting_{false};
+
+  MarketDispatcher*        dispatcher_; // not owned
+
+  std::mutex                                  mu_;
+  std::unordered_set<std::shared_ptr<FeedSession>> sessions_;
 };
 
 } // namespace gma

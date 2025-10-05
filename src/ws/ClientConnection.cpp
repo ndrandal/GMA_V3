@@ -1,250 +1,232 @@
 #include "gma/ws/ClientConnection.hpp"
-#include "gma/ws/WSResponder.hpp"
-#include "gma/ws/JsonSchema.hpp"
+#include <boost/beast/version.hpp>
+#include <chrono>
+#include <iostream>
 
-// RapidJSON
-#include <rapidjson/document.h>
-#include <rapidjson/error/en.h>
+namespace gma { namespace ws {
 
-#include "INode.hpp"
-// Include your nodes; adjust include paths to your repo:
-#include "nodes/AtomicAccessor.hpp"
-#include "nodes/Interval.hpp"
-#include "nodes/Worker.hpp"
-#include "nodes/Listener.hpp"
-#include "util/Metrics.hpp"
-// If you have a TreeBuilder, include it and use it in buildPipelineFromRequest.
+using namespace std::chrono_literals;
 
-namespace gma::ws {
-
-ClientConnection::ClientConnection(std::string sessionId,
-                                   std::shared_ptr<MarketDispatcher> dispatcher,
-                                   std::shared_ptr<AtomicStore> store,
-                                   SendFn sendText)
-: sessionId_(std::move(sessionId)),
-  dispatcher_(std::move(dispatcher)),
-  store_(std::move(store)),
-  sendText_(std::move(sendText)) {}
-
-void ClientConnection::onClose() {
-  registry_.removeAll();
-}
-
-// ---------- Message entry
-
-void ClientConnection::onTextMessage(const std::string& jsonText){
-  rapidjson::Document d;
-  if (d.Parse(jsonText.c_str()).HasParseError()) {
-    // can't even read "type" safely
-    sendText_(std::string("{\"type\":\"error\",\"message\":\"bad JSON: ")
-              + rapidjson::GetParseError_En(d.GetParseError()) + "\"}");
-    return;
-  }
-  if (!d.HasMember("type") || !d["type"].IsString()) {
-    sendText_("{\"type\":\"error\",\"message\":\"missing 'type'\"}");
-    return;
-  }
-  const std::string type = d["type"].GetString();
-  const std::string clientId = d.HasMember("clientId") && d["clientId"].IsString()
-                             ? d["clientId"].GetString() : sessionId_;
-
-  if (type == "subscribe") {
-    handleSubscribe(clientId, jsonText);
-    return;
-  }
-  if (type == "cancel") {
-    handleCancel(clientId, jsonText);
-    return;
-  }
-  if (type == "status") {
-    auto snap = gma::util::MetricRegistry::instance().snapshotJson();
-    sendText_(std::string("{\"type\":\"status\",\"metrics\":") + snap + "}");
-    return;
-    }
-  // Optional: ping
-  if (type == "ping") {
-    sendText_(R"({"type":"pong"})");
-    return;
-  }
-  sendText_(R"({"type":"error","message":"unknown type"})");
-}
-
-// ---------- subscribe
-
-void ClientConnection::handleSubscribe(const std::string& clientId, const std::string& jsonText){
-  rapidjson::Document d; d.Parse(jsonText.c_str());
-  if (!d.HasMember("requests") || !d["requests"].IsArray()) {
-    sendText_(R"({"type":"error","message":"subscribe missing 'requests'"})");
-    return;
-  }
-  const auto& arr = d["requests"];
-  for (auto& req : arr.GetArray()) {
-    if (!req.HasMember("id") || !req["id"].IsString()
-     || !req.HasMember("symbol") || !req["symbol"].IsString()) {
-      sendText_(R"({"type":"error","message":"request missing 'id' or 'symbol'"})");
-      continue;
-    }
-    std::string rid    = req["id"].GetString();
-    std::string symbol = req["symbol"].GetString();
-
-    const std::string* field = nullptr;
-    int pollMs = 0; const int* pollPtr = nullptr;
-
-    if (req.HasMember("field") && req["field"].IsString()) {
-      field = new std::string(req["field"].GetString());
-    }
-    if (req.HasMember("pollMs") && req["pollMs"].IsInt()) {
-      pollMs = req["pollMs"].GetInt(); pollPtr = &pollMs;
-    }
-
-    const void* pipelineJson = req.HasMember("pipeline") ? &req["pipeline"] : nullptr;
-    const void* operationsJson = req.HasMember("operations") ? &req["operations"] : nullptr;
-
-    try {
-      auto root = buildPipelineFromRequest(rid, symbol, field, pollPtr, pipelineJson, operationsJson);
-      registry_.add(rid, root);
-      // Optionally ack
-      std::string ack = std::string("{\"type\":\"ack\",\"id\":\"") + rid + "\"}";
-      sendText_(ack);
-    } catch (const std::exception& ex) {
-      sendError(rid, ex.what());
-    } catch (...) {
-      sendError(rid, "internal error");
-    }
-    if (field) delete field;
-  }
-}
-
-// ---------- cancel
-
-void ClientConnection::handleCancel(const std::string& clientId, const std::string& jsonText){
-  rapidjson::Document d; d.Parse(jsonText.c_str());
-  if (!d.HasMember("ids") || !d["ids"].IsArray()) {
-    sendText_(R"({"type":"error","message":"cancel missing 'ids'"})");
-    return;
-  }
-  for (auto& idv : d["ids"].GetArray()) {
-    if (!idv.IsString()) continue;
-    std::string rid = idv.GetString();
-    registry_.remove(rid);
-    std::string ok = std::string("{\"type\":\"canceled\",\"id\":\"")+rid+"\"}";
-    sendText_(ok);
-  }
-}
-
-// ---------- helpers
-
-void ClientConnection::sendError(const std::string& reqId, const std::string& message){
-  std::string j = std::string("{\"type\":\"error\",\"id\":\"") + reqId + "\",\"message\":\"" + message + "\"}";
-  sendText_(j);
-}
-
-// --------------- pipeline builder ---------------
-
-// NOTE: In your repo, if you have a TreeBuilder that can consume `pipeline` JSON, use it here.
-// Below is a minimal builder that supports:
-//  - Direct AtomicAccessor on a field (px.* or ob.*), optionally polled by Interval
-//  - Simple "operations" chain: e.g., [{type:"lastPrice"}, {type:"mean", "period":10}]
-std::shared_ptr<INode> ClientConnection::buildPipelineFromRequest(
-    const std::string& reqId,
-    const std::string& symbol,
-    const std::string* fieldOrNull,
-    const int* pollMsOrNull,
-    const void* pipelineJsonOrNull,
-    const void* operationsJsonOrNull)
+ClientConnection::ClientConnection(IoContext& ioc,
+                                   std::string host,
+                                   unsigned short port,
+                                   std::string target,
+                                   OnMessage onMessage,
+                                   OnOpen onOpen,
+                                   OnError onError)
+  : ioc_(ioc)
+  , strand_(boost::asio::make_strand(ioc))
+  , resolver_(strand_)
+  , ws_(strand_)
+  , host_(std::move(host))
+  , service_(std::to_string(port))
+  , target_(std::move(target))
+  , onOpen_(std::move(onOpen))
+  , onMessage_(std::move(onMessage))
+  , onError_(std::move(onError))
 {
-  using gma::ws::WSResponder;
+}
 
-  // Always end with a WSResponder that tags the request id:
-  auto responder = std::make_shared<WSResponder>(reqId, sendText_);
+ClientConnection::ClientConnection(IoContext& ioc,
+                                   std::string host,
+                                   std::string service_or_port,
+                                   std::string target,
+                                   OnMessage onMessage,
+                                   OnOpen onOpen,
+                                   OnError onError)
+  : ioc_(ioc)
+  , strand_(boost::asio::make_strand(ioc))
+  , resolver_(strand_)
+  , ws_(strand_)
+  , host_(std::move(host))
+  , service_(std::move(service_or_port))
+  , target_(std::move(target))
+  , onOpen_(std::move(onOpen))
+  , onMessage_(std::move(onMessage))
+  , onError_(std::move(onError))
+{
+}
 
-  // 1) If explicit field is provided, create AtomicAccessor -> Responder
-  if (fieldOrNull) {
-    auto accessor = std::make_shared<AtomicAccessor>(symbol, *fieldOrNull); // adjust ctor to your repo
-    accessor->setDownstream(responder);
+bool ClientConnection::isOpen() const {
+  return ws_.is_open();
+}
 
-    if (pollMsOrNull && *pollMsOrNull > 0) {
-      auto interval = std::make_shared<Interval>(symbol, *pollMsOrNull); // adjust ctor in your repo
-      interval->setDownstream(accessor);
-      return interval;
+void ClientConnection::connect() {
+  closing_ = false;
+
+  // Resolve host:service
+  resolver_.async_resolve(host_, service_,
+    boost::asio::bind_executor(
+      strand_,
+      [self = shared_from_this()](ErrorCode ec, Tcp::resolver::results_type results) {
+        self->onResolve(ec, std::move(results));
+      }
+    )
+  );
+}
+
+void ClientConnection::onResolve(ErrorCode ec, Tcp::resolver::results_type results) {
+  if (ec) return fail(ec, "resolve");
+
+  // Set a reasonable timeout on the tcp layer
+  boost::beast::get_lowest_layer(ws_).expires_after(30s);
+
+  // Connect to the first endpoint that works
+  boost::beast::get_lowest_layer(ws_).async_connect(
+    results,
+    boost::asio::bind_executor(
+      strand_,
+      [self = shared_from_this()](ErrorCode ec2, Tcp::resolver::results_type::endpoint_type ep) {
+        self->onConnect(ec2, ep);
+      }
+    )
+  );
+}
+
+void ClientConnection::onConnect(ErrorCode ec, Tcp::resolver::results_type::endpoint_type) {
+  if (ec) return fail(ec, "connect");
+
+  // Turn off the timeout on the tcp layer; the websocket stream has its own timeouts.
+  boost::beast::get_lowest_layer(ws_).expires_never();
+
+  // Decorate request (User-Agent / Host will be set by handshake)
+  ws_.set_option(boost::beast::websocket::stream_base::decorator(
+    [](boost::beast::websocket::request_type& req){
+      req.set(boost::beast::http::field::user_agent, "gma-ws-client");
+    }));
+
+  // We expect to exchange text frames by default
+  ws_.text(true);
+
+  // Perform the websocket handshake
+  ws_.async_handshake(host_, target_,
+    boost::asio::bind_executor(
+      strand_,
+      [self = shared_from_this()](ErrorCode ec2){
+        self->onHandshake(ec2);
+      }
+    )
+  );
+}
+
+void ClientConnection::onHandshake(ErrorCode ec) {
+  if (ec) return fail(ec, "handshake");
+
+  // Connected
+  if (onOpen_) onOpen_();
+
+  // Start reading
+  doRead();
+
+  // If anything was enqueued before open, kick writes
+  if (!outbox_.empty() && !writing_) {
+    writing_ = true;
+    doWrite();
+  }
+}
+
+void ClientConnection::doRead() {
+  ws_.async_read(
+    buffer_,
+    boost::asio::bind_executor(
+      strand_,
+      [self = shared_from_this()](ErrorCode ec, std::size_t bytes){
+        self->onRead(ec, bytes);
+      }
+    )
+  );
+}
+
+void ClientConnection::onRead(ErrorCode ec, std::size_t) {
+  if (ec) {
+    if (ec == boost::beast::websocket::error::closed) {
+      if (onClose_) onClose_();
+      return;
     }
-    // Push-mode: materializers/dispatchers will notify accessor/responder automatically
-    return accessor;
+    return fail(ec, "read");
   }
 
-  // 2) If 'operations' array: build a small chain. Example:
-  //   [{"type":"lastPrice"}, {"type":"mean","period":10}]
-  if (operationsJsonOrNull) {
-    const auto& ops = *reinterpret_cast<const rapidjson::Value*>(operationsJsonOrNull);
-    if (!ops.IsArray() || ops.Empty()) throw std::runtime_error("'operations' must be a non-empty array");
+  // Deliver message
+  if (onMessage_) {
+    auto text = boost::beast::buffers_to_string(buffer_.cdata());
+    onMessage_(text);
+  }
+  buffer_.consume(buffer_.size());
 
-    // Source: either a Listener on a base series, or an AtomicAccessor to a named atomic.
-    std::shared_ptr<INode> head;
+  // Continue reading
+  doRead();
+}
 
-    // For simplicity: if first op is "lastPrice" -> Listener on symbol:price
-    const auto& op0 = ops[0];
-    if (!op0.HasMember("type") || !op0["type"].IsString())
-      throw std::runtime_error("operation missing 'type'");
-    const std::string t0 = op0["type"].GetString();
-
-    if (t0 == "lastPrice") {
-      head = std::make_shared<Listener>(dispatcher_, symbol, "px.last"); // use your field name
-    } else {
-      // Treat as named atomic, e.g., "px.sma.10" or "ob.spread"
-      head = std::make_shared<AtomicAccessor>(symbol, t0);
-    }
-
-    std::shared_ptr<INode> cur = head;
-    // Remaining ops become Workers (N=1) or other nodes
-    for (rapidjson::SizeType i=1; i<ops.Size(); ++i) {
-      const auto& op = ops[i];
-      if (!op.HasMember("type") || !op["type"].IsString())
-        throw std::runtime_error("operation missing 'type'");
-      const std::string typ = op["type"].GetString();
-
-      if (typ == "mean") {
-        int n = op.HasMember("period") && op["period"].IsInt()? op["period"].GetInt() : 10;
-        // Build a Worker that just forwards the mean(n) of upstream values.
-        // Since T3 already writes "px.sma.n", prefer using AtomicAccessor for determinism:
-        auto acc = std::make_shared<AtomicAccessor>(symbol, std::string("px.sma.")+std::to_string(n));
-        cur->setDownstream(acc);
-        cur = acc;
-      } else if (typ == "ema") {
-        int n = op.HasMember("period") && op["period"].IsInt()? op["period"].GetInt() : 20;
-        auto acc = std::make_shared<AtomicAccessor>(symbol, std::string("px.ema.")+std::to_string(n));
-        cur->setDownstream(acc);
-        cur = acc;
-      } else if (typ == "vwap") {
-        int n = op.HasMember("period") && op["period"].IsInt()? op["period"].GetInt() : 10;
-        auto acc = std::make_shared<AtomicAccessor>(symbol, std::string("px.vwap.")+std::to_string(n));
-        cur->setDownstream(acc);
-        cur = acc;
-      } else if (typ == "ob.spread" || typ.rfind("ob.",0)==0) {
-        auto acc = std::make_shared<AtomicAccessor>(symbol, typ);
-        cur->setDownstream(acc);
-        cur = acc;
-      } else {
-        throw std::runtime_error("unsupported op: "+typ);
+void ClientConnection::send(std::string text) {
+  // All socket ops must run on the strand
+  boost::asio::post(
+    strand_,
+    [self = shared_from_this(), msg = std::move(text)]() mutable {
+      self->outbox_.emplace_back(std::move(msg));
+      if (!self->writing_) {
+        self->writing_ = true;
+        self->doWrite();
       }
     }
-
-    cur->setDownstream(responder);
-    // Optional polling:
-    if (pollMsOrNull && *pollMsOrNull > 0) {
-      auto interval = std::make_shared<Interval>(symbol, *pollMsOrNull);
-      interval->setDownstream(head);
-      return interval;
-    }
-    return head;
-  }
-
-  // 3) If 'pipeline' object is present and you have TreeBuilder:
-  if (pipelineJsonOrNull) {
-    // Example (pseudo): auto root = TreeBuilder::build(symbol, *(rapidjson::Value*)pipelineJsonOrNull, responder);
-    // return root;
-  }
-
-  throw std::runtime_error("request must include either 'field' or 'operations' or 'pipeline'");
+  );
 }
 
-} // namespace gma::ws
+void ClientConnection::doWrite() {
+  if (outbox_.empty()) {
+    writing_ = false;
+    return;
+  }
+
+  // Ensure text frame mode
+  ws_.text(true);
+
+  ws_.async_write(
+    boost::asio::buffer(outbox_.front()),
+    boost::asio::bind_executor(
+      strand_,
+      [self = shared_from_this()](ErrorCode ec, std::size_t bytes){
+        self->onWrite(ec, bytes);
+      }
+    )
+  );
+}
+
+void ClientConnection::onWrite(ErrorCode ec, std::size_t) {
+  if (ec) return fail(ec, "write");
+
+  outbox_.pop_front();
+  if (!outbox_.empty()) {
+    doWrite();
+  } else {
+    writing_ = false;
+  }
+}
+
+void ClientConnection::close() {
+  boost::asio::post(
+    strand_,
+    [self = shared_from_this()](){
+      if (self->closing_ || !self->ws_.is_open())
+        return;
+
+      self->closing_ = true;
+      self->ws_.async_close(
+        boost::beast::websocket::close_code::normal,
+        boost::asio::bind_executor(
+          self->strand_,
+          [self](ErrorCode ec){
+            if (ec) self->fail(ec, "close");
+            if (self->onClose_) self->onClose_();
+          }
+        )
+      );
+    }
+  );
+}
+
+void ClientConnection::fail(ErrorCode ec, std::string_view where) {
+  if (onError_) onError_(ec, where);
+  else std::cerr << "[ClientConnection] " << where << ": " << ec.message() << "\n";
+}
+
+}} // namespace gma::ws

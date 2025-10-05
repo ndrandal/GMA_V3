@@ -1,38 +1,54 @@
 #pragma once
+
 #include <memory>
 #include <string>
+#include <vector>
+#include <functional>
+#include <unordered_map>
+#include <span>
+#include <stdexcept>
 
-namespace rapidjson { class Value; }
+// IMPORTANT: never forward-declare rapidjson::Value — include the header.
+#include <rapidjson/document.h>
 
 namespace gma {
-class INode;
-class AtomicStore;
-class ThreadPool;
-class MarketDispatcher;
-}
 
-namespace gma::tree {
+// Simplify first: a scalar evaluation type.
+// If you need richer payloads later, switch to std::variant<>.
+using ArgType = double;
 
+struct INode {
+  virtual ~INode() = default;
+
+  // Evaluate node; by default we just evaluate children and feed to our op.
+  // If your graph has external inputs, you can extend this signature later.
+  virtual ArgType eval() = 0;
+};
+
+namespace tree {
+
+// Function signature each op implements: f(children_values...)
+using Span      = std::span<const ArgType>;
+using OpFunc    = std::function<ArgType(Span)>;
+
+// Dependency bundle the builder needs (op registry etc.)
 struct Deps {
-  gma::AtomicStore*      store{nullptr};
-  gma::ThreadPool*       pool{nullptr};
-  gma::MarketDispatcher* dispatcher{nullptr};
+  std::unordered_map<std::string, OpFunc> ops;
 };
 
-struct BuiltChain {
-  std::shared_ptr<gma::INode> head;     // first node (Listener)
-  std::shared_ptr<gma::INode> terminal; // final node (Responder)
-};
+// Build a full tree from a JSON object spec { "op": "...", "args": [...] }.
+// Returns the root node.
+std::shared_ptr<INode> buildTree(const rapidjson::Value& spec, const Deps& deps);
 
-// Listener(symbol, field) -> terminal
-BuiltChain buildSimple(const std::string& symbol,
-                       const std::string& field,
-                       const Deps& deps,
-                       std::shared_ptr<gma::INode> terminal);
+// Build a single node, optionally attaching to a parent (parent is not used by
+// this minimal implementation; kept to satisfy your existing signature).
+std::shared_ptr<INode> buildOne(const rapidjson::Value& spec,
+                                const std::string&      name,
+                                const Deps&             deps,
+                                std::shared_ptr<INode>  parent = nullptr);
 
-// Build from requestJson containing "symbol" and "field"
-BuiltChain buildForRequest(const rapidjson::Value& requestJson,
-                           const Deps& deps,
-                           std::shared_ptr<gma::INode> terminal);
+// Provide a default op registry (add, sub, mul, div, min, max, const, sum, mean).
+Deps defaultDeps();
 
-} // namespace gma::tree
+} // namespace tree
+} // namespace gma

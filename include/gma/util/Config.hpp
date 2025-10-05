@@ -1,43 +1,33 @@
 #pragma once
+
 #include <string>
-#include <vector>
-#include <optional>
+#include <cstdint>
 
-namespace gma::util {
+namespace gma {
+namespace util {
 
-struct Config {
-  // Core
-  int   wsPort              = 9002;
-  int   threadPoolSize      = 8;
-  int   listenerQueueCap    = 1024;
+class Config {
+public:
+  // Construct with sensible defaults.
+  Config() = default;
 
-  // Logging
-  std::string logLevel      = "info";   // trace|debug|info|warn|error
-  std::string logFormat     = "json";   // json|text
-  std::string logFile;                  // "" => stdout
+  // Load from a simple "key=value" file (unknown keys ignored).
+  // Returns true if file read successfully (even if some keys are unknown).
+  bool loadFromFile(const std::string& path);
 
-  // Metrics
-  bool  metricsEnabled      = true;
-  int   metricsIntervalSec  = 10;
+  // --- Public fields (referenced elsewhere in your code) ---
+  // TA params (now actually members so those C2039 errors go away)
+  int    taMACD_fast  = 12;   // fast EMA period
+  int    taMACD_slow  = 26;   // slow EMA period
+  int    taBBands_n   = 20;   // lookback
+  double taBBands_stdK = 2.0; // width in standard deviations
 
-  // TA (from T3) — optional overrides
-  int   taHistoryMax        = 4096;
-  std::vector<int> taSMA    = {5,10,20,50};
-  std::vector<int> taEMA    = {10,20};
-  std::vector<int> taVWAP   = {10,50};
-  std::vector<int> taMED    = {5,21};
-  std::vector<int> taMIN    = {10};
-  std::vector<int> taMAX    = {10};
-  std::vector<int> taSTD    = {20};
-  int   taRSI               = 14;
+  // Add any other config knobs you need here…
 
-  static Config& get();                          // singleton
-  static void   loadFromEnv(Config& out);
-  static bool   loadFromFile(Config& out, const std::string& path, std::string* err = nullptr);
-
-  // Utility
-  static std::optional<std::string> env(const char* name);
-  static int  envInt(const char* name, int def);
+private:
+  static bool parseLineKV(const std::string& line, std::string& k, std::string& v);
+  static std::string trim(const std::string& s);
 };
 
-} // namespace gma::util
+} // namespace util
+} // namespace gma

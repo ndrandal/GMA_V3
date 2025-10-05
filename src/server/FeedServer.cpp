@@ -1,113 +1,165 @@
-// src/server/FeedServer.cpp
 #include "gma/server/FeedServer.hpp"
 
+#include <boost/asio/strand.hpp>
+#include <boost/asio/buffer.hpp>
 #include <boost/beast/core.hpp>
-#include <boost/beast/websocket.hpp>
-#include <rapidjson/document.h>
-#include <iostream>
 
-#include "gma/server/WebSocketServer.hpp" // if needed by implementation
-#include <boost/asio/io_context.hpp>
+#include <deque>
+#include <utility>
 
+// Project headers (adjust paths if needed)
+#include "gma/MarketDispatcher.hpp"  // <-- adjust if your header lives elsewhere
+
+namespace gma {
 
 using tcp = boost::asio::ip::tcp;
-namespace websocket = boost::beast::websocket;
 
-namespace server {
-
-//
-// --- FeedSession -------------------------------------------------------------
-//
-class FeedSession : public std::enable_shared_from_this<FeedSession> {
+// ---------------------- FeedSession ----------------------
+class FeedServer::FeedSession : public std::enable_shared_from_this<FeedSession> {
 public:
-    FeedSession(tcp::socket socket, gma::MarketDispatcher& dispatcher)
-      : _ws(std::move(socket))
-      , _dispatcher(dispatcher)
-    {}
+  FeedSession(tcp::socket socket,
+              MarketDispatcher* dispatcher,
+              FeedServer* owner)
+    : socket_(std::move(socket))
+    , dispatcher_(dispatcher)
+    , owner_(owner)
+  {}
 
-    void run() {
-        _ws.async_accept(
-            boost::beast::bind_front_handler(&FeedSession::onAccept,
-                                             shared_from_this()));
-    }
+  void start() { doRead(); }
+
+  void close() {
+    boost::system::error_code ec;
+    socket_.shutdown(tcp::socket::shutdown_both, ec);
+    socket_.close(ec);
+  }
 
 private:
-    void onAccept(boost::system::error_code ec) {
-        if (ec) {
-            std::cerr << "FeedSession handshake error: " << ec.message() << "\n";
-            return;
-        }
-        doRead();
+  void doRead() {
+    auto self = shared_from_this();
+    socket_.async_read_some(
+      boost::asio::buffer(buf_),
+      [self](boost::system::error_code ec, std::size_t n) {
+        self->onRead(ec, n);
+      });
+  }
+
+  void onRead(boost::system::error_code ec, std::size_t n) {
+    if (ec) {
+      // Session ends on error
+      close();
+      return;
     }
 
-    void doRead() {
-        _ws.async_read(_buffer,
-            boost::beast::bind_front_handler(&FeedSession::onRead,
-                                             shared_from_this()));
+    // Very simple framing: treat incoming as newline-delimited text messages
+    pending_.insert(pending_.end(), buf_.data(), buf_.data() + n);
+    std::size_t start = 0;
+    for (std::size_t i = 0; i < pending_.size(); ++i) {
+      if (pending_[i] == '\n') {
+        const std::string line(pending_.data() + start, pending_.data() + i);
+        handleLine(line);
+        start = i + 1;
+      }
+    }
+    if (start > 0) {
+      pending_.erase(pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(start));
     }
 
-    void onRead(boost::system::error_code ec, std::size_t bytes) {
-        if (ec == websocket::error::closed) return;
-        if (ec) {
-            std::cerr << "FeedSession read error: " << ec.message() << "\n";
-            return;
-        }
+    doRead(); // continue reading
+  }
 
-        // Parse incoming JSON
-        auto text = boost::beast::buffers_to_string(_buffer.data());
-        rapidjson::Document doc;
-        doc.Parse(text.c_str());
-        if (!doc.HasParseError() && doc.HasMember("symbol")) {
-            gma::SymbolTick tick{
-              doc["symbol"].GetString(),
-              std::make_shared<rapidjson::Document>(std::move(doc))
-            };
-            _dispatcher.onTick(tick);
-        }
+  void handleLine(const std::string& line) {
+    if (!dispatcher_) return;
+    // Here you would parse `line` (e.g., JSON) into your domain object and dispatch.
+    // To keep this generic (no dependency on internal symbol types), hand the raw
+    // line to the dispatcher via a hypothetical method. Replace with your API:
+    //
+    // dispatcher_->ingestLine(line);
+    //
+    // If you have a SymbolTick type and a parser, it would look like:
+    //   SymbolTick tick = parseTick(line);
+    //   dispatcher_->onTick(tick);
+  }
 
-        _buffer.consume(bytes);
-        doRead();
-    }
+private:
+  tcp::socket       socket_;
+  MarketDispatcher* dispatcher_{nullptr}; // not owned
+  FeedServer*       owner_{nullptr};      // not owned
 
-    websocket::stream<tcp::socket> _ws;
-    boost::beast::flat_buffer      _buffer;
-    gma::MarketDispatcher&         _dispatcher;
+  std::array<char, 8 * 1024> buf_{};
+  std::vector<char>          pending_;
 };
 
-//
-// --- FeedServer --------------------------------------------------------------
-//
+// ---------------------- FeedServer ----------------------
+
 FeedServer::FeedServer(boost::asio::io_context& ioc,
-                       gma::MarketDispatcher& dispatcher,
+                       MarketDispatcher* dispatcher,
                        unsigned short port)
-  : _acceptor(ioc, tcp::endpoint{tcp::v4(), port})
-  , _ioc(ioc)
-  , _dispatcher(dispatcher)
-{}
+  : ioc_(ioc),
+    acceptor_(ioc),
+    dispatcher_(dispatcher)
+{
+  boost::system::error_code ec;
+  tcp::endpoint ep{tcp::v4(), port};
+
+  acceptor_.open(ep.protocol(), ec);
+  if (ec) throw boost::system::system_error(ec);
+
+  acceptor_.set_option(boost::asio::socket_base::reuse_address(true), ec);
+  if (ec) throw boost::system::system_error(ec);
+
+  acceptor_.bind(ep, ec);
+  if (ec) throw boost::system::system_error(ec);
+
+  acceptor_.listen(boost::asio::socket_base::max_listen_connections, ec);
+  if (ec) throw boost::system::system_error(ec);
+}
 
 void FeedServer::run() {
-    doAccept();
+  if (accepting_) return;
+  accepting_ = true;
+  doAccept();
+}
+
+void FeedServer::stop() {
+  accepting_ = false;
+
+  boost::system::error_code ec;
+  acceptor_.cancel(ec);
+
+  std::unordered_set<std::shared_ptr<FeedSession>> copy;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    copy = sessions_;
+    sessions_.clear();
+  }
+  for (auto& s : copy) {
+    s->close();
+  }
 }
 
 void FeedServer::doAccept() {
-    _acceptor.async_accept(
-        boost::asio::make_strand(_ioc.get_executor()),
-        [this](boost::system::error_code ec, tcp::socket socket) {
-            onAccept(ec, std::move(socket));
-        }
-    );
+  if (!accepting_) return;
+
+  acceptor_.async_accept(
+    boost::asio::make_strand(ioc_),
+    [this](boost::system::error_code ec, tcp::socket socket) {
+      onAccept(ec, std::move(socket));
+    });
 }
 
-void FeedServer::onAccept(boost::system::error_code ec,
-                          tcp::socket socket) {
-    if (ec) {
-        std::cerr << "FeedServer accept error: " << ec.message() << "\n";
-    } else {
-        // Spawn session to handle this feed connection
-        std::make_shared<FeedSession>(std::move(socket), _dispatcher)->run();
+void FeedServer::onAccept(boost::system::error_code ec, tcp::socket socket) {
+  if (!accepting_) return;
+
+  if (!ec) {
+    auto sp = std::make_shared<FeedSession>(std::move(socket), dispatcher_, this);
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      sessions_.insert(sp);
     }
-    // Accept the next connection
-    doAccept();
+    sp->start();
+  }
+
+  doAccept();
 }
 
-} // namespace server
+} // namespace gma

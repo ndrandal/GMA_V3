@@ -1,53 +1,39 @@
 #pragma once
+
 #include <atomic>
-#include <string>
-#include <unordered_map>
+#include <cstdint>
 #include <mutex>
+#include <string>
 #include <thread>
-#include <memory>
-#include <vector>
+#include <unordered_map>
 
-namespace gma::util {
-
-struct Counter {
-  std::atomic<uint64_t> v{0};
-  void inc(uint64_t d=1) { v.fetch_add(d, std::memory_order_relaxed); }
-  uint64_t get() const { return v.load(std::memory_order_relaxed); }
-};
-struct Gauge {
-  std::atomic<double> v{0.0};
-  void set(double x) { v.store(x, std::memory_order_relaxed); }
-  double get() const { return v.load(std::memory_order_relaxed); }
-};
+namespace gma {
+namespace util {
 
 class MetricRegistry {
 public:
-  static MetricRegistry& instance();
+  MetricRegistry() = default;
+  ~MetricRegistry();
 
-  Counter& counter(const std::string& name);
-  Gauge&   gauge(const std::string& name);
-
-  // Reporter thread
-  void startReporter(int intervalSec);
+  // Start/stop a background reporter that prints counters every N seconds.
+  // (Non-static; matches how we use instance state like thr_.)
+  void startReporter(unsigned int intervalSeconds = 10);
   void stopReporter();
 
-  // Snapshot as JSON string (flat map)
-  std::string snapshotJson() const;
+  // Simple API: increment a named counter or set a gauge.
+  void increment(const std::string& name, double v = 1.0);
+  void setGauge(const std::string& name, double v);
 
 private:
-  MetricRegistry() = default;
+  void reporterLoop(unsigned int intervalSeconds);
 
-  mutable std::mutex mx_;
-  std::unordered_map<std::string, std::unique_ptr<Counter>> counters_;
-  std::unordered_map<std::string, std::unique_ptr<Gauge>> gauges_;
+  std::mutex mu_;
+  std::unordered_map<std::string, double> counters_;
+  std::unordered_map<std::string, double> gauges_;
 
-  std::atomic<bool> stopping_{false};
+  std::atomic<bool> running_{false};
   std::thread thr_;
 };
 
-} // namespace gma::util
-
-// Shorthand macros
-#define METRIC_INC(name, d) ::gma::util::MetricRegistry::instance().counter(name).inc(d)
-#define METRIC_HIT(name)    ::gma::util::MetricRegistry::instance().counter(name).inc(1)
-#define METRIC_SET(name, v) ::gma::util::MetricRegistry::instance().gauge(name).set(v)
+} // namespace util
+} // namespace gma

@@ -1,122 +1,92 @@
 #include "gma/util/Config.hpp"
+
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <algorithm>
-#include <stdexcept>
-#include <cstdio>
 
-// RapidJSON
-#include <rapidjson/document.h>
-#include <rapidjson/error/en.h>
+#ifdef _WIN32
+  #define NOMINMAX
+  #include <windows.h>
+#endif
 
-namespace gma::util {
+namespace gma {
+namespace util {
 
-static Config gCfg;
-
-Config& Config::get() { return gCfg; }
-
-std::optional<std::string> Config::env(const char* name) {
-  const char* v = std::getenv(name);
-  if (!v) return std::nullopt;
-  return std::string(v);
+std::string Config::trim(const std::string& s) {
+  const auto is_ws = [](unsigned char c){ return std::isspace(c) != 0; };
+  auto b = std::find_if_not(s.begin(), s.end(), is_ws);
+  auto e = std::find_if_not(s.rbegin(), s.rend(), is_ws).base();
+  if (b >= e) return {};
+  return std::string(b, e);
 }
 
-int Config::envInt(const char* name, int def) {
-  if (auto v = env(name)) {
-    try {
-      return std::stoi(*v);
-    } catch (...) {
-      return def;
-    }
-  }
-  return def;
-}
-
-void Config::loadFromEnv(Config& out) {
-  out.wsPort           = envInt("GMA_WS_PORT", out.wsPort);
-  out.threadPoolSize   = envInt("GMA_THREADS", out.threadPoolSize);
-  out.listenerQueueCap = envInt("GMA_LISTENER_Q", out.listenerQueueCap);
-
-  if (auto v = env("GMA_LOG_LEVEL"))  out.logLevel  = *v;
-  if (auto v = env("GMA_LOG_FORMAT")) out.logFormat = *v;
-  if (auto v = env("GMA_LOG_FILE"))   out.logFile   = *v;
-
-  out.metricsEnabled     = envInt("GMA_METRICS_ON", out.metricsEnabled?1:0) != 0;
-  out.metricsIntervalSec = envInt("GMA_METRICS_EVERY", out.metricsIntervalSec);
-
-  out.taHistoryMax       = envInt("GMA_TA_HISTORY_MAX", out.taHistoryMax);
-}
-
-static bool asBool(const rapidjson::Value& v, bool def=false){
-  if (v.IsBool()) return v.GetBool();
-  if (v.IsInt()) return v.GetInt()!=0;
-  if (v.IsString()) {
-    std::string s = v.GetString();
-    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-    return (s=="1" || s=="true" || s=="yes" || s=="on");
-  }
-  return def;
-}
-
-static int asInt(const rapidjson::Value& v, int def=0){
-  if (v.IsInt()) return v.GetInt();
-  if (v.IsUint()) return static_cast<int>(v.GetUint());
-  if (v.IsInt64()) return static_cast<int>(v.GetInt64());
-  if (v.IsDouble()) return static_cast<int>(v.GetDouble());
-  return def;
-}
-
-static std::vector<int> asIntArray(const rapidjson::Value& v){
-  std::vector<int> out;
-  if (!v.IsArray()) return out;
-  for (auto& x : v.GetArray()) {
-    if (x.IsInt()) out.push_back(x.GetInt());
-  }
-  return out;
-}
-
-bool Config::loadFromFile(Config& out, const std::string& path, std::string* err) {
-  FILE* f = std::fopen(path.c_str(), "rb");
-  if (!f) { if (err) *err = "cannot open file"; return false; }
-  std::string data;
-  char buf[4096];
-  size_t n;
-  while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) data.append(buf, n);
-  std::fclose(f);
-
-  rapidjson::Document d;
-  d.Parse(data.c_str());
-  if (d.HasParseError()) {
-    if (err) *err = std::string("json parse error: ") + rapidjson::GetParseError_En(d.GetParseError());
-    return false;
-  }
-  if (!d.IsObject()) { if (err) *err = "root not an object"; return false; }
-
-  if (auto it = d.FindMember("wsPort"); it != d.MemberEnd()) out.wsPort = asInt(it->value, out.wsPort);
-  if (auto it = d.FindMember("threadPoolSize"); it != d.MemberEnd()) out.threadPoolSize = asInt(it->value, out.threadPoolSize);
-  if (auto it = d.FindMember("listenerQueueCap"); it != d.MemberEnd()) out.listenerQueueCap = asInt(it->value, out.listenerQueueCap);
-
-  if (auto it = d.FindMember("logLevel"); it != d.MemberEnd() && it->value.IsString()) out.logLevel = it->value.GetString();
-  if (auto it = d.FindMember("logFormat"); it != d.MemberEnd() && it->value.IsString()) out.logFormat = it->value.GetString();
-  if (auto it = d.FindMember("logFile"); it != d.MemberEnd() && it->value.IsString()) out.logFile = it->value.GetString();
-
-  if (auto it = d.FindMember("metricsEnabled"); it != d.MemberEnd()) out.metricsEnabled = asBool(it->value, out.metricsEnabled);
-  if (auto it = d.FindMember("metricsIntervalSec"); it != d.MemberEnd()) out.metricsIntervalSec = asInt(it->value, out.metricsIntervalSec);
-
-  if (auto it = d.FindMember("taHistoryMax"); it != d.MemberEnd()) out.taHistoryMax = asInt(it->value, out.taHistoryMax);
-  if (auto it = d.FindMember("taSMA"); it != d.MemberEnd()) out.taSMA = asIntArray(it->value);
-  if (auto it = d.FindMember("taEMA"); it != d.MemberEnd()) out.taEMA = asIntArray(it->value);
-  if (auto it = d.FindMember("taRSI"); it != d.MemberEnd()) out.taRSI = asInt(it->value, out.taRSI);
-  if (auto it = d.FindMember("taMACD"); it != d.MemberEnd() && it->value.IsArray() && it->value.Size()>=2) {
-    out.taMACD_fast = asInt(it->value[0], out.taMACD_fast);
-    out.taMACD_slow = asInt(it->value[1], out.taMACD_slow);
-  }
-  if (auto it = d.FindMember("taBBands"); it != d.MemberEnd() && it->value.IsArray() && it->value.Size()>=2) {
-    out.taBBands_n    = asInt(it->value[0], out.taBBands_n);
-    out.taBBands_stdK = asInt(it->value[1], out.taBBands_stdK);
-  }
-
+bool Config::parseLineKV(const std::string& line, std::string& k, std::string& v) {
+  auto pos = line.find('=');
+  if (pos == std::string::npos) return false;
+  k = trim(line.substr(0, pos));
+  v = trim(line.substr(pos + 1));
+  if (k.empty()) return false;
   return true;
 }
 
-} // namespace gma::util
+bool Config::loadFromFile(const std::string& path) {
+  // Simple INI-ish parser: key=value per line, '#' or ';' start comments.
+  // Unknown keys are ignored so you can add new knobs without breaking older builds.
+
+  FILE* f = nullptr;
+
+#ifdef _WIN32
+  if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) {
+    return false;
+  }
+#else
+  f = std::fopen(path.c_str(), "rb");
+  if (!f) return false;
+#endif
+
+  std::string buf;
+  buf.resize(8 * 1024);
+
+  std::string line;
+  line.reserve(1024);
+
+  bool ok = true;
+
+  // Read whole file
+  while (true) {
+    char tmp[1024];
+    if (!std::fgets(tmp, sizeof(tmp), f)) break;
+    line.assign(tmp);
+
+    // Strip CR/LF
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+
+    auto s = trim(line);
+    if (s.empty()) continue;
+    if (s[0] == '#' || s[0] == ';') continue; // comment
+
+    std::string key, val;
+    if (!parseLineKV(s, key, val)) continue;
+
+    if      (key == "taMACD_fast")    taMACD_fast    = std::max(1, std::atoi(val.c_str()));
+    else if (key == "taMACD_slow")    taMACD_slow    = std::max(1, std::atoi(val.c_str()));
+    else if (key == "taBBands_n")     taBBands_n     = std::max(1, std::atoi(val.c_str()));
+    else if (key == "taBBands_stdK")  taBBands_stdK  = std::atof(val.c_str());
+    else {
+      // Unknown key; ignore to stay forward-compatible
+    }
+  }
+
+  std::fclose(f);
+
+  // Basic sanity: slow >= fast for MACD; stdK positive.
+  if (taMACD_slow < taMACD_fast) std::swap(taMACD_slow, taMACD_fast);
+  if (taBBands_stdK <= 0.0) taBBands_stdK = 2.0;
+
+  return ok;
+}
+
+} // namespace util
+} // namespace gma
