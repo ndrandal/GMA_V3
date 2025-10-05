@@ -29,10 +29,11 @@ double reduce(It beg, It end, Getter g, ReduceOp op, double init, bool needFinit
   return any? acc : NaN();
 }
 
-double sum(It beg, It end, auto get) {
-  double acc=0.0; bool any=false;
-  for(auto it=beg; it!=end; ++it){ double v=get(*it); if(!isFinite(v)) continue; acc+=v; any=true; }
-  return any? acc : NaN();
+template<class It, class F>
+double sum(It beg, It end, F get) {
+  double s = 0;
+  for (auto it = beg; it != end; ++it) s += get(*it);
+  return s;
 }
 
 } // anon

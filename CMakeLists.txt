@@ -15,8 +15,8 @@ if (WIN32)
   add_definitions(-D_WIN32_WINNT=0x0A00) # Windows 10
 endif()
 
-# ---- Third-party root (your local unpacked libs)
-#     Override with: -DTHIRD_PARTY_ROOT=C:/wherever
+# ---- Third-party root
+# Override with: -DTHIRD_PARTY_ROOT=C:/wherever
 if (NOT DEFINED THIRD_PARTY_ROOT)
   if (WIN32)
     set(THIRD_PARTY_ROOT "C:/thirdparty")
@@ -25,30 +25,30 @@ if (NOT DEFINED THIRD_PARTY_ROOT)
   endif()
 endif()
 
-# ---- Threads (always needed)
+# ---- Threads
 find_package(Threads REQUIRED)
 
-# ---- Try to find Boost normally first
+# =======================
+# Boost (prefer normal install)
+# =======================
 set(Boost_USE_STATIC_LIBS ON)
 set(Boost_USE_STATIC_RUNTIME OFF)
 find_package(Boost 1.75 QUIET COMPONENTS system)
 
 set(USE_HEADER_ONLY_BOOST OFF)
 if (NOT Boost_FOUND)
-  # Fallback to header-only mode using your local folders
-  set(BOOST_FALLBACK_INCLUDE
-      "${THIRD_PARTY_ROOT}/boost_1_88_0")
+  # Fallback to header-only using your local unpacked folder
+  set(BOOST_FALLBACK_INCLUDE "${THIRD_PARTY_ROOT}/boost_1_88_0")
   if (EXISTS "${BOOST_FALLBACK_INCLUDE}/boost/beast/core.hpp")
     message(STATUS "Using header-only Boost from: ${BOOST_FALLBACK_INCLUDE}")
     set(USE_HEADER_ONLY_BOOST ON)
 
-    # Create dummy INTERFACE targets so downstream link lines still work
     add_library(Boost::headers INTERFACE IMPORTED)
     target_include_directories(Boost::headers INTERFACE "${BOOST_FALLBACK_INCLUDE}")
 
-    add_library(Boost::system INTERFACE IMPORTED) # header-only error_code
+    # Provide a stub 'Boost::system' since <boost/system/error_code.hpp> is header-only
+    add_library(Boost::system INTERFACE IMPORTED)
     target_link_libraries(Boost::system INTERFACE Boost::headers)
-
   else()
     message(FATAL_ERROR
       "Boost not found and no fallback at ${BOOST_FALLBACK_INCLUDE}. "
@@ -58,18 +58,38 @@ else()
   message(STATUS "Found Boost: ${Boost_INCLUDE_DIRS}")
 endif()
 
-# ---- RapidJSON (header-only)
-# Prefer your local C:/thirdparty/rapidjson/include if present
-set(RAPIDJSON_FALLBACK_INCLUDE "${THIRD_PARTY_ROOT}/rapidjson/include")
-add_library(RapidJSON::rapidjson INTERFACE IMPORTED)
-if (EXISTS "${RAPIDJSON_FALLBACK_INCLUDE}/rapidjson/document.h")
-  target_include_directories(RapidJSON::rapidjson INTERFACE "${RAPIDJSON_FALLBACK_INCLUDE}")
-else()
-  # Let compiler/system include provide it if installed
-  message(STATUS "Using system RapidJSON includes")
+# =======================
+# RapidJSON (header-only)
+# =======================
+# We want #include <rapidjson/document.h>
+# Accept both:
+#   C:/thirdparty/rapidjson            (contains folder 'rapidjson/')
+#   C:/thirdparty/rapidjson/include    (contains folder 'rapidjson/')
+set(RAPIDJSON_HINTS
+  "${RAPIDJSON_ROOT}"
+  "$ENV{RAPIDJSON_ROOT}"
+  "${THIRD_PARTY_ROOT}/rapidjson"
+  "${THIRD_PARTY_ROOT}/rapidjson/include"
+)
+
+find_path(RAPIDJSON_INCLUDE_DIR
+  NAMES rapidjson/document.h
+  HINTS ${RAPIDJSON_HINTS}
+)
+
+if (NOT RAPIDJSON_INCLUDE_DIR)
+  message(FATAL_ERROR
+    "RapidJSON headers not found. Set RAPIDJSON_ROOT or place them under "
+    "${THIRD_PARTY_ROOT}/rapidjson so that ${RAPIDJSON_INCLUDE_DIR}/rapidjson/document.h exists.")
 endif()
 
-# ---- Sources (library) ----
+add_library(RapidJSON::rapidjson INTERFACE IMPORTED)
+target_include_directories(RapidJSON::rapidjson INTERFACE "${RAPIDJSON_INCLUDE_DIR}")
+message(STATUS "RapidJSON include dir: ${RAPIDJSON_INCLUDE_DIR}")
+
+# =======================
+# Sources / targets
+# =======================
 # Build the library from all sources EXCEPT main.cpp
 set(MAIN_SRC "${CMAKE_SOURCE_DIR}/src/main.cpp")
 
@@ -86,13 +106,11 @@ file(GLOB_RECURSE GMA_PUBLIC_HEADERS
 add_library(gma STATIC ${GMA_SOURCES} ${GMA_PUBLIC_HEADERS})
 target_include_directories(gma PUBLIC "${CMAKE_SOURCE_DIR}/include")
 
-# If we have a full Boost install use it; else use header-only targets
 if (Boost_FOUND)
   target_include_directories(gma PUBLIC ${Boost_INCLUDE_DIRS})
   target_link_libraries(gma PUBLIC Boost::system)
 else()
-  target_link_libraries(gma PUBLIC Boost::system) # our INTERFACE dummy
-  # Header-only mode: no Boost libs required; add safe defines
+  target_link_libraries(gma PUBLIC Boost::system) # our header-only alias
   target_compile_definitions(gma PUBLIC
     BOOST_ALL_NO_LIB
     BOOST_ERROR_CODE_HEADER_ONLY
@@ -104,7 +122,7 @@ endif()
 
 target_link_libraries(gma PUBLIC Threads::Threads RapidJSON::rapidjson)
 
-# ---- Warnings ----
+# Warnings
 if (MSVC)
   target_compile_options(gma PRIVATE /W4)
   if (GMA_WARNINGS_AS_ERRORS)
@@ -117,7 +135,7 @@ else()
   endif()
 endif()
 
-# ---- App executable (uses your existing src/main.cpp) ----
+# App executable (if src/main.cpp exists)
 if (EXISTS "${MAIN_SRC}")
   add_executable(gma_server "${MAIN_SRC}")
   target_include_directories(gma_server PRIVATE "${CMAKE_SOURCE_DIR}/include")
@@ -137,7 +155,7 @@ if (EXISTS "${MAIN_SRC}")
   target_link_libraries(gma_server PRIVATE Threads::Threads RapidJSON::rapidjson)
 endif()
 
-# ---- Tests (opt-in) ----
+# Tests (opt-in)
 if (GMA_BUILD_TESTS)
   enable_testing()
   file(GLOB_RECURSE GMA_TEST_SOURCES "${CMAKE_SOURCE_DIR}/tests/*.cpp")

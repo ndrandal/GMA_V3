@@ -15,7 +15,7 @@ public:
 
   void onValue(const SymbolValue& v) override;
 
-  void shutdown() override {
+  void shutdown() noexcept override {
     // nothing to tear down; keep for symmetry
   }
 
