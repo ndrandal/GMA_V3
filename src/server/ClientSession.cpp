@@ -47,4 +47,21 @@ void ClientSession::onWrite(boost::beast::error_code ec, std::size_t) {
   if (ec) std::cerr << "write: " << ec.message() << "\n";
 }
 
-} // namespace gma
+void ClientSession::run() {
+  // Kick off the read loop (adjust to your existing machinery)
+  doRead();
+}
+
+void ClientSession::close() {
+  // Graceful close if you have a websocket stream
+  if (open_) { // if you track it; otherwise just try
+    boost::beast::websocket::close_reason cr;
+    cr.code = boost::beast::websocket::close_code::normal;
+    cr.reason = "closing";
+    beastWs_.async_close(cr, [self = shared_from_this()](auto){ /* swallow */ });
+    open_ = false;
+  }
+
+  } // namespace gma
+
+}

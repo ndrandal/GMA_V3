@@ -1,24 +1,25 @@
-#include "gma/ws/WSResponder.hpp"
-#include <sstream>
-#include <chrono>
-#include <iomanip>
+#include <ostream>
+#include <variant>
+#include <vector>
+#include "gma/SymbolValue.hpp"
 
-namespace gma::ws {
-
-static inline int64_t now_ms(){
-  using namespace std::chrono;
-  return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+namespace gma {
+  inline std::ostream& operator<<(std::ostream& os, const ArgType& v) {
+    std::visit([&](const auto& x) {
+      using X = std::decay_t<decltype(x)>;
+      if constexpr (std::is_same_v<X, std::monostate>) {
+        os << "null";
+      } else if constexpr (std::is_same_v<X, std::vector<double>>) {
+        os << '[';
+        for (size_t i = 0; i < x.size(); ++i) {
+          if (i) os << ',';
+          os << x[i];
+        }
+        os << ']';
+      } else {
+        os << x;
+      }
+    }, v);
+    return os;
+  }
 }
-
-void WSResponder::onValue(const SymbolValue& v) {
-  // Small, dependency-free JSON writer
-  std::ostringstream oss;
-  oss << "{\"type\":\"update\",\"id\":\"" << reqId_
-      << "\",\"symbol\":\"" << v.symbol
-      << "\",\"value\":" << std::setprecision(15) << v.value
-      << ",\"ts\":" << now_ms() << "}";
-
-  try { send_(oss.str()); } catch (...) { /* optional: log */ }
-}
-
-} // namespace gma::ws

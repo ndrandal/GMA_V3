@@ -1,21 +1,9 @@
 #include "gma/TreeBuilder.hpp"
 
-#include <stdexcept>
-#include <vector>
-#include <algorithm>
-#include <chrono>
-
-// RapidJSON
-#include <rapidjson/document.h>
-#include <rapidjson/error/en.h>
-
-// Nodes from T2 redo
-#include "gma/nodes/Listener.hpp"        // namespace gma::nodes
-#include "gma/nodes/Interval.hpp"        // namespace gma
-#include "gma/nodes/AtomicAccessor.hpp"  // namespace gma
-#include "gma/nodes/Aggregate.hpp"       // namespace gma
-#include "gma/nodes/Worker.hpp"          // namespace gma
-#include "gma/nodes/SymbolSplit.hpp"     // namespace gma
+#include <functional>
+#include <algorithm>  // for std::min/std::max
+#include <numeric>    // if you use accumulate
+#include <cmath>
 
 // ----------------- Tiny helpers -----------------
 namespace {

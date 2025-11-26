@@ -15,8 +15,8 @@ public:
   void start();
   void sendText(const std::string& s);
 
-  // NEW: close() so WebSocketServer.cpp can call it.
-  void close();
+  void run();        // start reading / processing
+  void close();      // optional: explicit close; no-op if already closed
 
 private:
   void doRead();
