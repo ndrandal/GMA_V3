@@ -1,60 +1,121 @@
-# ----- CMake generated files -----
+##############################
+# Global Build Artifacts
+##############################
+
+# CMake
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
+CTestTestfile.cmake
 Makefile
 install_manifest.txt
+compile_commands.json
 
-# ----- Build output folders -----
-/build/
-/bin/
-/lib/
+# Ninja
+*.ninja
+.ninja_deps
+.ninja_log
 
-# ----- Compiled object files -----
+# MSBuild / Visual Studio build intermediates
+*.tlog
+*.lastbuildstate
+*.unsuccessfulbuild
+*.recipe
+*.idb
+*.pdb
+*.ipdb
+*.iobj
+
+# VS intermediate output folders
+/[Bb]uild/
+/[Bb]in/
+/[Ll]ib/
+/[Dd]ebug/
+/[Rr]elease/
+/x64/
+/x86/
+/out/
+
+##############################
+# Object / Binary Files
+##############################
+
 *.o
 *.obj
-
-# ----- Libraries and executables -----
-*.so
+*.lo
 *.a
 *.lib
+*.so
 *.dll
 *.dylib
 *.exe
 *.out
 
-# ----- Debug files -----
+##############################
+# Logs & Temp Files
+##############################
+
 *.log
 *.tmp
 *.pch
 
-# ----- Profiling and coverage -----
+##############################
+# Profiling / Coverage
+##############################
+
 *.gcda
 *.gcno
+*.gcov
 *.lcov
 
-# ----- Indexing -----
-compile_commands.json
+##############################
+# Visual Studio / MSVC
+##############################
 
-# ----- IDE and editor folders/files -----
+# Project user/editor files
+*.suo
+*.user
+*.userosscache
+*.sdf
+*.cachefile
+*.opensdf
+*.VC.db
+*.VC.VC.opendb
+
+# Auto-generated solution metadata
+*.vcxproj.user
+*.vcxproj.filters
+*.vcxproj.*
+*.sln.docstates
+
+##############################
+# Editors / IDEs
+##############################
+
 .vscode/
 .idea/
 *.code-workspace
 *.sublime-project
 *.sublime-workspace
 
-# ----- OS generated files -----
+##############################
+# OS Files
+##############################
+
 .DS_Store
 Thumbs.db
 
-# ----- Backup and swap files -----
+##############################
+# Backup / Swap
+##############################
+
 *~
 *.swp
 *.swo
 
-# ----- Ignore contents of external/ but keep the folder itself -----
-/external/**
+##############################
+# External Folder (ignore contents)
+##############################
 
-# If you ever want to track a specific file in external/ (e.g. .gitkeep),
-# you can add an exception, for example:
-# !/external/.gitkeep
+/external/**
+!/external/.gitkeep
