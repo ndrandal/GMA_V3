@@ -7,26 +7,42 @@
 
 namespace gma {
 
+class WebSocketServer;
+class ExecutionContext;
+class MarketDispatcher;
+
 class ClientSession : public std::enable_shared_from_this<ClientSession> {
 public:
-  using Ws = boost::beast::websocket::stream<boost::beast::tcp_stream>;
+  using tcp = boost::asio::ip::tcp;
+  using Ws  = boost::beast::websocket::stream<boost::beast::tcp_stream>;
 
-  explicit ClientSession(boost::asio::io_context& ioc);
-  void start();
+  ClientSession(tcp::socket socket,
+                WebSocketServer* server,
+                ExecutionContext* exec,
+                MarketDispatcher* dispatcher);
+
+  // Start the WebSocket handshake and begin reading messages.
+  void run();
+
+  // Send a text frame to the client (no-op if the session is closed).
   void sendText(const std::string& s);
 
-  void run();        // start reading / processing
-  void close();      // optional: explicit close; no-op if already closed
+  // Gracefully close the WebSocket (idempotent).
+  void close();
 
 private:
   void doRead();
-  void onRead(boost::beast::error_code ec, std::size_t);
-  void onWrite(boost::beast::error_code ec, std::size_t);
+  void onRead(boost::beast::error_code ec, std::size_t bytes);
+  void onWrite(boost::beast::error_code ec, std::size_t bytes);
 
-  boost::asio::io_context& ioc_;
+  WebSocketServer*  server_;
+  ExecutionContext* exec_;
+  MarketDispatcher* dispatcher_;
+
   Ws ws_;
   boost::beast::flat_buffer buffer_;
-  bool textMode_ = true;
+  bool open_{false};
+  std::size_t sessionId_{0};
 };
 
 } // namespace gma

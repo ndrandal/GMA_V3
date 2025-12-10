@@ -3,32 +3,19 @@
 namespace gma::ws {
 
 void WsBridge::onOpen(const std::string& connId, SendFn send) {
-  std::scoped_lock lk(mx_);
-  auto it = sessions_.find(connId);
-  if (it != sessions_.end()) return;
-  auto client = std::make_shared<ClientConnection>(connId, dispatcher_.get(), store_.get(), std::move(send));
-  sessions_.emplace(connId, std::move(client));
+  std::lock_guard<std::mutex> lk(mx_);
+  connections_[connId] = std::move(send);
 }
 
 void WsBridge::onMessage(const std::string& connId, const std::string& text) {
-  std::shared_ptr<ClientConnection> c;
-  { std::scoped_lock lk(mx_);
-    auto it = sessions_.find(connId);
-    if (it == sessions_.end()) return;
-    c = it->second;
-  }
-  c->onTextMessage(text);
+  (void)connId;
+  (void)text;
+  // TODO: glue JSON text -> ExecutionContext/MarketDispatcher using dispatcher_/store_.
 }
 
 void WsBridge::onClose(const std::string& connId) {
-  std::shared_ptr<ClientConnection> c;
-  { std::scoped_lock lk(mx_);
-    auto it = sessions_.find(connId);
-    if (it == sessions_.end()) return;
-    c = std::move(it->second);
-    sessions_.erase(it);
-  }
-  if (c) c->onClose();
+  std::lock_guard<std::mutex> lk(mx_);
+  connections_.erase(connId);
 }
 
 } // namespace gma::ws

@@ -7,7 +7,7 @@
 
 #include "gma/Span.hpp"          // <-- single source of truth for Span
 #include "gma/SymbolValue.hpp"   // ArgType
-#include "gma/nodes/*"   // INode
+#include "gma/nodes/INode.hpp"   // INode
 #include <rapidjson/document.h>  // rapidjson::Value
 // ---- Minimal, safe span-like view (works in C++17) --------------------------
 namespace gma_detail {
