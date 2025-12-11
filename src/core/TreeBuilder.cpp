@@ -1,55 +1,114 @@
 #include "gma/TreeBuilder.hpp"
 
 #include <functional>
-#include <algorithm>  // for std::min/std::max
-#include <numeric>    // if you use accumulate
+#include <algorithm>
+#include <numeric>
 #include <cmath>
+#include <limits>
 
-// ----------------- Tiny helpers -----------------
+// Node types
+#include "gma/nodes/Listener.hpp"
+#include "gma/nodes/Aggregate.hpp"
+#include "gma/nodes/SymbolSplit.hpp"
+#include "gma/nodes/Worker.hpp"
+#include "gma/nodes/AtomicAccessor.hpp"
+#include "gma/nodes/Interval.hpp"
+
+// Runtime deps
+#include "gma/AtomicStore.hpp"
+#include "gma/ThreadPool.hpp"
+#include "gma/MarketDispatcher.hpp"
+#include "gma/rt/ThreadPool.hpp"  // for gma::gThreadPool
+
+
+//
+// ---------- Tiny JSON helpers (anon namespace) ----------
+//
 namespace {
 
 inline const rapidjson::Value& expectObj(const rapidjson::Value& v, const char* what) {
-  if (!v.IsObject()) throw std::runtime_error(std::string("TreeBuilder: expected object for ")+what);
+  if (!v.IsObject())
+    throw std::runtime_error(std::string("TreeBuilder: expected object for ") + what);
   return v;
 }
+
 inline const char* expectType(const rapidjson::Value& v) {
   if (!v.HasMember("type") || !v["type"].IsString())
     throw std::runtime_error("TreeBuilder: node missing 'type'");
   return v["type"].GetString();
 }
-inline std::string strOr(const rapidjson::Value& v, const char* k, const std::string& def="") {
-  return (v.HasMember(k) && v[k].IsString()) ? std::string(v[k].GetString()) : def;
+
+inline std::string strOr(const rapidjson::Value& v,
+                         const char*             k,
+                         const std::string&      def = "") {
+  return (v.HasMember(k) && v[k].IsString())
+           ? std::string(v[k].GetString())
+           : def;
 }
+
 inline int intOr(const rapidjson::Value& v, const char* k, int def) {
   return (v.HasMember(k) && v[k].IsInt()) ? v[k].GetInt() : def;
 }
+
 inline std::size_t sizeOr(const rapidjson::Value& v, const char* k, std::size_t def) {
-  return (v.HasMember(k) && v[k].IsUint()) ? static_cast<std::size_t>(v[k].GetUint()) : def;
+  return (v.HasMember(k) && v[k].IsUint())
+           ? static_cast<std::size_t>(v[k].GetUint())
+           : def;
 }
-inline bool has(const rapidjson::Value& v, const char* k) { return v.HasMember(k); }
+
+inline bool has(const rapidjson::Value& v, const char* k) {
+  return v.HasMember(k);
+}
 
 } // namespace
 
-// ----------------- Internal composite root -----------------
+//
+// ---------- CompositeRoot: fan-out root for many inputs ----------
+//
 namespace {
+
 class CompositeRoot final : public gma::INode {
 public:
-  explicit CompositeRoot(std::vector<std::shared_ptr<gma::INode>> roots) : roots_(std::move(roots)) {}
-  void onValue(const gma::SymbolValue&) override { /* sources don’t need upstream events */ }
+  explicit CompositeRoot(std::vector<std::shared_ptr<gma::INode>> roots)
+    : roots_(std::move(roots)) {}
+
+  void onValue(const gma::SymbolValue&) override {
+    // Composite roots are sources; they don't receive upstream values
+  }
+
   void shutdown() noexcept override {
-    for (auto& r : roots_) if (r) r->shutdown();
+    for (auto& r : roots_) {
+      if (r) r->shutdown();
+    }
     roots_.clear();
   }
+
 private:
   std::vector<std::shared_ptr<gma::INode>> roots_;
 };
+
 } // namespace
 
-// ----------------- Worker function library -----------------
-#include <limits>
+//
+// ---------- Worker function library (math over ArgType) ----------
+//
 namespace {
-using ArgType = double;
-using Span_t  = Span<const ArgType>; // provided by your Worker.hpp include
+
+using Span_t = gma::Span<const gma::ArgType>;
+
+// Convert ArgType to double for numeric ops
+double toDouble(const gma::ArgType& v) {
+  return std::visit(
+    [](auto&& x) -> double {
+      using T = std::decay_t<decltype(x)>;
+      if constexpr (std::is_same_v<T, bool>)      return x ? 1.0 : 0.0;
+      else if constexpr (std::is_same_v<T, int>)  return static_cast<double>(x);
+      else if constexpr (std::is_same_v<T, double>) return x;
+      else                                        return 0.0; // non-numeric -> 0
+    },
+    v
+  );
+}
 
 gma::Worker::Fn fnFromName(const rapidjson::Value& spec) {
   if (!spec.HasMember("fn") || !spec["fn"].IsString())
@@ -57,106 +116,211 @@ gma::Worker::Fn fnFromName(const rapidjson::Value& spec) {
 
   const std::string fn = spec["fn"].GetString();
 
+  // mean / avg
   if (fn == "mean" || fn == "avg") {
-    return [](Span_t xs){
-      if (xs.size()==0) return 0.0;
-      double s=0.0; for (auto v: xs) s += v; return s / xs.size();
+    return [](Span_t xs) -> gma::ArgType {
+      if (xs.size() == 0) return gma::ArgType{0.0};
+      double s = 0.0;
+      for (const auto& v : xs) s += toDouble(v);
+      return gma::ArgType{s / xs.size()};
     };
   }
+
+  // sum
   if (fn == "sum") {
-    return [](Span_t xs){ double s=0.0; for (auto v: xs) s+=v; return s; };
-  }
-  if (fn == "max") {
-    return [](Span_t xs){ double m=-std::numeric_limits<double>::infinity(); for (auto v: xs) m = std::max(m,v); return (xs.size()?m:0.0); };
-  }
-  if (fn == "min") {
-    return [](Span_t xs){ double m= std::numeric_limits<double>::infinity();  for (auto v: xs) m = std::min(m,v); return (xs.size()?m:0.0); };
-  }
-  if (fn == "spread") {
-    return [](Span_t xs){
-      if (xs.size()<2) return 0.0;
-      double lo= std::numeric_limits<double>::infinity();
-      double hi=-std::numeric_limits<double>::infinity();
-      for (auto v: xs) { lo=std::min(lo,v); hi=std::max(hi,v); }
-      return hi-lo;
+    return [](Span_t xs) -> gma::ArgType {
+      double s = 0.0;
+      for (const auto& v : xs) s += toDouble(v);
+      return gma::ArgType{s};
     };
   }
-  if (fn == "last") { return [](Span_t xs){ return xs.size()? xs.back():0.0; }; }
-  if (fn == "first"){ return [](Span_t xs){ return xs.size()? xs.front():0.0; }; }
-  if (fn == "diff") { return [](Span_t xs){ return xs.size()>=2? xs.back()-xs.front():0.0; }; }
 
-  // scale: multiply single input by constant factor
-  if (fn == "scale") {
-    double factor = spec.HasMember("factor") && spec["factor"].IsNumber() ? spec["factor"].GetDouble() : 1.0;
-    return [factor](Span_t xs){ return xs.size()? xs.back()*factor : 0.0; };
+  // max
+  if (fn == "max") {
+    return [](Span_t xs) -> gma::ArgType {
+      if (xs.size() == 0) return gma::ArgType{0.0};
+      double m = -std::numeric_limits<double>::infinity();
+      for (const auto& v : xs) m = std::max(m, toDouble(v));
+      return gma::ArgType{m};
+    };
   }
 
-  throw std::runtime_error("Worker: unknown fn '"+fn+"'");
+  // min
+  if (fn == "min") {
+    return [](Span_t xs) -> gma::ArgType {
+      if (xs.size() == 0) return gma::ArgType{0.0};
+      double m = std::numeric_limits<double>::infinity();
+      for (const auto& v : xs) m = std::min(m, toDouble(v));
+      return gma::ArgType{m};
+    };
+  }
+
+  // spread = max - min
+  if (fn == "spread") {
+    return [](Span_t xs) -> gma::ArgType {
+      if (xs.size() < 2) return gma::ArgType{0.0};
+      double lo = std::numeric_limits<double>::infinity();
+      double hi = -std::numeric_limits<double>::infinity();
+      for (const auto& v : xs) {
+        double dv = toDouble(v);
+        lo = std::min(lo, dv);
+        hi = std::max(hi, dv);
+      }
+      return gma::ArgType{hi - lo};
+    };
+  }
+
+  // last
+  if (fn == "last") {
+    return [](Span_t xs) -> gma::ArgType {
+      if (!xs.size()) return gma::ArgType{0.0};
+      const auto& v = xs[xs.size() - 1];
+      return gma::ArgType{toDouble(v)};
+    };
+  }
+
+
+  // first
+  if (fn == "first") {
+    return [](Span_t xs) -> gma::ArgType {
+      if (!xs.size()) return gma::ArgType{0.0};
+      const auto& v = xs[0];
+      return gma::ArgType{toDouble(v)};
+    };
+  }
+
+
+  // diff = last - first
+  if (fn == "diff") {
+    return [](Span_t xs) -> gma::ArgType {
+      if (xs.size() >= 2) {
+        double a = toDouble(xs[0]);
+        double b = toDouble(xs[xs.size() - 1]);
+        return gma::ArgType{b - a};
+      }
+      return gma::ArgType{0.0};
+    };
+  }
+
+
+  // scale: multiply last input by constant factor
+  if (fn == "scale") {
+    double factor =
+      spec.HasMember("factor") && spec["factor"].IsNumber()
+        ? spec["factor"].GetDouble()
+        : 1.0;
+
+    return [factor](Span_t xs) -> gma::ArgType {
+      if (!xs.size()) return gma::ArgType{0.0};
+      const auto& v = xs[xs.size() - 1];
+      return gma::ArgType{toDouble(v) * factor};
+    };
+  }
+
+
+  throw std::runtime_error("Worker: unknown fn '" + fn + "'");
 }
+
 } // namespace
 
-// ----------------- Builder impl -----------------
+//
+// ---------- Builder implementation ----------
+//
 namespace gma::tree {
 
-static std::shared_ptr<gma::INode> buildOne(const rapidjson::Value& node,
-                                       const std::string& defaultSymbol,
-                                       const Deps& deps,
-                                       std::shared_ptr<gma::INode> downstream);
+static std::shared_ptr<gma::INode> buildOne(const rapidjson::Value& spec,
+                                            const std::string&      defaultSymbol,
+                                            const Deps&             deps,
+                                            std::shared_ptr<gma::INode> downstream);
 
-// Helper: build array and return a CompositeRoot if >1
-static std::shared_ptr<gma::INode> buildManyAsRoot(const rapidjson::Value& arr,
-                                              const std::string& defaultSymbol,
-                                              const Deps& deps,
-                                              std::shared_ptr<gma::INode> downstream)
-{
-  if (!arr.IsArray()) throw std::runtime_error("TreeBuilder: 'inputs' must be an array");
+// Helper for Aggregate: build many inputs and wrap into CompositeRoot
+static std::shared_ptr<gma::INode> buildManyAsRoot(const rapidjson::Value&      arr,
+                                                   const std::string&           defaultSymbol,
+                                                   const Deps&                 deps,
+                                                   std::shared_ptr<gma::INode> downstream) {
+  if (!arr.IsArray())
+    throw std::runtime_error("TreeBuilder: 'inputs' must be an array");
+
   std::vector<std::shared_ptr<gma::INode>> roots;
   roots.reserve(arr.Size());
+
   for (auto& it : arr.GetArray()) {
     roots.push_back(buildOne(it, defaultSymbol, deps, downstream));
   }
-  if (roots.empty()) throw std::runtime_error("TreeBuilder: empty 'inputs' array");
-  if (roots.size()==1) return roots.front();
+
+  if (roots.empty())
+    throw std::runtime_error("TreeBuilder: empty 'inputs' array");
+
+  if (roots.size() == 1)
+    return roots.front();
+
   return std::make_shared<CompositeRoot>(std::move(roots));
 }
 
-static std::shared_ptr<gma::INode> buildOne(const rapidjson::Value& spec,
-                                       const std::string& defaultSymbol,
-                                       const Deps& deps,
-                                       std::shared_ptr<gma::INode> downstream)
-{
-  const auto& v   = expectObj(spec, "node");
+static std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
+                                            const std::string&           defaultSymbol,
+                                            const Deps&                 deps,
+                                            std::shared_ptr<gma::INode> downstream) {
+  const auto& v    = expectObj(spec, "node");
   const std::string type = expectType(v);
 
   // --- Listener ---
   if (type == "Listener") {
-    if (!deps.dispatcher || !deps.pool) throw std::runtime_error("Listener: missing dispatcher/pool");
-    const std::string symbol = strOr(v,"symbol", defaultSymbol);
-    const std::string field  = strOr(v,"field",  "");
-    if (field.empty()) throw std::runtime_error("Listener: missing 'field'");
-    std::size_t cap = sizeOr(v,"queueCap", 1024);
+    if (!deps.dispatcher || !deps.pool)
+      throw std::runtime_error("Listener: missing dispatcher/pool");
+
+    const std::string symbol = strOr(v, "symbol", defaultSymbol);
+    const std::string field  = strOr(v, "field",  "");
+    if (field.empty())
+      throw std::runtime_error("Listener: missing 'field'");
+
+    std::size_t cap = sizeOr(v, "queueCap", 1024);
+    (void)cap; // currently unused, kept for future queue sizing
+
     using gma::nodes::Listener;
-    return std::make_shared<Listener>(symbol, field, downstream, deps.pool, deps.dispatcher, cap);
+    return std::make_shared<Listener>(symbol,
+                                      field,
+                                      downstream,
+                                      deps.pool,
+                                      deps.dispatcher);
   }
+
 
   // --- Interval ---
   if (type == "Interval") {
-    if (!deps.pool) throw std::runtime_error("Interval: missing pool");
-    int ms = intOr(v, "ms", intOr(v,"periodMs", 0));
-    if (ms <= 0) throw std::runtime_error("Interval: positive 'ms' required");
-    auto childSpec = v.HasMember("child") ? &v["child"] : nullptr;
+    if (!gma::gThreadPool)
+      throw std::runtime_error("Interval: global gThreadPool not initialized");
+
+    int ms = intOr(v, "ms", intOr(v, "periodMs", 0));
+    if (ms <= 0)
+      throw std::runtime_error("Interval: positive 'ms' required");
+
+    const rapidjson::Value* childSpec =
+      v.HasMember("child") ? &v["child"] : nullptr;
+
     auto child = downstream;
-    if (childSpec) child = buildOne(*childSpec, defaultSymbol, deps, downstream);
-    return std::make_shared<gma::Interval>(std::chrono::milliseconds(ms), child, deps.pool);
+    if (childSpec)
+      child = buildOne(*childSpec, defaultSymbol, deps, downstream);
+
+    return std::make_shared<gma::Interval>(std::chrono::milliseconds(ms),
+                                          child,
+                                          gma::gThreadPool.get());
   }
+
 
   // --- AtomicAccessor ---
   if (type == "AtomicAccessor") {
-    if (!deps.store) throw std::runtime_error("AtomicAccessor: missing store");
-    const std::string symbol = strOr(v,"symbol", defaultSymbol);
-    const std::string field  = strOr(v,"field",  "");
-    if (field.empty()) throw std::runtime_error("AtomicAccessor: missing 'field'");
-    return std::make_shared<gma::AtomicAccessor>(symbol, field, deps.store, downstream);
+    if (!deps.store)
+      throw std::runtime_error("AtomicAccessor: missing store");
+
+    const std::string symbol = strOr(v, "symbol", defaultSymbol);
+    const std::string field  = strOr(v, "field",  "");
+    if (field.empty())
+      throw std::runtime_error("AtomicAccessor: missing 'field'");
+
+    return std::make_shared<gma::AtomicAccessor>(symbol, field,
+                                                 deps.store,
+                                                 downstream);
   }
 
   // --- Worker (batch math over inputs) ---
@@ -168,20 +332,33 @@ static std::shared_ptr<gma::INode> buildOne(const rapidjson::Value& spec,
   // --- Aggregate(N) ---
   if (type == "Aggregate") {
     std::size_t arity = sizeOr(v, "arity", 0);
-    if (arity == 0) throw std::runtime_error("Aggregate: positive 'arity' required");
+    if (arity == 0)
+      throw std::runtime_error("Aggregate: positive 'arity' required");
+
     auto agg = std::make_shared<gma::Aggregate>(arity, downstream);
-    if (!v.HasMember("inputs")) throw std::runtime_error("Aggregate: missing 'inputs'");
+
+    if (!v.HasMember("inputs"))
+      throw std::runtime_error("Aggregate: missing 'inputs'");
+
     auto root = buildManyAsRoot(v["inputs"], defaultSymbol, deps, agg);
     return root;
   }
 
   // --- SymbolSplit ---
   if (type == "SymbolSplit") {
-    if (!v.HasMember("child")) throw std::runtime_error("SymbolSplit: missing 'child'");
-    auto childSpec = v["child"];
-    gma::SymbolSplit::Factory f = [childSpec, defaultSymbol, deps, downstream](const std::string& sym){
-      return buildOne(childSpec, sym.empty()?defaultSymbol:sym, deps, downstream);
-    };
+    if (!v.HasMember("child"))
+      throw std::runtime_error("SymbolSplit: missing 'child'");
+
+    const rapidjson::Value* childSpec = &v["child"];
+
+    gma::SymbolSplit::Factory f =
+      [childSpec, defaultSymbol, deps, downstream](const std::string& sym) {
+        return buildOne(*childSpec,
+                        sym.empty() ? defaultSymbol : sym,
+                        deps,
+                        downstream);
+      };
+
     return std::make_shared<gma::SymbolSplit>(std::move(f));
   }
 
@@ -189,47 +366,62 @@ static std::shared_ptr<gma::INode> buildOne(const rapidjson::Value& spec,
   if (type == "Chain") {
     if (!v.HasMember("stages") || !v["stages"].IsArray())
       throw std::runtime_error("Chain: 'stages' must be an array");
+
     auto curDown = downstream;
-    for (int i = static_cast<int>(v["stages"].Size())-1; i >= 0; --i) {
-      curDown = buildOne(v["stages"][static_cast<rapidjson::SizeType>(i)], defaultSymbol, deps, curDown);
+    const auto& stages = v["stages"];
+    for (int i = static_cast<int>(stages.Size()) - 1; i >= 0; --i) {
+      curDown = buildOne(stages[static_cast<rapidjson::SizeType>(i)],
+                         defaultSymbol,
+                         deps,
+                         curDown);
     }
     return curDown; // head of the chain
   }
 
-  throw std::runtime_error("TreeBuilder: unknown node type '"+type+"'");
+  throw std::runtime_error("TreeBuilder: unknown node type '" + type + "'");
 }
 
-// -------- Public API --------
+//
+// -------- Public API: buildNode / buildSimple / buildForRequest --------
+//
 
-std::shared_ptr<gma::INode> buildNode(const rapidjson::Value& spec,
-                                 const std::string& defaultSymbol,
-                                 const Deps& deps,
-                                 std::shared_ptr<gma::INode> terminal)
-{
+std::shared_ptr<gma::INode> buildNode(const rapidjson::Value&      spec,
+                                      const std::string&           defaultSymbol,
+                                      const Deps&                  deps,
+                                      std::shared_ptr<gma::INode>  terminal) {
   return buildOne(spec, defaultSymbol, deps, std::move(terminal));
 }
 
-std::shared_ptr<gma::INode> buildSimple(const std::string& symbol,
-                                   const std::string& field,
-                                   int pollMs,
-                                   const Deps& deps,
-                                   std::shared_ptr<gma::INode> terminal)
-{
-  if (field.empty()) throw std::runtime_error("buildSimple: field is empty");
-  auto accessor = std::make_shared<gma::AtomicAccessor>(symbol, field, deps.store, terminal);
+std::shared_ptr<gma::INode> buildSimple(const std::string&      symbol,
+                                        const std::string&      field,
+                                        int                     pollMs,
+                                        const Deps&             deps,
+                                        std::shared_ptr<gma::INode> terminal) {
+  if (field.empty())
+    throw std::runtime_error("buildSimple: field is empty");
+  if (!deps.store)
+    throw std::runtime_error("buildSimple: missing store");
+
+  auto accessor =
+    std::make_shared<gma::AtomicAccessor>(symbol, field, deps.store, terminal);
+
   if (pollMs > 0) {
-    if (!deps.pool) throw std::runtime_error("buildSimple: missing pool");
-    return std::make_shared<gma::Interval>(std::chrono::milliseconds(pollMs), accessor, deps.pool);
+    if (!gma::gThreadPool)
+      throw std::runtime_error("buildSimple: global gThreadPool not initialized");
+    return std::make_shared<gma::Interval>(std::chrono::milliseconds(pollMs),
+                                          accessor,
+                                          gma::gThreadPool.get());
   }
   return accessor;
+
 }
 
-// NEW: return a dispatcher-facing Listener head wired into optional pipeline → terminal
-BuiltChain buildForRequest(const rapidjson::Value& requestJson,
-                           const Deps& deps,
-                           std::shared_ptr<gma::INode> terminal)
-{
+// High-level entry: request JSON -> Listener head wired into optional pipeline -> terminal
+BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
+                           const Deps&                  deps,
+                           std::shared_ptr<gma::INode>  terminal) {
   const auto& rq = expectObj(requestJson, "request");
+
   if (!rq.HasMember("symbol") || !rq["symbol"].IsString())
     throw std::runtime_error("buildForRequest: missing 'symbol'");
   if (!rq.HasMember("field") || !rq["field"].IsString())
@@ -239,22 +431,25 @@ BuiltChain buildForRequest(const rapidjson::Value& requestJson,
   const std::string field  = rq["field"].GetString();
   const std::size_t cap    = sizeOr(rq, "queueCap", 1024);
 
-  // Build optional middle pipeline (head-of-pipeline) that forwards to terminal.
+  // Optional mid-pipeline, ultimately forwarding into terminal
   std::shared_ptr<gma::INode> midHead = terminal;
 
-  // Single node
+  // Single node under "node"
   if (rq.HasMember("node") && rq["node"].IsObject()) {
     midHead = buildOne(rq["node"], symbol, deps, terminal);
   }
 
-  // Pipeline array under "pipeline" or "stages"
+  // Or an array pipeline under "pipeline" or "stages"
   const char* pipeKeys[] = {"pipeline", "stages"};
   for (const char* k : pipeKeys) {
     if (rq.HasMember(k) && rq[k].IsArray()) {
       auto curDown = terminal;
       const auto& arr = rq[k];
-      for (int i = static_cast<int>(arr.Size())-1; i >= 0; --i) {
-        curDown = buildOne(arr[static_cast<rapidjson::SizeType>(i)], symbol, deps, curDown);
+      for (int i = static_cast<int>(arr.Size()) - 1; i >= 0; --i) {
+        curDown = buildOne(arr[static_cast<rapidjson::SizeType>(i)],
+                           symbol,
+                           deps,
+                           curDown);
       }
       midHead = curDown;
       break;
@@ -265,7 +460,11 @@ BuiltChain buildForRequest(const rapidjson::Value& requestJson,
     throw std::runtime_error("buildForRequest: missing dispatcher/pool");
 
   using gma::nodes::Listener;
-  auto head = std::make_shared<Listener>(symbol, field, midHead, deps.pool, deps.dispatcher, cap);
+  auto head = std::make_shared<Listener>(symbol,
+                                        field,
+                                        midHead,
+                                        deps.pool,
+                                        deps.dispatcher);
 
   BuiltChain out;
   out.head = head;
