@@ -5,28 +5,35 @@
 #include <sstream>
 #include <iomanip>
 #include <thread>
+#include <map>
+#include <vector>  
+#include <mutex>
+#include <cctype>
+#include <chrono>
 
-namespace gma::util {
+namespace gma { namespace util {
 
 static thread_local std::map<std::string, std::string> t_ctx;
 
 static const char* lvlStr(LogLevel l) {
-  switch (l) { case LogLevel::TRACE: return "TRACE";
-               case LogLevel::DEBUG: return "DEBUG";
-               case LogLevel::INFO:  return "INFO";
-               case LogLevel::WARN:  return "WARN";
-               case LogLevel::ERROR: return "ERROR"; }
+  switch (l) {
+    case LogLevel::Trace: return "TRACE";
+    case LogLevel::Debug: return "DEBUG";
+    case LogLevel::Info:  return "INFO";
+    case LogLevel::Warn:  return "WARN";
+    case LogLevel::Error: return "ERROR";
+  }
   return "INFO";
 }
 
 LogLevel parseLevel(const std::string& s) {
   std::string x=s; for (auto& c:x) c=std::tolower(c);
-  if (x=="trace") return LogLevel::TRACE;
-  if (x=="debug") return LogLevel::DEBUG;
-  if (x=="info")  return LogLevel::INFO;
-  if (x=="warn")  return LogLevel::WARN;
-  if (x=="error") return LogLevel::ERROR;
-  return LogLevel::INFO;
+  if (x=="trace") return LogLevel::Trace;
+  if (x=="debug") return LogLevel::Debug;
+  if (x=="info")  return LogLevel::Info;
+  if (x=="warn")  return LogLevel::Warn;
+  if (x=="error") return LogLevel::Error;
+  return LogLevel::Info;
 }
 
 Logger& logger() {
@@ -112,4 +119,4 @@ Logger::Scoped::~Scoped() {
   // we’ll keep it simple: no-op; callers can nest freely (thread-local)
 }
 
-} // namespace gma::util
+}} // namespace gma::util

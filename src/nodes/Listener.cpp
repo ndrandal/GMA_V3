@@ -1,13 +1,13 @@
 #include "gma/nodes/Listener.hpp"
 #include "gma/MarketDispatcher.hpp"
-#include "gma/ThreadPool.hpp"
+#include "gma/rt/ThreadPool.hpp"
 
 using namespace gma::nodes;
 
 Listener::Listener(std::string symbol,
                    std::string field,
                    std::shared_ptr<INode> downstream,
-                   gma::ThreadPool* pool,
+                   gma::rt::ThreadPool* pool,
                    gma::MarketDispatcher* dispatcher)
   : symbol_(std::move(symbol))
   , field_(std::move(field))
@@ -16,19 +16,19 @@ Listener::Listener(std::string symbol,
   , dispatcher_(dispatcher)
 {
   if (dispatcher_) {
-    // Register this node for updates to (symbol, field)
     dispatcher_->registerListener(symbol_, field_, shared_from_this());
   }
 }
 
 void Listener::onValue(const gma::SymbolValue& sv) {
   if (stopping_.load(std::memory_order_acquire)) return;
+
   auto down = downstream_.lock();
   if (!down) return;
 
   if (pool_) {
     gma::SymbolValue copy = sv;
-    pool_->post([d = std::move(down), v = std::move(copy)]() {
+    pool_->post([d = std::move(down), v = std::move(copy)]() mutable {
       d->onValue(v);
     });
   } else {

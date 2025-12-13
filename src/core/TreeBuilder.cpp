@@ -16,7 +16,7 @@
 
 // Runtime deps
 #include "gma/AtomicStore.hpp"
-#include "gma/ThreadPool.hpp"
+#include "gma/rt/ThreadPool.hpp"
 #include "gma/MarketDispatcher.hpp"
 #include "gma/rt/ThreadPool.hpp"  // for gma::gThreadPool
 

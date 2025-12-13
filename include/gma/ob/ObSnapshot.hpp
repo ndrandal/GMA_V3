@@ -2,6 +2,7 @@
 #include <vector>
 #include <string>
 #include <optional>
+#include <limits>   // <-- ADD THIS
 #include <cstdint>
 #include "gma/ob/ObKey.hpp"
 

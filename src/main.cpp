@@ -18,6 +18,7 @@
 #include "gma/util/Metrics.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include "gma/runtime/ShutdownCoordinator.hpp"
+#include "gma/ExecutionContext.hpp"
 
 // -------- TA (T3) --------
 #include "gma/ta/TAComputer.hpp"
@@ -40,12 +41,13 @@ static inline int64_t now_ms() {
   return duration_cast<milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
+
 // Global shutdown coordinator (T7)
 static gma::rt::ShutdownCoordinator gShutdown;
 
 // Simple POSIX signal hook to trigger graceful stop (T7)
 static void handleSignal(int) {
-  gShutdown.stopAll();
+  gShutdown.stop();
 }
 
 // ---------------------------
@@ -58,33 +60,13 @@ static std::shared_ptr<gma::AtomicStore> makeAtomicStore() {
   return std::make_shared<gma::AtomicStore>();
 }
 
+
 static std::shared_ptr<gma::MarketDispatcher>
-makeDispatcher(const std::shared_ptr<gma::AtomicStore>& store) {
-  // Your dispatcher probably needs the pool and store; we use the global pool (T6).
-  return std::make_shared<gma::MarketDispatcher>(gma::gThreadPool, store);
-}
-
-// If you built T5’s ClientConnection layer into WebSocketServer, you can keep using it as-is.
-// This function demonstrates starting your transport exactly like your pre-change main did.
-static void startWebSocketServer(
-    boost::asio::io_context& ioc,
-    const std::shared_ptr<gma::AtomicStore>& store,
-    const std::shared_ptr<gma::MarketDispatcher>& dispatcher,
-    unsigned short port)
+makeDispatcher(const std::shared_ptr<gma::AtomicStore>& store)
 {
-  // If your WebSocketServer ctor signature differs, adjust here.
-  gma::WebSocketServer server(ioc, store.get(), dispatcher.get(), port);
-  server.run();
-}
-
-// Optional external feed ingress (if you use it). Adjust/remove if unused.
-static void startFeedServer(
-    boost::asio::io_context& ioc,
-    const std::shared_ptr<gma::MarketDispatcher>& dispatcher,
-    unsigned short port)
-{
-  server::FeedServer feedSrv{ioc, *dispatcher, port};
-  feedSrv.run();
+  // MarketDispatcher wants (ThreadPool*, AtomicStore*)
+  // ThreadPool type is gma::rt::ThreadPool in your repo.
+  return std::make_shared<gma::MarketDispatcher>(gma::gThreadPool.get(), store.get());
 }
 
 // ---------------------------
@@ -93,147 +75,102 @@ static void startFeedServer(
 int main(int argc, char* argv[]) {
   using namespace gma::util;
 
-  // 0) OS signals -> graceful stop (T7)
+  // ---------------------------
+  // 0) Signals -> graceful stop
+  // ---------------------------
   std::signal(SIGINT,  handleSignal);
   std::signal(SIGTERM, handleSignal);
 
-  // 1) Load config (T8). Env-only works; set GMA_CONFIG to load a JSON file first.
-  Config& cfg = Config::get();
-  if (auto p = Config::env("GMA_CONFIG")) {
-    std::string err; Config::loadFromFile(cfg, *p, &err);
-    if (!err.empty()) std::cerr << "[config] warning: " << err << std::endl;
-  }
-  Config::loadFromEnv(cfg);
+  // ---------------------------
+  // 1) Config (your current Config only supports loadFromFile)
+  //    argv[1] = wsPort (optional)
+  //    argv[2] = configFilePath (optional)
+  // ---------------------------
+  Config cfg; // NOTE: no Config::get() in your current header
 
-  // Allow port override from argv[1] for parity with your old main
-  unsigned short wsPort = static_cast<unsigned short>(cfg.wsPort);
+  unsigned short wsPort = 8080; // sensible default
   if (argc > 1) {
-    try { wsPort = static_cast<unsigned short>(std::stoul(argv[1])); }
-    catch (...) {
-      std::cerr << "Invalid port '" << argv[1] << "'. Using config/default " << wsPort << "\n";
+    try {
+      wsPort = static_cast<unsigned short>(std::stoul(argv[1]));
+    } catch (...) {
+      std::cerr << "Invalid port '" << argv[1] << "', using default " << wsPort << "\n";
     }
   }
 
-  // 2) Logger & Metrics (T8)
-  logger().setLevel(parseLevel(cfg.logLevel));
-  logger().setFormatJson(cfg.logFormat == std::string("json"));
-  logger().setFile(cfg.logFile);
-  GLOG_INFO("boot", {{"wsPort", std::to_string(wsPort)},
-                     {"threads", std::to_string(cfg.threadPoolSize)}});
-
-  if (cfg.metricsEnabled) {
-    MetricRegistry::instance().startReporter(cfg.metricsIntervalSec);
-    gShutdown.registerStep("metrics-stop", 70, []{
-      MetricRegistry::instance().stopReporter();
-    });
+  if (argc > 2) {
+    if (!cfg.loadFromFile(argv[2])) {
+      std::cerr << "[config] warning: failed to load file: " << argv[2] << "\n";
+    }
   }
 
-  // 3) ThreadPool (global) (T6)
-  gma::gThreadPool = std::make_shared<gma::rt::ThreadPool>(cfg.threadPoolSize);
+  // ---------------------------
+  // 2) Logger (no macros in your build)
+  // ---------------------------
+  logger().log(
+    gma::util::LogLevel::Info,
+    "boot",
+    {{"wsPort", std::to_string(wsPort)}}
+  );
+
+  // ---------------------------
+  // 3) Thread pool (global)
+  // ---------------------------
+  gma::gThreadPool = std::make_shared<gma::rt::ThreadPool>(4); // choose a default
   gShutdown.registerStep("pool-drain",   80, []{ if (gma::gThreadPool) gma::gThreadPool->drain(); });
   gShutdown.registerStep("pool-destroy", 85, []{ gma::gThreadPool.reset(); });
 
-  // 4) Core components: Store + Dispatcher
-  auto store       = makeAtomicStore();
-  auto dispatcher  = makeDispatcher(store);
+  // ---------------------------
+  // 4) Core components
+  // ---------------------------
+  auto store      = makeAtomicStore();
+  auto dispatcher = makeDispatcher(store);
 
-  // 5) TAComputer (T3): compute px.* and write to AtomicStore (+ optional notify)
-  gma::ta::TAConfig taCfg;
-  taCfg.historyMax = cfg.taHistoryMax;
-  taCfg.smaPeriods = cfg.taSMA;
-  taCfg.emaPeriods = cfg.taEMA;
-  taCfg.vwapPeriods= cfg.taVWAP;
-  taCfg.medPeriods = cfg.taMED;
-  taCfg.minPeriods = cfg.taMIN;
-  taCfg.maxPeriods = cfg.taMAX;
-  taCfg.stdPeriods = cfg.taSTD;
-  taCfg.rsiPeriod  = cfg.taRSI;
-
-  auto writeFn = [store](const std::string& sym, const std::string& key, double v, int64_t ts){
-    // Implement your store write call:
-    // store->write(sym, key, v, ts);
-    (void)sym; (void)key; (void)v; (void)ts;
-  };
-  auto notifyFn = [dispatcher](const std::string& sym, const std::string& key){
-    // If your dispatcher supports waking listeners per (sym,key), call it here:
-    // dispatcher->notify(sym, key);
-    (void)sym; (void)key;
-  };
-  auto ta = std::make_shared<gma::ta::TAComputer>(taCfg, writeFn, notifyFn);
-
-  // 6) Order Book (T4): snapshot source + provider + materializer (optional)
-  // Hook these lambdas into YOUR live order book manager (replace the TODOs).
-  std::shared_ptr<gma::ob::FunctionalSnapshotSource> snapshotSrc;
-  {
-    // ---- Replace this block with your real capture/tick hooks ----
-    auto captureFn = /* TODO: wire to your OrderBookManager */ 
-      [](const std::string& sym, size_t maxLevels, gma::ob::Mode mode,
-         std::optional<std::pair<double,double>> band) -> gma::ob::Snapshot {
-        (void)sym; (void)maxLevels; (void)mode; (void)band;
-        return {}; // Empty snapshot means OB provider is effectively disabled.
-      };
-    auto tickFn = /* TODO: return instrument tick size for 'sym' */ 
-      [](const std::string& sym)->double { (void)sym; return 0.01; };
-    snapshotSrc = std::make_shared<gma::ob::FunctionalSnapshotSource>(captureFn, tickFn);
-  }
-
-  // Register "ob" namespace so AtomicAccessor can lazy-resolve on cache miss.
-  // If your captureFn is still the placeholder above, this will just return NaN.
-  auto obProvider = std::make_shared<gma::ob::Provider>(snapshotSrc, /*per*/20, /*agg*/20);
-  gma::AtomicProviderRegistry::registerNamespace(
-    "ob",
-    [obProvider](const std::string& sym, const std::string& fullKey){
-      return obProvider->get(sym, fullKey);
-    });
-  // Optional materialization (push hot keys into the store + notify). Safe to enable even if OB is sparse.
-  auto obMat = std::make_shared<gma::ob::Materializer>(snapshotSrc, writeFn, notifyFn);
-  gma::ob::MaterializeConfig obCfg;
-  obCfg.defaultKeys     = gma::ob::defaultProfile(); // TOB, spread, cum depths, etc.
-  obCfg.maxLevelsPer    = 20;
-  obCfg.maxLevelsAgg    = 20;
-  obCfg.throttleMs      = 5;
-  obCfg.notifyOnWrite   = true;
-  obMat->start(obCfg);
-  gShutdown.registerStep("ob-materializer", 20, [obMat]{ obMat->stop(); });
-
-  gShutdown.registerStep("ws-stop-accept",   5,  [ws]{ try{ ws->stopAccept(); }catch(...){} });
-  gShutdown.registerStep("ws-close-sessions",40, [ws]{ try{ ws->closeAll(); }catch(...){} }); // or via your SessionManager
-  gShutdown.registerStep("ob-mat-stop",      50, [obMat]{ try{ obMat->stop(); }catch(...){} });
-  gShutdown.registerStep("feed-stop",        55, [feed]{ try{ feed->stop(); }catch(...){} });
-  gShutdown.registerStep("asio-stop",        60, [&ioc]{ ioc.stop(); });
-  gShutdown.registerStep("metrics-stop",     70, []{ gma::util::MetricRegistry::instance().stopReporter(); });
-  gShutdown.registerStep("pool-drain",       80, []{ if (gma::gThreadPool) gma::gThreadPool->drain(); });
-  gShutdown.registerStep("pool-destroy",     85, []{ gma::gThreadPool.reset(); });
-
-  // 7) I/O (ASIO) + servers
+  // ---------------------------
+  // 5) ASIO + servers
+  // ---------------------------
   boost::asio::io_context ioc;
 
-  // WebSocket transport (T5). This keeps your existing server but all request
-  // trees ultimately hit AtomicAccessor/WSResponder you wired in T5.
-  startWebSocketServer(ioc, store, dispatcher, wsPort);
+  // ExecutionContext wants (AtomicStore*, ThreadPool*)
+  // (you already fixed the ctor error, so this should match now)
+  gma::ExecutionContext exec(store.get(), gma::gThreadPool.get());
 
-  // If you have an external feed server that injects ticks or book deltas, start it here.
-  // (Set the port from config or keep the legacy 9001 as your code had.)
-  startFeedServer(ioc, dispatcher, /*port=*/9001);
+  gma::WebSocketServer ws(ioc, &exec, dispatcher.get(), wsPort);
+  ws.run();
 
-  GLOG_INFO("listening", {{"wsPort", std::to_string(wsPort)}, {"feedPort", "9001"}});
+  // Optional feed server (your header shows gma::FeedServer, takes MarketDispatcher*)
+  gma::FeedServer feed(ioc, dispatcher.get(), 9001);
+  feed.run();
 
-  // 8) Shutdown sequencing (T7): stop accept first, then sessions (handled inside servers),
-  //    then producers/timers/materializers, then thread pool, then metrics.
-  // Your WebSocketServer/FeedServer should stop when io_context stops.
-  gShutdown.registerStep("asio-stop", 60, [&ioc]{ ioc.stop(); });
+  // ---------------------------
+  // 6) Shutdown sequencing
+  // ---------------------------
+  gShutdown.registerStep("ws-stop-accept",    5,  [&ws]{ try { ws.stopAccept(); } catch (...) {} });
+  gShutdown.registerStep("ws-close-sessions", 40, [&ws]{ try { ws.closeAll(); } catch (...) {} });
 
-  // 9) Run event loop (blocks until shutdown). If something else breaks the loop, ensure stopAll.
+  gShutdown.registerStep("feed-stop",         55, [&feed]{ try { feed.stop(); } catch (...) {} });
+  gShutdown.registerStep("asio-stop",         60, [&ioc]{ try { ioc.stop(); } catch (...) {} });
+
+  logger().log(
+    gma::util::LogLevel::Info,
+    "listening",
+    {{"wsPort", std::to_string(wsPort)}, {"feedPort", "9001"}}
+  );
+
+  // ---------------------------
+  // 7) Run
+  // ---------------------------
   try {
     ioc.run();
   } catch (const std::exception& ex) {
-    GLOG_ERROR(std::string("io_context exception: ") + ex.what(), {});
+    logger().log(gma::util::LogLevel::Error, std::string("io_context exception: ") + ex.what(), {});
   } catch (...) {
-    GLOG_ERROR("io_context exception: unknown", {});
+    logger().log(gma::util::LogLevel::Error, "io_context exception: unknown", {});
   }
 
-  // 10) Make sure we stop everything on natural exit as well (idempotent).
-  gShutdown.stopAll();
-  GLOG_INFO("stopped", {});
+  // Ensure shutdown steps run even on natural exit
+  gShutdown.stop();
+
+  logger().log(gma::util::LogLevel::Info, "stopped", {});
   return EXIT_SUCCESS;
 }
+

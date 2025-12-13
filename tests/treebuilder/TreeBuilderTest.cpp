@@ -1,9 +1,9 @@
 #include "gma/TreeBuilder.hpp"
 #include "gma/ExecutionContext.hpp"
 #include "gma/MarketDispatcher.hpp"
-#include "gma/ThreadPool.hpp"
+#include "gma/rtThreadPool.hpp"
 #include "gma/AtomicStore.hpp"
-#include "gma/Config.hpp"
+#include "gma/util/Config.hpp"
 #include "gma/nodes/Listener.hpp"
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>

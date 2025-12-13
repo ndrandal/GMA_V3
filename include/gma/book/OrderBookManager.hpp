@@ -1,7 +1,7 @@
 #pragma once
 #include "gma/book/OrderBook.hpp"
 #include "gma/book/DepthTypes.hpp"
-#include "gma/Metrics.hpp"
+#include "gma/util/Metrics.hpp"
 #include <unordered_map>
 #include <shared_mutex>
 #include <string>
@@ -95,7 +95,7 @@ public:
     DepthSnapshot buildSnapshot(const std::string& symbol, size_t levels) const;
 
     // ---- Admin / Observability (D10) ----
-    MetricsSnapshot getStats() const;                              // snapshot all counters
+    MetricsSnapshot getStats() const;                            // snapshot all counters
     bool assertInvariants(const std::string& symbol, std::string* whyNot = nullptr) const;
     std::string dumpLadder(const std::string& symbol, size_t maxLevelsPerSide = 50) const;
 
@@ -134,6 +134,7 @@ private:
     std::mutex subsMx_;
     uint64_t nextSubId_ = 1;
     std::unordered_map<std::string, uint64_t> pubSeq_; // per-symbol publication seq
+    OrderBook& book(const std::string& symbol); 
 
     // Metrics
     Metrics metrics_;

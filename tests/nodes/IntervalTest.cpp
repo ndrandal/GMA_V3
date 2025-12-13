@@ -1,5 +1,5 @@
 #include "gma/nodes/Interval.hpp"
-#include "gma/ThreadPool.hpp"
+#include "gma/rt/ThreadPool.hpp"
 #include "gma/nodes/INode.hpp"
 #include <gtest/gtest.h>
 #include <memory>

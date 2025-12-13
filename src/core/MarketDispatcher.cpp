@@ -1,5 +1,5 @@
 #include "gma/MarketDispatcher.hpp"
-#include "gma/ThreadPool.hpp"
+#include "gma/rt/ThreadPool.hpp"
 #include "gma/AtomicStore.hpp"
 #include "gma/FunctionMap.hpp"
 #include "gma/nodes/INode.hpp"
@@ -12,7 +12,7 @@
 
 using namespace gma;
 
-MarketDispatcher::MarketDispatcher(ThreadPool* threadPool,
+MarketDispatcher::MarketDispatcher(rt::ThreadPool* threadPool,
                                    AtomicStore* store)
   : _threadPool(threadPool)
   , _store(store) {}

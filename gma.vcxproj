@@ -274,26 +274,13 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\book\OrderBook.cpp" />
-    <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\book\OrderBookManager.cpp">
-      <ObjectFileName>$(IntDir)/src/book/OrderBookManager.cpp.obj</ObjectFileName>
-    </ClCompile>
+    <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\book\OrderBookManager.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\core\AtomicFunctions.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\core\AtomicStore.cpp" />
-    <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\core\ClientConnection.cpp">
-      <ObjectFileName>$(IntDir)/src/core/ClientConnection.cpp.obj</ObjectFileName>
-    </ClCompile>
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\core\FunctionMap.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\core\JsonValidator.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\core\MarketDispatcher.cpp" />
-    <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\core\OrderBookManager.cpp">
-      <ObjectFileName>$(IntDir)/src/core/OrderBookManager.cpp.obj</ObjectFileName>
-    </ClCompile>
-    <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\core\RequestRegistry.cpp">
-      <ObjectFileName>$(IntDir)/src/core/RequestRegistry.cpp.obj</ObjectFileName>
-    </ClCompile>
-    <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\core\ThreadPool.cpp">
-      <ObjectFileName>$(IntDir)/src/core/ThreadPool.cpp.obj</ObjectFileName>
-    </ClCompile>
+    <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\core\RequestRegistry.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\core\TreeBuilder.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\nodes\Aggregate.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\nodes\AtomicAccessor.cpp" />
@@ -306,9 +293,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\ob\ObKey.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\ob\ObMaterializer.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\ob\ObProvider.cpp" />
-    <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\rt\ThreadPool.cpp">
-      <ObjectFileName>$(IntDir)/src/rt/ThreadPool.cpp.obj</ObjectFileName>
-    </ClCompile>
+    <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\rt\ThreadPool.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\server\ClientSession.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\server\FeedServer.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\server\WebSocketServer.cpp" />
@@ -316,12 +301,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\util\Config.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\util\Logger.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\util\Metrics.cpp" />
-    <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\ws\ClientConnection.cpp">
-      <ObjectFileName>$(IntDir)/src/ws/ClientConnection.cpp.obj</ObjectFileName>
-    </ClCompile>
-    <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\ws\RequestRegistry.cpp">
-      <ObjectFileName>$(IntDir)/src/ws/RequestRegistry.cpp.obj</ObjectFileName>
-    </ClCompile>
+    <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\ws\ClientConnection.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\ws\WSResponder.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\ws\WsBridge.cpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\AtomicFunctions.hpp" />
@@ -330,7 +310,6 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\ExecutionContext.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\FunctionMap.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\JsonValidator.hpp" />
-    <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\Logger.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\MarketDispatcher.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\Metrics.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\OrderBookManager.hpp" />
@@ -340,7 +319,6 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\SymbolHistory.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\SymbolTick.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\SymbolValue.hpp" />
-    <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\ThreadPool.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\TreeBuilder.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\atomic\AtomicProveiderRegistry.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\book\DepthTypes.hpp" />
@@ -376,7 +354,6 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\util\Metrics.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\ws\ClientConnection.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\ws\JsonSchema.hpp" />
-    <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\ws\RequestRegistry.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\ws\WSResponder.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\ws\WsBridge.hpp" />
   </ItemGroup>

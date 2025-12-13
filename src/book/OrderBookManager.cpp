@@ -128,7 +128,7 @@ void OrderBookManager::maybePublishDelta_(const std::string& symbol,
     d.seq = seq;
 
     // metrics
-    metrics_.incDeltasPublished(symbol);
+    metrics_.incDeltasPublished();
 
     // fan-out
     std::unordered_map<uint64_t, DeltaHandler> handlersCopy;

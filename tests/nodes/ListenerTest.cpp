@@ -1,6 +1,6 @@
 #include "gma/nodes/Listener.hpp"
 #include "gma/MarketDispatcher.hpp"
-#include "gma/ThreadPool.hpp"
+#include "gma/rt/ThreadPool.hpp"
 #include "gma/AtomicStore.hpp"
 #include "gma/SymbolValue.hpp"
 #include "gma/nodes/INode.hpp"

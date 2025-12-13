@@ -11,7 +11,7 @@
 #include "gma/SymbolTick.hpp"
 #include "gma/nodes/INode.hpp"
 #include "gma/SymbolValue.hpp"
-#include "gma/ThreadPool.hpp"
+#include "gma/rt/ThreadPool.hpp"
 #include "gma/AtomicStore.hpp"
 #include "gma/FunctionMap.hpp"
 
@@ -29,7 +29,7 @@ namespace gma {
  */
 class MarketDispatcher {
 public:
-  MarketDispatcher(ThreadPool* threadPool, AtomicStore* store);
+  MarketDispatcher(gma::rt::ThreadPool* threadPool, AtomicStore* store);
 
   // Subscribe/unsubscribe a node to a (symbol, field) key.
   void registerListener(const std::string& symbol,
@@ -63,14 +63,14 @@ private:
   std::unordered_map<
       std::string, // symbol
       std::map<
-          std::string,                     // field name (raw or function name)
-          std::vector<std::shared_ptr<INode>> // subscribers
+          std::string,                         // field name (raw or function name)
+          std::vector<std::shared_ptr<INode>>  // subscribers
       >
   > _listeners;
 
-  mutable std::shared_mutex _mutex;  // protects _histories and _listeners
-  ThreadPool* _threadPool;           // for offloading work
-  AtomicStore* _store;               // where atomic results are written
+  mutable std::shared_mutex _mutex;   // protects _histories and _listeners
+  gma::rt::ThreadPool* _threadPool;   // for offloading work (not owned)
+  AtomicStore* _store;                // where atomic results are written (not owned)
   static constexpr size_t MAX_HISTORY = 1000;
 };
 
