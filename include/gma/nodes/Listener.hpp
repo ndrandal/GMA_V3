@@ -24,6 +24,12 @@ public:
            gma::rt::ThreadPool* pool,
            gma::MarketDispatcher* dispatcher);
 
+  // IMPORTANT:
+  // Do NOT register with MarketDispatcher from the constructor.
+  // shared_from_this() is not valid until the object is owned by a shared_ptr.
+  // Call start() immediately after construction.
+  void start();
+
   // INode
   void onValue(const SymbolValue& sv) override;
   void shutdown() noexcept override;

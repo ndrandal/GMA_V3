@@ -15,6 +15,10 @@ Listener::Listener(std::string symbol,
   , pool_(pool)
   , dispatcher_(dispatcher)
 {
+}
+
+void Listener::start() {
+  // Must be called after construction when owned by a shared_ptr.
   if (dispatcher_) {
     dispatcher_->registerListener(symbol_, field_, shared_from_this());
   }

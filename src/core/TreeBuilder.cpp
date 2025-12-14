@@ -278,11 +278,13 @@ static std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
     (void)cap; // currently unused, kept for future queue sizing
 
     using gma::nodes::Listener;
-    return std::make_shared<Listener>(symbol,
-                                      field,
-                                      downstream,
-                                      deps.pool,
-                                      deps.dispatcher);
+    auto sp = std::make_shared<Listener>(symbol,
+                                         field,
+                                         downstream,
+                                         deps.pool,
+                                         deps.dispatcher);
+    sp->start();
+    return sp;
   }
 
 
@@ -465,6 +467,8 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
                                         midHead,
                                         deps.pool,
                                         deps.dispatcher);
+  head->start();
+  head->start();
 
   BuiltChain out;
   out.head = head;

@@ -8,7 +8,12 @@
 #include <utility>
 
 // Project headers (adjust paths if needed)
-#include "gma/MarketDispatcher.hpp"  // <-- adjust if your header lives elsewhere
+#include "gma/MarketDispatcher.hpp"
+#include "gma/SymbolTick.hpp"
+#include "gma/util/Logger.hpp"
+#include "gma/util/Metrics.hpp"
+
+#include <rapidjson/document.h>
 
 namespace gma {
 
@@ -69,15 +74,35 @@ private:
 
   void handleLine(const std::string& line) {
     if (!dispatcher_) return;
-    // Here you would parse `line` (e.g., JSON) into your domain object and dispatch.
-    // To keep this generic (no dependency on internal symbol types), hand the raw
-    // line to the dispatcher via a hypothetical method. Replace with your API:
-    //
-    // dispatcher_->ingestLine(line);
-    //
-    // If you have a SymbolTick type and a parser, it would look like:
-    //   SymbolTick tick = parseTick(line);
-    //   dispatcher_->onTick(tick);
+    // Smoke-test framing: newline-delimited JSON objects.
+    // Required: {"symbol":"AAPL", ... numeric fields ... }
+    GMA_METRIC_HIT("feed.line_in");
+
+    auto doc = std::make_shared<rapidjson::Document>();
+    doc->Parse(line.c_str());
+    if (doc->HasParseError() || !doc->IsObject()) {
+      GMA_METRIC_HIT("feed.tick_bad");
+      gma::util::logger().log(gma::util::LogLevel::Warn,
+                              "feed.line.bad_json",
+                              { {"line", line} });
+      return;
+    }
+
+    if (!doc->HasMember("symbol") || !(*doc)["symbol"].IsString()) {
+      GMA_METRIC_HIT("feed.tick_bad");
+      gma::util::logger().log(gma::util::LogLevel::Warn,
+                              "feed.line.missing_symbol",
+                              { {"line", line} });
+      return;
+    }
+
+    gma::SymbolTick t;
+    t.symbol  = (*doc)["symbol"].GetString();
+    t.payload = std::move(doc);
+
+    GMA_METRIC_HIT("feed.tick_ok");
+    GMA_METRIC_HIT("dispatch.tick");
+    dispatcher_->onTick(t);
   }
 
 private:
