@@ -1,5 +1,5 @@
-// File: src/main.cpp
-#include <csignal>
+
+
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -33,6 +33,13 @@
 #include "gma/ob/ObMaterializer.hpp"
 #include "gma/ob/ObKeysCatalog.hpp"
 
+
+// Added post smoke
+#include <sstream>
+
+#include <boost/asio/signal_set.hpp>
+#include <boost/asio/executor_work_guard.hpp>
+
 // ---------------------------
 // Helpers
 // ---------------------------
@@ -45,10 +52,6 @@ static inline int64_t now_ms() {
 // Global shutdown coordinator (T7)
 static gma::rt::ShutdownCoordinator gShutdown;
 
-// Simple POSIX signal hook to trigger graceful stop (T7)
-static void handleSignal(int) {
-  gShutdown.stop();
-}
 
 // ---------------------------
 // “Build” helpers (adapt to your codebase)
@@ -69,17 +72,27 @@ makeDispatcher(const std::shared_ptr<gma::AtomicStore>& store)
   return std::make_shared<gma::MarketDispatcher>(gma::gThreadPool.get(), store.get());
 }
 
+// Smoke-test logging: std::cout only (no Logger impl).
+static void logLine(
+  const std::string& event,
+  std::initializer_list<std::pair<std::string, std::string>> fields = {}
+) {
+  std::ostringstream oss;
+  oss << event;
+  for (const auto& kv : fields) {
+    oss << " " << kv.first << "=" << kv.second;
+  }
+  std::cout << oss.str() << std::endl;
+}
+
+
+
 // ---------------------------
 // main
 // ---------------------------
 int main(int argc, char* argv[]) {
   using namespace gma::util;
 
-  // ---------------------------
-  // 0) Signals -> graceful stop
-  // ---------------------------
-  std::signal(SIGINT,  handleSignal);
-  std::signal(SIGTERM, handleSignal);
 
   // ---------------------------
   // 1) Config (your current Config only supports loadFromFile)
@@ -105,12 +118,8 @@ int main(int argc, char* argv[]) {
 
   // ---------------------------
   // 2) Logger (no macros in your build)
-  // ---------------------------
-  logger().log(
-    gma::util::LogLevel::Info,
-    "boot",
-    {{"wsPort", std::to_string(wsPort)}}
-  );
+    // ---------------------------
+  logLine("boot", {{"wsPort", std::to_string(wsPort)}});
 
   // ---------------------------
   // 3) Thread pool (global)
@@ -118,6 +127,7 @@ int main(int argc, char* argv[]) {
   gma::gThreadPool = std::make_shared<gma::rt::ThreadPool>(4); // choose a default
   gShutdown.registerStep("pool-drain",   80, []{ if (gma::gThreadPool) gma::gThreadPool->drain(); });
   gShutdown.registerStep("pool-destroy", 85, []{ gma::gThreadPool.reset(); });
+
 
   // ---------------------------
   // 4) Core components
@@ -129,6 +139,17 @@ int main(int argc, char* argv[]) {
   // 5) ASIO + servers
   // ---------------------------
   boost::asio::io_context ioc;
+
+  auto workGuard = boost::asio::make_work_guard(ioc);
+
+  // Ctrl+C / SIGTERM handled inside ASIO thread so we can run shutdown steps.
+  boost::asio::signal_set signals(ioc, SIGINT, SIGTERM);
+  signals.async_wait([&](const boost::system::error_code& ec, int sig) {
+    if (ec) return;
+    logLine("signal", {{"sig", std::to_string(sig)}});
+    gShutdown.stop();
+  });
+
 
   // ExecutionContext wants (AtomicStore*, ThreadPool*)
   // (you already fixed the ctor error, so this should match now)
@@ -148,13 +169,17 @@ int main(int argc, char* argv[]) {
   gShutdown.registerStep("ws-close-sessions", 40, [&ws]{ try { ws.closeAll(); } catch (...) {} });
 
   gShutdown.registerStep("feed-stop",         55, [&feed]{ try { feed.stop(); } catch (...) {} });
-  gShutdown.registerStep("asio-stop",         60, [&ioc]{ try { ioc.stop(); } catch (...) {} });
+  gShutdown.registerStep("asio-stop", 60, [&]{
+    try { workGuard.reset(); } catch (...) {}
+    try { ioc.stop(); } catch (...) {}
+  });
 
-  logger().log(
-    gma::util::LogLevel::Info,
-    "listening",
-    {{"wsPort", std::to_string(wsPort)}, {"feedPort", "9001"}}
-  );
+  gShutdown.registerStep("final-log", 95, []{
+    logLine("stopped");
+  });
+
+  logLine("listening", {{"wsPort", std::to_string(wsPort)}, {"feedPort", "9001"}});
+
 
   // ---------------------------
   // 7) Run
@@ -170,7 +195,6 @@ int main(int argc, char* argv[]) {
   // Ensure shutdown steps run even on natural exit
   gShutdown.stop();
 
-  logger().log(gma::util::LogLevel::Info, "stopped", {});
   return EXIT_SUCCESS;
 }
 
