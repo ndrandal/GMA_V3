@@ -8,6 +8,7 @@ enable_testing()
 
 # List of test subdirectories — one CMakeLists per module
 set(TEST_MODULES
+  book
   connection
   context
   core

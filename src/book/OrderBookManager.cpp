@@ -41,6 +41,11 @@ OrderBook& OrderBookManager::getOrCreateBook_(const std::string& symbol) {
     return books_.try_emplace(symbol).first->second;
 }
 OrderBook& OrderBookManager::book(const std::string& symbol) { return getOrCreateBook_(symbol); }
+const OrderBook* OrderBookManager::findBook_(const std::string& symbol) const {
+    std::shared_lock rlk(booksMx_);
+    auto it = books_.find(symbol);
+    return (it != books_.end()) ? &it->second : nullptr;
+}
 
 // ---------- validation helpers ----------
 bool OrderBookManager::validatePrice_(const std::string& symbol, double px) const {
@@ -53,6 +58,7 @@ bool OrderBookManager::validatePrice_(const std::string& symbol, double px) cons
 
 // ---------- Feed state / Sequencing ----------
 bool OrderBookManager::onSeq(const std::string& symbol, uint64_t seq) {
+    std::lock_guard<std::mutex> lk(feedMx_);
     auto& st = feed_[symbol];
     if (st.stale) { metrics_.incDroppedStale(); return false; }
     if (st.lastSeq == 0) { st.lastSeq = seq; return true; }
@@ -66,6 +72,7 @@ bool OrderBookManager::onSeq(const std::string& symbol, uint64_t seq) {
 }
 
 void OrderBookManager::onReset(const std::string& symbol, uint32_t newEpoch) {
+    std::lock_guard<std::mutex> lk(feedMx_);
     auto& st = feed_[symbol];
     st.epoch = newEpoch; st.stale = true; st.lastSeq = 0;
     metrics_.incSeqReset();
@@ -74,26 +81,32 @@ void OrderBookManager::onReset(const std::string& symbol, uint32_t newEpoch) {
 }
 
 bool OrderBookManager::isStale(const std::string& symbol) const {
+    std::lock_guard<std::mutex> lk(feedMx_);
     auto it = feed_.find(symbol); if (it == feed_.end()) return false;
     return it->second.stale;
 }
 OrderBookManager::FeedState OrderBookManager::getFeedState(const std::string& symbol) const {
+    std::lock_guard<std::mutex> lk(feedMx_);
     auto it = feed_.find(symbol); if (it == feed_.end()) return FeedState{};
     return it->second;
 }
 bool OrderBookManager::gate_(const std::string& symbol) const {
+    std::lock_guard<std::mutex> lk(feedMx_);
     auto it = feed_.find(symbol); if (it == feed_.end()) return false;
     return it->second.stale;
 }
 
 // ---------- Resolver ----------
 void OrderBookManager::resolverSetCapacity(size_t cap) {
+    std::lock_guard<std::mutex> lk(resolverMx_);
     for (auto& kv : resolver_) kv.second.setCap(cap);
 }
 void OrderBookManager::resolverPut(const std::string& symbol, const std::string& venueKey, const OrderKey& key) {
+    std::lock_guard<std::mutex> lk(resolverMx_);
     resolver_[symbol].put(venueKey, key);
 }
 std::optional<OrderKey> OrderBookManager::resolverGet(const std::string& symbol, const std::string& venueKey) const {
+    std::lock_guard<std::mutex> lk(resolverMx_);
     auto it = resolver_.find(symbol); if (it == resolver_.end()) return std::nullopt;
     return it->second.cget(venueKey);
 }
@@ -124,16 +137,14 @@ void OrderBookManager::maybePublishDelta_(const std::string& symbol,
     d.bid = newBid;
     d.ask = newAsk;
 
-    uint64_t seq = ++pubSeq_[symbol];
-    d.seq = seq;
-
     // metrics
     metrics_.incDeltasPublished();
 
-    // fan-out
+    // fan-out (pubSeq_ and subs_ both under subsMx_)
     std::unordered_map<uint64_t, DeltaHandler> handlersCopy;
     {
         std::lock_guard<std::mutex> lk(subsMx_);
+        d.seq = ++pubSeq_[symbol];
         auto it = subs_.find(symbol);
         if (it != subs_.end()) handlersCopy = it->second;
     }
@@ -328,9 +339,12 @@ bool OrderBookManager::onTrade(const std::string& symbol, double tradePrice, uin
 void OrderBookManager::onSnapshotPerOrder(const std::string& symbol, const std::vector<Order>& tickOrders,
                                           std::optional<uint64_t> snapshotSeq) {
     book(symbol).applySnapshotPerOrder(tickOrders);
-    auto& st = feed_[symbol];
-    st.stale = false;
-    if (snapshotSeq) st.lastSeq = *snapshotSeq;
+    {
+        std::lock_guard<std::mutex> lk(feedMx_);
+        auto& st = feed_[symbol];
+        st.stale = false;
+        if (snapshotSeq) st.lastSeq = *snapshotSeq;
+    }
     metrics_.incSnapshots();
 
     auto bb = book(symbol).bestBid(); uint64_t bbs = book(symbol).bestBidSize();
@@ -344,7 +358,10 @@ void OrderBookManager::onSnapshotAggregated(const std::string& symbol, const std
     std::vector<LevelSnapshotEntry> levels; levels.reserve(levelsD.size());
     for (const auto& e : levelsD) levels.push_back(LevelSnapshotEntry{ e.side, toTicks(symbol, e.price), e.totalSize, e.orderCount });
     book(symbol).applySnapshotAggregated(levels);
-    auto& st = feed_[symbol]; st.stale = false; if (snapshotSeq) st.lastSeq = *snapshotSeq;
+    {
+        std::lock_guard<std::mutex> lk(feedMx_);
+        auto& st = feed_[symbol]; st.stale = false; if (snapshotSeq) st.lastSeq = *snapshotSeq;
+    }
     metrics_.incSnapshots();
 
     auto bb = book(symbol).bestBid(); uint64_t bbs = book(symbol).bestBidSize();
@@ -366,39 +383,52 @@ bool OrderBookManager::onLevelSummary(const std::string& symbol, Side side, doub
 
 // ---------- Queries ----------
 std::optional<double> OrderBookManager::bestBid(const std::string& symbol) const {
-    const OrderBook& b = const_cast<OrderBookManager*>(this)->book(symbol);
-    auto p = b.bestBid(); if (!p) return std::nullopt; return toDouble(symbol, *p);
+    const OrderBook* b = findBook_(symbol);
+    if (!b) return std::nullopt;
+    auto p = b->bestBid(); if (!p) return std::nullopt; return toDouble(symbol, *p);
 }
 std::optional<double> OrderBookManager::bestAsk(const std::string& symbol) const {
-    const OrderBook& b = const_cast<OrderBookManager*>(this)->book(symbol);
-    auto p = b.bestAsk(); if (!p) return std::nullopt; return toDouble(symbol, *p);
+    const OrderBook* b = findBook_(symbol);
+    if (!b) return std::nullopt;
+    auto p = b->bestAsk(); if (!p) return std::nullopt; return toDouble(symbol, *p);
 }
 uint64_t OrderBookManager::bestBidSize(const std::string& symbol) const {
-    const OrderBook& b = const_cast<OrderBookManager*>(this)->book(symbol); return b.bestBidSize();
+    const OrderBook* b = findBook_(symbol);
+    return b ? b->bestBidSize() : 0;
 }
 uint64_t OrderBookManager::bestAskSize(const std::string& symbol) const {
-    const OrderBook& b = const_cast<OrderBookManager*>(this)->book(symbol); return b.bestAskSize();
+    const OrderBook* b = findBook_(symbol);
+    return b ? b->bestAskSize() : 0;
 }
 void OrderBookManager::depthN(const std::string& symbol, size_t n,
                               std::vector<std::pair<double,uint64_t>>& bids,
                               std::vector<std::pair<double,uint64_t>>& asks) const {
     bids.clear(); asks.clear();
-    const OrderBook& b = const_cast<OrderBookManager*>(this)->book(symbol);
-    b.forEachLevel(Side::Bid, n, [&](Price p, uint64_t sz){ bids.emplace_back(toDouble(symbol, p), sz); });
-    b.forEachLevel(Side::Ask, n, [&](Price p, uint64_t sz){ asks.emplace_back(toDouble(symbol, p), sz); });
+    const OrderBook* b = findBook_(symbol);
+    if (!b) return;
+    b->forEachLevel(Side::Bid, n, [&](Price p, uint64_t sz){ bids.emplace_back(toDouble(symbol, p), sz); });
+    b->forEachLevel(Side::Ask, n, [&](Price p, uint64_t sz){ asks.emplace_back(toDouble(symbol, p), sz); });
 }
 
 // ---------- Snapshot builder ----------
 DepthSnapshot OrderBookManager::buildSnapshot(const std::string& symbol, size_t levels) const {
     DepthSnapshot snap;
     snap.symbol = symbol;
-    auto it = feed_.find(symbol);
-    snap.epoch = (it == feed_.end()) ? 0 : it->second.epoch;
-    snap.seq = pubSeq_.count(symbol) ? pubSeq_.at(symbol) : 0;
+    {
+        std::lock_guard<std::mutex> lk(feedMx_);
+        auto it = feed_.find(symbol);
+        snap.epoch = (it == feed_.end()) ? 0 : it->second.epoch;
+    }
+    {
+        std::lock_guard<std::mutex> lk(subsMx_);
+        snap.seq = pubSeq_.count(symbol) ? pubSeq_.at(symbol) : 0;
+    }
 
-    const OrderBook& b = const_cast<OrderBookManager*>(this)->book(symbol);
-    b.forEachLevel(Side::Bid, levels, [&](Price p, uint64_t sz){ snap.bids.emplace_back(p, sz); });
-    b.forEachLevel(Side::Ask, levels, [&](Price p, uint64_t sz){ snap.asks.emplace_back(p, sz); });
+    const OrderBook* b = findBook_(symbol);
+    if (b) {
+        b->forEachLevel(Side::Bid, levels, [&](Price p, uint64_t sz){ snap.bids.emplace_back(p, sz); });
+        b->forEachLevel(Side::Ask, levels, [&](Price p, uint64_t sz){ snap.asks.emplace_back(p, sz); });
+    }
     return snap;
 }
 
@@ -406,24 +436,28 @@ DepthSnapshot OrderBookManager::buildSnapshot(const std::string& symbol, size_t 
 MetricsSnapshot OrderBookManager::getStats() const { return metrics_.snapshot(); }
 
 bool OrderBookManager::assertInvariants(const std::string& symbol, std::string* whyNot) const {
-    const_cast<OrderBookManager*>(this)->book(symbol); // ensure exists
-    return books_.at(symbol).checkInvariants(whyNot);
+    const OrderBook* b = findBook_(symbol);
+    if (!b) { if (whyNot) *whyNot = "book not found"; return false; }
+    return b->checkInvariants(whyNot);
 }
 
 std::string OrderBookManager::dumpLadder(const std::string& symbol, size_t maxLevelsPerSide) const {
     std::ostringstream oss;
     oss << "=== DUMP " << symbol << " ===\n";
-    auto it = feed_.find(symbol);
-    if (it != feed_.end())
-        oss << "epoch=" << it->second.epoch << " stale=" << (it->second.stale ? "true":"false")
-            << " feedSeq=" << it->second.lastSeq << "\n";
+    {
+        std::lock_guard<std::mutex> lk(feedMx_);
+        auto it = feed_.find(symbol);
+        if (it != feed_.end())
+            oss << "epoch=" << it->second.epoch << " stale=" << (it->second.stale ? "true":"false")
+                << " feedSeq=" << it->second.lastSeq << "\n";
+    }
 
-    const OrderBook& b = const_cast<OrderBookManager*>(this)->book(symbol);
+    const OrderBook* b = findBook_(symbol);
 
     // Bids
     oss << "[BIDS]\n";
     size_t count = 0;
-    b.forEachLevel(Side::Bid, maxLevelsPerSide, [&](Price p, uint64_t sz){
+    if (b) b->forEachLevel(Side::Bid, maxLevelsPerSide, [&](Price p, uint64_t sz){
         oss << std::fixed << std::setprecision(10)
             << "  " << std::setw(12) << toDouble(symbol, p) << "  x " << sz << "\n";
         ++count;
@@ -432,7 +466,7 @@ std::string OrderBookManager::dumpLadder(const std::string& symbol, size_t maxLe
 
     // Asks
     oss << "[ASKS]\n"; count = 0;
-    b.forEachLevel(Side::Ask, maxLevelsPerSide, [&](Price p, uint64_t sz){
+    if (b) b->forEachLevel(Side::Ask, maxLevelsPerSide, [&](Price p, uint64_t sz){
         oss << std::fixed << std::setprecision(10)
             << "  " << std::setw(12) << toDouble(symbol, p) << "  x " << sz << "\n";
         ++count;

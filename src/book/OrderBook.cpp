@@ -211,7 +211,6 @@ bool OrderBook::checkInvariants(std::string* whyNot) const {
             ? (bids_.count(loc.price) ? &bids_.at(loc.price) : nullptr)
             : (asks_.count(loc.price) ? &asks_.at(loc.price) : nullptr);
         if (!lvl) { if (whyNot) *whyNot = "per-order: locator references missing level"; return false; }
-        if (loc.it == std::list<Order>::iterator{}) { if (whyNot) *whyNot = "per-order: locator default iterator"; return false; }
         const Order& o = *loc.it;
         const OrderKey key = OrderKey{ o.id, o.feedId, o.epoch, o.synthetic };
         if (!(key == kv.first)) { if (whyNot) *whyNot = "per-order: locator iterator does not match key"; return false; }

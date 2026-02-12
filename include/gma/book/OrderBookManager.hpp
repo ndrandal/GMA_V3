@@ -106,8 +106,10 @@ private:
     std::unordered_map<std::string, double> tickSize_;
     static constexpr double kDefaultTick = 1e-4;
     OrderBook& getOrCreateBook_(const std::string& symbol);
+    const OrderBook* findBook_(const std::string& symbol) const;
 
     // Feed state
+    mutable std::mutex feedMx_;
     std::unordered_map<std::string, FeedState> feed_;
     bool gate_(const std::string& symbol) const;
 
@@ -127,11 +129,12 @@ private:
         }
         void trim() { while (dq.size() > cap) { auto it = std::prev(dq.end()); idx.erase(it->first); dq.pop_back(); } }
     };
+    mutable std::mutex resolverMx_;
     mutable std::unordered_map<std::string, Lru> resolver_;
 
     // Event bus
     std::unordered_map<std::string, std::unordered_map<uint64_t, DeltaHandler>> subs_; // symbol -> (id->handler)
-    std::mutex subsMx_;
+    mutable std::mutex subsMx_;
     uint64_t nextSubId_ = 1;
     std::unordered_map<std::string, uint64_t> pubSeq_; // per-symbol publication seq
     OrderBook& book(const std::string& symbol); 
