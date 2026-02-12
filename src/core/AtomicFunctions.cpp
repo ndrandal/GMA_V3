@@ -88,18 +88,24 @@ void computeAllAtomicValues(
         return s / static_cast<double>(period);
     };
 
-    // EMA over hist prices
+    // EMA over hist prices — full-history seeding (standard approach).
+    // Seed at hist[0], iterate forward through all bars.
+    // Consistent with the MACD incremental computation below.
     auto ema = [&](size_t period) -> double {
         if (n < period) return 0.0;
         double k = 2.0 / (period + 1);
-        double val = hist[n - period].price;
-        for (size_t i = n - period + 1; i < n; ++i)
+        double val = hist[0].price;
+        for (size_t i = 1; i < n; ++i)
             val = k * hist[i].price + (1 - k) * val;
         return val;
     };
 
+    // Pre-compute SMA(20) once for storage, Bollinger, and volatility_rank
+    double sma20 = sma(20);
+    const bool have20 = (n >= 20);
+
     results.emplace_back("sma_5",  sma(5));
-    results.emplace_back("sma_20", sma(20));
+    results.emplace_back("sma_20", sma20);
     results.emplace_back("ema_12", ema(12));
     results.emplace_back("ema_26", ema(26));
 
@@ -117,6 +123,7 @@ void computeAllAtomicValues(
 
     // MACD: line = EMA(12) - EMA(26), signal = 9-period EMA of MACD line series
     // O(n) single-pass: seed both EMAs at hist[0], update incrementally.
+    // Uses the same full-history seeding as the ema() lambda above.
     if (n >= 26) {
         const double k12 = 2.0 / (12 + 1);
         const double k26 = 2.0 / (26 + 1);
@@ -150,12 +157,9 @@ void computeAllAtomicValues(
         results.emplace_back("macd_histogram", 0.0);
     }
 
-    // Pre-compute SMA(20) and stddev(20) once for Bollinger + volatility_rank
-    double sma20 = 0.0;
+    // Compute stddev(20) for Bollinger + volatility_rank (reuses sma20)
     double stddev20 = 0.0;
-    const bool have20 = (n >= 20);
     if (have20) {
-        sma20 = sma(20);
         double sumSq = 0.0;
         for (size_t i = n - 20; i < n; ++i) {
             double d = hist[i].price - sma20;

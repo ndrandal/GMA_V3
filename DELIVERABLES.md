@@ -378,3 +378,105 @@ The **entire** order book system has **zero tests**:
 **Recommended execution order: D6 → D2 → D1 → D5 → D3 → D4**
 
 Fix the build first so you can run tests. Fix the node pipeline so data can flow. Fix computations so results are correct. Then harden runtime, server, and order book.
+
+---
+
+## Deliverable 7: Performance Profiling & Optimization ✅ COMPLETE
+
+**Scope:** Algorithmic fixes, allocation elimination, lock contention, build optimizations, benchmark infrastructure
+
+### Completed (commit 391bb22 + audit fixes)
+
+**Phase 0 — Benchmark Infrastructure:**
+- Added `GMA_BUILD_BENCHMARKS` option with Google Benchmark v1.8.3 via FetchContent
+- Created 4 benchmark suites: `AtomicFunctionsBench`, `DispatcherBench`, `AtomicStoreBench`, `ThreadPoolBench`
+
+**Phase 1 — Algorithmic Fixes:**
+- MACD O(n²) → O(n): single-pass incremental EMA computation with full-history seeding
+- Median O(N log N) → O(N): `std::nth_element` replacing `std::sort`
+- SMA(20) + stddev computed once, reused for Bollinger + volatility_rank
+
+**Phase 2 — Allocation/Copy Elimination:**
+- Added `FunctionMap::forEach()` template — iterates under shared_lock without copying all `std::function` objects
+- Replaced deque copy + per-function vector conversion with single `std::vector` built once under lock
+- MarketDispatcher uses `forEach()` instead of `getAll()`
+
+**Phase 3 — Lock Contention Reduction:**
+- Added `AtomicStore::setBatch()` — all fields written under single lock (~20 acquisitions → 1)
+- SymbolSplit upgraded to `std::shared_mutex` with double-checked locking
+- MarketDispatcher mutex split into `_histMutex` / `_listenerMutex`
+- Listener lambda captures symbol/value by move instead of copying SymbolValue
+
+**Phase 4 — Build Optimizations:**
+- Release builds: `-O3 -march=native` (GCC/Clang), `/O2 /Ob2 /GL /LTCG` (MSVC)
+- LTO via `CheckIPOSupported` on both `gma` and `gma_server` targets
+
+**Audit Fixes (post-commit):**
+- Fixed EMA lambda inconsistency (period-window → full-history seeding to match MACD)
+- Fixed garbled sma_20 test constant
+- Removed dead placeholder assertions (isHalted, marketState, timeSinceOpen, timeUntilClose)
+- Added nullopt guard to test helpers
+- Added 5 setBatch unit tests + 3 forEach unit tests
+- Fixed sumRange() forward-reference compile error
+- Updated AtomicFunctions.hpp doc comment
+
+---
+
+## Deliverables 8–11: Roadmap to Production
+
+> Status: PLANNED — not yet started
+
+### Deliverable 8: Integration & Config Wiring
+
+**Goal:** Validate the full pipeline end-to-end and parameterize hardcoded values.
+
+| Task | Files | Priority |
+|------|-------|----------|
+| Wire `Config` fields → `computeAllAtomicValues()` (parameterize all TA periods) | `src/core/AtomicFunctions.cpp`, `include/gma/AtomicFunctions.hpp` | High |
+| End-to-end integration tests: tick inject → subscribe → verify response callback | `tests/integration/IntegrationTest.cpp` | High |
+| Add ob/* module unit tests (ObMaterializer, ObEngine, ObKey, ObProvider) | `tests/ob/*.cpp` (new) | Medium |
+| Server-layer smoke tests (mock WebSocket client → ClientSession) | `tests/server/*.cpp` (new) | Medium |
+| TAComputer: either wire to Indicators.hpp or remove dead code | `src/ta/TAComputer.cpp`, `include/gma/ta/Indicators.hpp` | Low |
+
+### Deliverable 9: Production Networking
+
+**Goal:** Harden the WebSocket/TCP layer for real-world traffic.
+
+| Task | Files | Priority |
+|------|-------|----------|
+| WebSocket ping/pong heartbeat (30s interval, 5s timeout) | `src/server/ClientSession.cpp` | High |
+| Bounded outbox with slow-client eviction (max 1024 queued messages) | `src/server/ClientSession.cpp` | High |
+| Per-connection rate limiting on subscribe requests | `src/server/ClientSession.cpp` | Medium |
+| Feed port configurable via CLI/config (currently hardcoded 9001) | `src/main.cpp`, `src/util/Config.cpp` | Medium |
+| Connection metrics (active count, messages/sec, latency) | `src/util/Metrics.cpp` | Low |
+
+### Deliverable 10: Live Feed Adapter
+
+**Goal:** Connect to real market data sources.
+
+| Task | Files | Priority |
+|------|-------|----------|
+| Exchange WebSocket client (e.g. Binance, Coinbase, Alpaca) | `src/feed/ExchangeClient.cpp` (new) | High |
+| Feed normalization layer (exchange JSON → internal TickEntry) | `src/feed/FeedNormalizer.cpp` (new) | High |
+| Reconnection with exponential backoff | `src/feed/ExchangeClient.cpp` | High |
+| Symbol subscription management (subscribe/unsubscribe to specific symbols) | `src/feed/SubscriptionManager.cpp` (new) | Medium |
+| Multiple exchange support with unified interface | `include/gma/feed/IFeedAdapter.hpp` (new) | Low |
+
+### Deliverable 11: Observability & Operations
+
+**Goal:** Make the system operable in production.
+
+| Task | Files | Priority |
+|------|-------|----------|
+| Structured logging with request correlation IDs | `src/util/Logger.cpp` | Medium |
+| Metrics emission (Prometheus or StatsD format) | `src/util/Metrics.cpp` | Medium |
+| Health check endpoint (HTTP GET /health) | `src/server/WebSocketServer.cpp` | Medium |
+| Performance counters (ticks/sec, p50/p99 latency) | `src/util/Metrics.hpp` | Low |
+| Admin endpoint for runtime introspection (active subscriptions, history sizes) | New | Low |
+
+### Recommended Execution Order: D8 → D9 → D10 → D11
+
+D8 validates everything fits together before adding external dependencies.
+D9 hardens networking so the server survives real traffic.
+D10 connects to real data (the engine needs fuel).
+D11 makes it operable (you can't fix what you can't see).

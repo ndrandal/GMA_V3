@@ -86,3 +86,43 @@ TEST(FunctionMapTest, ConcurrentRegistrationAndRetrieval) {
     registrar.join();
     retriever.join();
 }
+
+// ---- forEach tests ----
+
+TEST(FunctionMapTest, ForEachVisitsRegisteredFunctions) {
+    auto& fm = FunctionMap::instance();
+    fm.registerFunction("feA", [](const std::vector<double>&) { return 10.0; });
+    fm.registerFunction("feB", [](const std::vector<double>&) { return 20.0; });
+
+    bool foundA = false, foundB = false;
+    fm.forEach([&](const std::string& name, const Func& fn) {
+        if (name == "feA") {
+            EXPECT_DOUBLE_EQ(fn({}), 10.0);
+            foundA = true;
+        }
+        if (name == "feB") {
+            EXPECT_DOUBLE_EQ(fn({}), 20.0);
+            foundB = true;
+        }
+    });
+    EXPECT_TRUE(foundA) << "forEach should visit 'feA'";
+    EXPECT_TRUE(foundB) << "forEach should visit 'feB'";
+}
+
+TEST(FunctionMapTest, ForEachCountMatchesGetAll) {
+    auto& fm = FunctionMap::instance();
+    auto all = fm.getAll();
+    size_t count = 0;
+    fm.forEach([&](const std::string&, const Func&) { ++count; });
+    EXPECT_EQ(count, all.size());
+}
+
+TEST(FunctionMapTest, ForEachOnEmptyMapIsNoOp) {
+    // Can't truly empty the singleton, but verify forEach doesn't crash
+    // with a lambda that would fail if called unexpectedly on a bad entry
+    auto& fm = FunctionMap::instance();
+    fm.forEach([](const std::string& name, const Func& fn) {
+        EXPECT_FALSE(name.empty()) << "forEach should never yield an empty name";
+        EXPECT_TRUE(fn) << "forEach should never yield a null function";
+    });
+}

@@ -16,9 +16,9 @@ namespace gma {
  *   "lastPrice", "openPrice", "highPrice", "lowPrice",
  *   "mean", "median",
  *   plus additional technicals when history size > 1 (prevClose, vwap, sma_5, sma_20,
- *   ema_12, ema_26, rsi_14, macd_line, macd_signal, bollinger bands,
- *   momentum_10, roc_10, atr_14, volume, volume_avg_20, obv,
- *   volatility_rank, isHalted, marketState, timeSinceOpen, timeUntilClose).
+ *   ema_12, ema_26, rsi_14, macd_line, macd_signal, macd_histogram,
+ *   bollinger_upper, bollinger_lower, momentum_10, roc_10, atr_14,
+ *   volume, volume_avg_20, obv, volatility_rank).
  */
 void computeAllAtomicValues(
     const std::string& symbol,

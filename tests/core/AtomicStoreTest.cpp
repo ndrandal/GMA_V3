@@ -124,3 +124,75 @@ TEST(AtomicStoreTest, ConcurrentGetDuringSet) {
     reader.join();
     SUCCEED();
 }
+
+// ---- setBatch tests ----
+
+TEST(AtomicStoreTest, SetBatchWritesMultipleFields) {
+    AtomicStore store;
+    std::vector<std::pair<std::string, ArgType>> fields = {
+        {"price", ArgType{1.5}},
+        {"volume", ArgType{100.0}},
+        {"name", ArgType{std::string("AAPL")}},
+    };
+    store.setBatch("SYM", fields);
+    EXPECT_DOUBLE_EQ(getValue<double>(store, "SYM", "price"), 1.5);
+    EXPECT_DOUBLE_EQ(getValue<double>(store, "SYM", "volume"), 100.0);
+    EXPECT_EQ(getValue<std::string>(store, "SYM", "name"), "AAPL");
+}
+
+TEST(AtomicStoreTest, SetBatchOverwritesExistingFields) {
+    AtomicStore store;
+    store.set("SYM", "price", 1.0);
+    store.set("SYM", "volume", 50.0);
+    std::vector<std::pair<std::string, ArgType>> fields = {
+        {"price", ArgType{2.0}},
+        {"volume", ArgType{200.0}},
+    };
+    store.setBatch("SYM", fields);
+    EXPECT_DOUBLE_EQ(getValue<double>(store, "SYM", "price"), 2.0);
+    EXPECT_DOUBLE_EQ(getValue<double>(store, "SYM", "volume"), 200.0);
+}
+
+TEST(AtomicStoreTest, SetBatchEmptyFieldsIsNoOp) {
+    AtomicStore store;
+    store.set("SYM", "existing", 42);
+    std::vector<std::pair<std::string, ArgType>> empty;
+    store.setBatch("SYM", empty);
+    EXPECT_EQ(getValue<int>(store, "SYM", "existing"), 42);
+}
+
+TEST(AtomicStoreTest, SetBatchPreservesUnrelatedFields) {
+    AtomicStore store;
+    store.set("SYM", "keep", 99);
+    std::vector<std::pair<std::string, ArgType>> fields = {
+        {"newField", ArgType{7.0}},
+    };
+    store.setBatch("SYM", fields);
+    EXPECT_EQ(getValue<int>(store, "SYM", "keep"), 99);
+    EXPECT_DOUBLE_EQ(getValue<double>(store, "SYM", "newField"), 7.0);
+}
+
+TEST(AtomicStoreTest, SetBatchConcurrentWithGet) {
+    AtomicStore store;
+    std::atomic<bool> done{false};
+    std::thread writer([&]() {
+        for (int i = 0; i < 500; ++i) {
+            std::vector<std::pair<std::string, ArgType>> fields = {
+                {"a", ArgType{static_cast<double>(i)}},
+                {"b", ArgType{static_cast<double>(i * 2)}},
+            };
+            store.setBatch("CON", fields);
+        }
+        done = true;
+    });
+    std::thread reader([&]() {
+        while (!done) {
+            store.get("CON", "a");
+            store.get("CON", "b");
+        }
+    });
+    writer.join();
+    reader.join();
+    EXPECT_DOUBLE_EQ(getValue<double>(store, "CON", "a"), 499.0);
+    EXPECT_DOUBLE_EQ(getValue<double>(store, "CON", "b"), 998.0);
+}

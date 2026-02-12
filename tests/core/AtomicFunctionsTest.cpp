@@ -7,21 +7,12 @@
 
 using namespace gma;
 
-// Helpers to retrieve typed values from the store
+// Helpers to retrieve typed values from the store (guard against nullopt UB)
 static double getDouble(const AtomicStore& store, const std::string& sym, const std::string& key) {
     auto val = store.get(sym, key);
     EXPECT_TRUE(val.has_value()) << "Missing double for " << sym << "::" << key;
+    if (!val.has_value()) return 0.0;
     return std::get<double>(*val);
-}
-static int getInt(const AtomicStore& store, const std::string& sym, const std::string& key) {
-    auto val = store.get(sym, key);
-    EXPECT_TRUE(val.has_value()) << "Missing int for " << sym << "::" << key;
-    return std::get<int>(*val);
-}
-static std::string getString(const AtomicStore& store, const std::string& sym, const std::string& key) {
-    auto val = store.get(sym, key);
-    EXPECT_TRUE(val.has_value()) << "Missing string for " << sym << "::" << key;
-    return std::get<std::string>(*val);
 }
 
 TEST(AtomicFunctionsTest, BasicPriceMetrics) {
@@ -52,6 +43,12 @@ TEST(AtomicFunctionsTest, MeanAndMedianAndVwap) {
     EXPECT_NEAR(getDouble(store, sym, "vwap"), 80.0/35.0, 1e-10);
 }
 
+// Helper to compute sum of consecutive ints
+static double sumRange(int start, int end) {
+    int count = end - start + 1;
+    return (start + end) * count / 2.0;
+}
+
 TEST(AtomicFunctionsTest, TechnicalIndicatorsPresence) {
     // Use history >= 20 entries to ensure all indicators are generated
     SymbolHistory hist;
@@ -60,9 +57,9 @@ TEST(AtomicFunctionsTest, TechnicalIndicatorsPresence) {
     const std::string sym = "TECH";
     computeAllAtomicValues(sym, hist, store);
 
-    // SMA/EMA keys
+    // SMA/EMA keys — prices are 1..25, SMA(5) = avg(21..25), SMA(20) = avg(6..25)
     EXPECT_DOUBLE_EQ(getDouble(store, sym, "sma_5"), (21+22+23+24+25)/5.0);
-    EXPECT_DOUBLE_EQ(getDouble(store, sym, "sma_20"), (6+7+54+45+34+54+34+34+25) / 20.0); // sum via formula
+    EXPECT_DOUBLE_EQ(getDouble(store, sym, "sma_20"), sumRange(6, 25) / 20.0);
     EXPECT_TRUE(store.get(sym, "ema_12").has_value());
     EXPECT_TRUE(store.get(sym, "ema_26").has_value());
     // RSI (14)
@@ -70,6 +67,7 @@ TEST(AtomicFunctionsTest, TechnicalIndicatorsPresence) {
     // MACD
     EXPECT_TRUE(store.get(sym, "macd_line").has_value());
     EXPECT_TRUE(store.get(sym, "macd_signal").has_value());
+    EXPECT_TRUE(store.get(sym, "macd_histogram").has_value());
     // Bollinger bands
     EXPECT_TRUE(store.get(sym, "bollinger_upper").has_value());
     EXPECT_TRUE(store.get(sym, "bollinger_lower").has_value());
@@ -85,11 +83,6 @@ TEST(AtomicFunctionsTest, TechnicalIndicatorsPresence) {
     EXPECT_TRUE(store.get(sym, "obv").has_value());
     // Volatility rank
     EXPECT_TRUE(store.get(sym, "volatility_rank").has_value());
-    // Static placeholders
-    EXPECT_DOUBLE_EQ(getDouble(store, sym, "isHalted"), 0.0);
-    EXPECT_EQ(getString(store, sym, "marketState"), "Open");
-    EXPECT_EQ(getInt(store, sym, "timeSinceOpen"), 60);
-    EXPECT_EQ(getInt(store, sym, "timeUntilClose"), 300);
 }
 
 TEST(AtomicFunctionsTest, InsufficientHistoryTriggersPartialMetrics) {
@@ -108,12 +101,6 @@ TEST(AtomicFunctionsTest, InsufficientHistoryTriggersPartialMetrics) {
     EXPECT_FALSE(store.get(sym, "atr_14").has_value());
     // Bollinger absent
     EXPECT_FALSE(store.get(sym, "bollinger_upper").has_value());
-}
-
-// Helper to compute sum of consecutive ints
-static double sumRange(int start, int end) {
-    int count = end - start + 1;
-    return (start + end) * count / 2.0;
 }
 
 TEST(AtomicFunctionsTest, OverwriteOnSecondCall) {
