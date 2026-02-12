@@ -1,108 +1,97 @@
-#include "gma/Logger.hpp"
+#include "gma/util/Logger.hpp"
 #include <gtest/gtest.h>
-#include <sstream>
-#include <iostream>
+#include <cstdio>
+#include <fstream>
+#include <string>
 
-using namespace gma;
+using namespace gma::util;
 
-// Helper RAII class to redirect std::cout or std::cerr to an ostringstream
-class StreamRedirect {
-public:
-    StreamRedirect(std::ostream& targetStream, std::ostream& redirectTo)
-        : stream_(targetStream), originalBuf_(stream_.rdbuf()) {
-        stream_.rdbuf(redirectTo.rdbuf());
-    }
-    ~StreamRedirect() {
-        stream_.rdbuf(originalBuf_);
-    }
-private:
-    std::ostream& stream_;
-    std::streambuf* originalBuf_;
-};
-
-TEST(LoggerTest, InfoOutputsToStdout) {
-    std::ostringstream out;
-    std::ostringstream err;
-    StreamRedirect redirectOut(std::cout, out);
-    StreamRedirect redirectErr(std::cerr, err);
-
-    Logger::info("Hello");
-
-    EXPECT_EQ(err.str(), "");
-    EXPECT_EQ(out.str(), "[INFO] Hello\n");
+TEST(LoggerTest, DefaultLevelIsInfo) {
+    Logger lg;
+    EXPECT_EQ(lg.level(), LogLevel::Info);
 }
 
-TEST(LoggerTest, WarnOutputsToStderr) {
-    std::ostringstream out;
-    std::ostringstream err;
-    StreamRedirect redirectOut(std::cout, out);
-    StreamRedirect redirectErr(std::cerr, err);
-
-    Logger::warn("Warning!");
-
-    EXPECT_EQ(out.str(), "");
-    EXPECT_EQ(err.str(), "[WARN] Warning!\n");
+TEST(LoggerTest, SetLevelFiltersLowerLevels) {
+    Logger lg;
+    lg.setLevel(LogLevel::Warn);
+    EXPECT_EQ(lg.level(), LogLevel::Warn);
 }
 
-TEST(LoggerTest, ErrorOutputsToStderr) {
-    std::ostringstream out;
-    std::ostringstream err;
-    StreamRedirect redirectOut(std::cout, out);
-    StreamRedirect redirectErr(std::cerr, err);
+TEST(LoggerTest, LogWritesToFile) {
+    const char* path = "test_log_output.log";
+    Logger lg;
+    lg.setFile(path);
+    lg.log(LogLevel::Info, "hello world");
+    lg.setFile("");  // flush and close
 
-    Logger::error("Error occurred");
-
-    EXPECT_EQ(out.str(), "");
-    EXPECT_EQ(err.str(), "[ERROR] Error occurred\n");
+    std::ifstream f(path);
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("hello world"), std::string::npos);
+    EXPECT_NE(content.find("INFO"), std::string::npos);
+    std::remove(path);
 }
 
-TEST(LoggerTest, EmptyMessage) {
-    std::ostringstream out;
-    std::ostringstream err;
-    StreamRedirect redirectOut(std::cout, out);
-    StreamRedirect redirectErr(std::cerr, err);
+TEST(LoggerTest, BelowLevelNotWritten) {
+    const char* path = "test_log_filter.log";
+    Logger lg;
+    lg.setLevel(LogLevel::Error);
+    lg.setFile(path);
+    lg.log(LogLevel::Info, "should not appear");
+    lg.log(LogLevel::Error, "should appear");
+    lg.setFile("");
 
-    Logger::info("");
-
-    EXPECT_EQ(err.str(), "");
-    EXPECT_EQ(out.str(), "[INFO] \n");
+    std::ifstream f(path);
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+    EXPECT_EQ(content.find("should not appear"), std::string::npos);
+    EXPECT_NE(content.find("should appear"), std::string::npos);
+    std::remove(path);
 }
 
-TEST(LoggerTest, LongMessage) {
-    std::string msg(1000, 'x');
-    std::ostringstream out;
-    std::ostringstream err;
-    StreamRedirect redirectOut(std::cout, out);
-    StreamRedirect redirectErr(std::cerr, err);
+TEST(LoggerTest, JsonFormatProducesJson) {
+    const char* path = "test_log_json.log";
+    Logger lg;
+    lg.setFormatJson(true);
+    lg.setFile(path);
+    lg.log(LogLevel::Warn, "test msg", {{"key", "val"}});
+    lg.setFile("");
 
-    Logger::error(msg);
-
-    EXPECT_EQ(out.str(), "");
-    EXPECT_EQ(err.str(), "[ERROR] " + msg + "\n");
+    std::ifstream f(path);
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("{"), std::string::npos);
+    EXPECT_NE(content.find("\"msg\""), std::string::npos);
+    EXPECT_NE(content.find("\"key\""), std::string::npos);
+    std::remove(path);
 }
 
-TEST(LoggerTest, MultipleCallsAccumulate) {
-    std::ostringstream out;
-    std::ostringstream err;
-    StreamRedirect redirectOut(std::cout, out);
-    StreamRedirect redirectErr(std::cerr, err);
+TEST(LoggerTest, FieldsAppearInOutput) {
+    const char* path = "test_log_fields.log";
+    Logger lg;
+    lg.setFile(path);
+    lg.log(LogLevel::Info, "msg", {{"port", "8080"}, {"host", "localhost"}});
+    lg.setFile("");
 
-    Logger::info("One");
-    Logger::info("Two");
-
-    EXPECT_EQ(err.str(), "");
-    EXPECT_EQ(out.str(), "[INFO] One\n[INFO] Two\n");
+    std::ifstream f(path);
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("port"), std::string::npos);
+    EXPECT_NE(content.find("8080"), std::string::npos);
+    std::remove(path);
 }
 
-TEST(LoggerTest, MultiLineMessage) {
-    std::ostringstream out;
-    std::ostringstream err;
-    StreamRedirect redirectOut(std::cout, out);
-    StreamRedirect redirectErr(std::cerr, err);
+TEST(LoggerTest, ParseLevelRoundTrips) {
+    EXPECT_EQ(parseLevel("trace"), LogLevel::Trace);
+    EXPECT_EQ(parseLevel("debug"), LogLevel::Debug);
+    EXPECT_EQ(parseLevel("info"),  LogLevel::Info);
+    EXPECT_EQ(parseLevel("warn"),  LogLevel::Warn);
+    EXPECT_EQ(parseLevel("error"), LogLevel::Error);
+    EXPECT_EQ(parseLevel("UNKNOWN"), LogLevel::Info);
+}
 
-    Logger::warn("Line1\nLine2");
-
-    EXPECT_EQ(out.str(), "");
-    // Should prefix only once and preserve the newline within the message
-    EXPECT_EQ(err.str(), "[WARN] Line1\nLine2\n");
+TEST(LoggerTest, GlobalLoggerIsSingleton) {
+    Logger& a = logger();
+    Logger& b = logger();
+    EXPECT_EQ(&a, &b);
 }

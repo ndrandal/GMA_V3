@@ -1,88 +1,45 @@
-#include "gma/FunctionMap.hpp"
+#include "gma/AtomicStore.hpp"
+#include "gma/rt/ThreadPool.hpp"
+#include "gma/SymbolValue.hpp"
 #include <gtest/gtest.h>
-#include <numeric>
-#include <vector>
 #include <thread>
+#include <vector>
 #include <atomic>
 
 using namespace gma;
 
-TEST(FunctionMapTest, RegisterAndRetrieve) {
-    auto& fm = FunctionMap::instance();
-    // Register a sum function
-    fm.registerFunction("sumTest", [](const std::vector<double>& v) {
-        return std::accumulate(v.begin(), v.end(), 0.0);
-    });
-    auto sumFn = fm.getFunction("sumTest");
-    std::vector<double> data{1.0, 2.0, 3.0};
-    EXPECT_DOUBLE_EQ(sumFn(data), 6.0);
-}
+TEST(StressTest, ConcurrentAtomicStoreWrites) {
+    AtomicStore store;
+    const int threads = 4;
+    const int writes = 1000;
+    std::vector<std::thread> ths;
 
-TEST(FunctionMapTest, OverwriteFunction) {
-    auto& fm = FunctionMap::instance();
-    // Initial registration returns 1.0
-    fm.registerFunction("overwriteTest", [](const std::vector<double>&) {
-        return 1.0;
-    });
-    auto fn1 = fm.getFunction("overwriteTest");
-    EXPECT_DOUBLE_EQ(fn1({}), 1.0);
-    // Overwrite to return 2.0
-    fm.registerFunction("overwriteTest", [](const std::vector<double>&) {
-        return 2.0;
-    });
-    auto fn2 = fm.getFunction("overwriteTest");
-    EXPECT_DOUBLE_EQ(fn2({}), 2.0);
-}
-
-TEST(FunctionMapTest, GetAllContainsRegistered) {
-    auto& fm = FunctionMap::instance();
-    // Snapshot before registration
-    auto before = fm.getAll();
-    // Register a test function
-    fm.registerFunction("allTest", [](const std::vector<double>&) {
-        return 0.0;
-    });
-    auto all = fm.getAll();
-    // Expect at least one new entry
-    EXPECT_GE(all.size(), before.size() + 1);
-    // Verify our function is present
-    bool found = false;
-    for (const auto& kv : all) {
-        if (kv.first == "allTest") { found = true; break; }
-    }
-    EXPECT_TRUE(found) << "Function 'allTest' should be listed in getAll()";
-}
-
-TEST(FunctionMapTest, GetFunctionThrowsIfNotFound) {
-    auto& fm = FunctionMap::instance();
-    // Use a name unlikely to be registered
-    EXPECT_THROW(fm.getFunction("NoSuchFunctionXYZ"), std::runtime_error);
-}
-
-TEST(FunctionMapTest, ConcurrentRegistrationAndRetrieval) {
-    auto& fm = FunctionMap::instance();
-    std::atomic<bool> start{false};
-    // Thread to register
-    std::thread registrar([&](){
-        while (!start.load()) std::this_thread::yield();
-        fm.registerFunction("concTest", [](const std::vector<double>&) {
-            return 42.0;
+    for (int t = 0; t < threads; ++t) {
+        ths.emplace_back([&store, t, writes]() {
+            for (int i = 0; i < writes; ++i) {
+                store.set("SYM", "field_" + std::to_string(t), static_cast<double>(i));
+            }
         });
-    });
-    // Thread to retrieve
-    std::thread retriever([&](){
-        while (!start.load()) std::this_thread::yield();
-        // Spin until the function is available
-        while (true) {
-            try {
-                auto fn = fm.getFunction("concTest");
-                EXPECT_DOUBLE_EQ(fn({}), 42.0);
-                break;
-            } catch (const std::runtime_error&) {}
-        }
-    });
-    // Start both threads
-    start = true;
-    registrar.join();
-    retriever.join();
+    }
+    for (auto& th : ths) th.join();
+
+    // Each thread wrote its own field; final value should be writes-1
+    for (int t = 0; t < threads; ++t) {
+        auto val = store.get("SYM", "field_" + std::to_string(t));
+        ASSERT_TRUE(val.has_value());
+        EXPECT_DOUBLE_EQ(std::get<double>(val.value()), static_cast<double>(writes - 1));
+    }
+}
+
+TEST(StressTest, ThreadPoolHighConcurrency) {
+    rt::ThreadPool pool(4);
+    std::atomic<int> counter{0};
+    const int tasks = 10000;
+
+    for (int i = 0; i < tasks; ++i) {
+        pool.post([&counter]() { counter++; });
+    }
+
+    pool.shutdown();
+    EXPECT_EQ(counter.load(), tasks);
 }

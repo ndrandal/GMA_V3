@@ -8,7 +8,7 @@ using namespace gma;
 
 TEST(ExecutionContextTest, StoresPointers) {
     AtomicStore store;
-    ThreadPool pool(2);
+    rt::ThreadPool pool(2);
     ExecutionContext ctx(&store, &pool);
 
     EXPECT_EQ(ctx.store(), &store);

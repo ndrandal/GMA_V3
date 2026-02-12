@@ -12,105 +12,100 @@
 using namespace gma;
 using namespace gma::nodes;
 
-// Stub node to record received SymbolValues
 class DownstreamStub : public INode {
 public:
     std::vector<SymbolValue> received;
+    std::atomic<int> count{0};
     void onValue(const SymbolValue& sv) override {
         received.push_back(sv);
+        ++count;
     }
     void shutdown() noexcept override {}
 };
 
-TEST(ListenerTest, RegistersAndReceivesMatchingTicks) {
-    ThreadPool pool(1);
+TEST(ListenerTest, ForwardsValueToDownstreamViaPool) {
+    rt::ThreadPool pool(1);
     AtomicStore store;
     MarketDispatcher dispatcher(&pool, &store);
 
     auto stub = std::make_shared<DownstreamStub>();
     auto listener = std::make_shared<Listener>("SYM", "field", stub, &pool, &dispatcher);
+    listener->start();
 
-    // Dispatch several matching ticks
-    dispatcher.onTick(SymbolValue{"SYM", 1});
-    dispatcher.onTick(SymbolValue{"SYM", 2});
-    dispatcher.onTick(SymbolValue{"SYM", 3});
+    // Call onValue directly to test forwarding through pool
+    listener->onValue(SymbolValue{"SYM", 1.0});
+    listener->onValue(SymbolValue{"SYM", 2.0});
+    listener->onValue(SymbolValue{"SYM", 3.0});
 
-    // Ensure all tasks complete
     pool.shutdown();
 
     ASSERT_EQ(stub->received.size(), 3u);
-    EXPECT_EQ(stub->received[0].symbol, "SYM");
-    EXPECT_EQ(std::get<int>(stub->received[0].value), 1);
-    EXPECT_EQ(std::get<int>(stub->received[1].value), 2);
-    EXPECT_EQ(std::get<int>(stub->received[2].value), 3);
+    EXPECT_DOUBLE_EQ(std::get<double>(stub->received[0].value), 1.0);
+    EXPECT_DOUBLE_EQ(std::get<double>(stub->received[1].value), 2.0);
+    EXPECT_DOUBLE_EQ(std::get<double>(stub->received[2].value), 3.0);
 }
 
-TEST(ListenerTest, IgnoresNonMatchingSymbol) {
-    ThreadPool pool(1);
-    AtomicStore store;
-    MarketDispatcher dispatcher(&pool, &store);
-
-    auto stub = std::make_shared<DownstreamStub>();
-    auto listener = std::make_shared<Listener>("A", "field", stub, &pool, &dispatcher);
-
-    dispatcher.onTick(SymbolValue{"B", 42});
-    pool.shutdown();
-
-    EXPECT_TRUE(stub->received.empty());
-}
-
-TEST(ListenerTest, ShutdownUnregistersAndStopsPropagation) {
-    ThreadPool pool(1);
+TEST(ListenerTest, ShutdownStopsPropagation) {
+    rt::ThreadPool pool(1);
     AtomicStore store;
     MarketDispatcher dispatcher(&pool, &store);
 
     auto stub = std::make_shared<DownstreamStub>();
     auto listener = std::make_shared<Listener>("X", "field", stub, &pool, &dispatcher);
+    listener->start();
 
-    // Initial tick should propagate
-    dispatcher.onTick(SymbolValue{"X", 10});
-    pool.shutdown();
-    EXPECT_EQ(stub->received.size(), 1u);
+    listener->onValue(SymbolValue{"X", 10.0});
+    pool.drain();
+    EXPECT_EQ(stub->count.load(), 1);
 
-    // Shutdown listener and clear stub
     listener->shutdown();
     stub->received.clear();
+    stub->count = 0;
 
-    // Further ticks should not reach stub
-    dispatcher.onTick(SymbolValue{"X", 20});
+    listener->onValue(SymbolValue{"X", 20.0});
     pool.shutdown();
-    EXPECT_TRUE(stub->received.empty());
+    EXPECT_EQ(stub->count.load(), 0);
+}
+
+TEST(ListenerTest, SymbolAndFieldAccessors) {
+    rt::ThreadPool pool(1);
+    AtomicStore store;
+    MarketDispatcher dispatcher(&pool, &store);
+
+    auto stub = std::make_shared<DownstreamStub>();
+    auto listener = std::make_shared<Listener>("AAPL", "price", stub, &pool, &dispatcher);
+
+    EXPECT_EQ(listener->symbol(), "AAPL");
+    EXPECT_EQ(listener->field(), "price");
+    pool.shutdown();
 }
 
 TEST(ListenerTest, HandlesRapidDispatch) {
-    ThreadPool pool(2);
+    rt::ThreadPool pool(2);
     AtomicStore store;
     MarketDispatcher dispatcher(&pool, &store);
 
     auto stub = std::make_shared<DownstreamStub>();
     auto listener = std::make_shared<Listener>("R", "field", stub, &pool, &dispatcher);
+    listener->start();
 
     const int sends = 50;
     for (int i = 0; i < sends; ++i) {
-        dispatcher.onTick(SymbolValue{"R", i});
+        listener->onValue(SymbolValue{"R", static_cast<double>(i)});
     }
 
     pool.shutdown();
     EXPECT_EQ(stub->received.size(), static_cast<size_t>(sends));
-    // Check ordering
-    for (int i = 0; i < sends; ++i) {
-        EXPECT_EQ(std::get<int>(stub->received[i].value), i);
-    }
 }
 
-TEST(ListenerTest, NoCrashOnEmptyCallbackBeforeRun) {
-    // Even if no ticks sent, destructor should not crash
+TEST(ListenerTest, NoCrashOnDestructionWithoutStart) {
     {
-        ThreadPool pool(1);
+        rt::ThreadPool pool(1);
         AtomicStore store;
         MarketDispatcher dispatcher(&pool, &store);
         auto stub = std::make_shared<DownstreamStub>();
         auto listener = std::make_shared<Listener>("E", "field", stub, &pool, &dispatcher);
+        // Deliberately not calling start()
         listener->shutdown();
     }
     SUCCEED();

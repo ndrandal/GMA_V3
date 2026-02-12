@@ -21,7 +21,8 @@ for dp,_,fns in os.walk(ROOT):
                 nodes.setdefault(cls,[]).append(path)
             for m in FACTORY.finditer(src):
                 factories.append({"path":path,"name":m.group(2),"impl":m.group(3)})
-        except: pass
+        except Exception:
+            pass
 
 os.makedirs("artifacts", exist_ok=True)
 with open("artifacts/T1_nodes_raw.json","w") as f:

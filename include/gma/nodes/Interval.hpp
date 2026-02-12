@@ -14,6 +14,10 @@ public:
            std::shared_ptr<INode> child,
            gma::rt::ThreadPool* pool);
 
+  // Must be called after construction when owned by a shared_ptr.
+  // Starts the periodic tick loop.
+  void start();
+
   void onValue(const SymbolValue&) override; // no-op
   void shutdown() noexcept override;
 

@@ -17,7 +17,8 @@ for dp,_,fns in os.walk(ROOT):
                     if REG.search(l): hits["register"].append((path,i,l.strip()))
                     if UNR.search(l): hits["unregister"].append((path,i,l.strip()))
                     if ONTICK.search(l): hits["onTick"].append((path,i,l.strip()))
-        except: pass
+        except Exception:
+            pass
 
 os.makedirs("artifacts", exist_ok=True)
 with open("artifacts/T1_dispatcher_map.md","w") as f:

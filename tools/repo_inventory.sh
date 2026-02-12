@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+mkdir -p artifacts
+
 echo "# Repo inventory" > artifacts/T1_repo_inventory.md
 echo "" >> artifacts/T1_repo_inventory.md
 

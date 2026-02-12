@@ -18,7 +18,8 @@ for dp,_,fns in os.walk(ROOT):
                     if ONMSG.search(l): sections["on_message"].append((path,i,l.strip()))
                     if SEND.search(l):  sections["send"].append((path,i,l.strip()))
                     if TREE.search(l):  sections["tree_build"].append((path,i,l.strip()))
-        except: pass
+        except Exception:
+            pass
 
 os.makedirs("artifacts", exist_ok=True)
 with open("artifacts/T1_ws_contract.md","w") as f:

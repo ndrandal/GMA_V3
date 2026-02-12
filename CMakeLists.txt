@@ -6,7 +6,7 @@ option(GMA_BUILD_TESTS "Build unit tests in tests/" OFF)
 option(GMA_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 
 # ---- C++ standard ----
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -163,6 +163,16 @@ endif()
 # Tests (opt-in)
 if (GMA_BUILD_TESTS)
   enable_testing()
+
+  include(FetchContent)
+  FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG        v1.14.0
+  )
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googletest)
+
   file(GLOB_RECURSE GMA_TEST_SOURCES "${CMAKE_SOURCE_DIR}/tests/*.cpp")
   add_executable(gma_tests ${GMA_TEST_SOURCES})
   target_include_directories(gma_tests PRIVATE "${CMAKE_SOURCE_DIR}/include")
@@ -179,6 +189,10 @@ if (GMA_BUILD_TESTS)
       BOOST_BEAST_USE_STD_STRING_VIEW
     )
   endif()
-  target_link_libraries(gma_tests PRIVATE Threads::Threads RapidJSON::rapidjson)
+  target_link_libraries(gma_tests PRIVATE
+    Threads::Threads
+    RapidJSON::rapidjson
+    GTest::gtest_main
+  )
   add_test(NAME gma_tests COMMAND gma_tests)
 endif()

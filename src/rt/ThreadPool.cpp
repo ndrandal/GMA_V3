@@ -34,6 +34,16 @@ void ThreadPool::drain() {
   cv_.wait(lk, [this]{ return q_.empty(); });
 }
 
+void ThreadPool::shutdown() {
+  drain();
+  {
+    std::lock_guard<std::mutex> lk(mx_);
+    stopping_ = true;
+  }
+  cv_.notify_all();
+  for (auto& t : threads_) if (t.joinable()) t.join();
+}
+
 void ThreadPool::workerLoop() {
   for (;;) {
     std::function<void()> fn;

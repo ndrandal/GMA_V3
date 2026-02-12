@@ -29,6 +29,10 @@ public:
   // if tasks enqueue more tasks).
   void drain();
 
+  // Drain queue, then stop all workers and join threads.
+  // Safe to call multiple times. Destructor is a no-op after shutdown().
+  void shutdown();
+
 private:
   void workerLoop();
 

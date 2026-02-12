@@ -14,5 +14,5 @@ fi
 
 cmake -DCMAKE_BUILD_TYPE=Debug \
       -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-      -DGMA_STRICT=ON ..  # if you have an option gate; otherwise ignore
+      -DGMA_BUILD_TESTS=ON ..
 cmake --build . -j"$(nproc || sysctl -n hw.ncpu || echo 4)"

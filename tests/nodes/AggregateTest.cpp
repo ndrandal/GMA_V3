@@ -8,13 +8,6 @@
 
 using namespace gma;
 
-// Dummy child node; not actively used by Aggregate except for count
-class DummyChild : public INode {
-public:
-    void onValue(const SymbolValue&) override {}
-    void shutdown() noexcept override {}
-};
-
 // Parent stub collects all received SymbolValues
 class TestParent : public INode {
 public:
@@ -27,26 +20,21 @@ public:
     void shutdown() noexcept override {}
 };
 
-// Helper to extract double from ArgType
 static double extractDouble(const ArgType& a) {
     return std::get<double>(a);
 }
 
 TEST(AggregateTest, TriggersAfterThreshold) {
     auto parent = std::make_shared<TestParent>();
-    size_t N = 3;
-    std::vector<std::shared_ptr<INode>> children;
-    for (size_t i = 0; i < N; ++i) children.push_back(std::make_shared<DummyChild>());
-    Aggregate agg(children, parent);
+    std::size_t N = 3;
+    Aggregate agg(N, parent);
 
-    // Send N values; expect N callbacks
     std::vector<double> inputs{1.1, 2.2, 3.3};
     for (double v : inputs) {
         agg.onValue(SymbolValue{"SYM", v});
     }
     EXPECT_EQ(parent->count.load(), static_cast<int>(N));
-    // Received values match inputs in order
-    for (size_t i = 0; i < N; ++i) {
+    for (std::size_t i = 0; i < N; ++i) {
         EXPECT_EQ(parent->received[i].symbol, "SYM");
         EXPECT_DOUBLE_EQ(extractDouble(parent->received[i].value), inputs[i]);
     }
@@ -54,17 +42,14 @@ TEST(AggregateTest, TriggersAfterThreshold) {
 
 TEST(AggregateTest, ResetsAfterTrigger) {
     auto parent = std::make_shared<TestParent>();
-    size_t N = 2;
-    std::vector<std::shared_ptr<INode>> children(N, std::make_shared<DummyChild>());
-    Aggregate agg(children, parent);
+    std::size_t N = 2;
+    Aggregate agg(N, parent);
 
-    // First batch
     agg.onValue(SymbolValue{"A", 10.0});
     agg.onValue(SymbolValue{"A", 20.0});
     EXPECT_EQ(parent->count.load(), 2);
     parent->received.clear(); parent->count = 0;
 
-    // Second batch after reset
     agg.onValue(SymbolValue{"A", 30.0});
     agg.onValue(SymbolValue{"A", 40.0});
     EXPECT_EQ(parent->count.load(), 2);
@@ -74,20 +59,15 @@ TEST(AggregateTest, ResetsAfterTrigger) {
 
 TEST(AggregateTest, SeparateSymbolsIndependent) {
     auto parent = std::make_shared<TestParent>();
-    size_t N = 2;
-    std::vector<std::shared_ptr<INode>> children(N, std::make_shared<DummyChild>());
-    Aggregate agg(children, parent);
+    std::size_t N = 2;
+    Aggregate agg(N, parent);
 
-    // Send for symbol X
     agg.onValue(SymbolValue{"X", 1.0});
     agg.onValue(SymbolValue{"X", 2.0});
-    // Send for symbol Y
     agg.onValue(SymbolValue{"Y", 3.0});
     agg.onValue(SymbolValue{"Y", 4.0});
 
-    // Expect 4 callbacks total
     EXPECT_EQ(parent->count.load(), 4);
-    // Check ordering: X-values then Y-values
     EXPECT_EQ(parent->received[0].symbol, "X");
     EXPECT_EQ(parent->received[1].symbol, "X");
     EXPECT_EQ(parent->received[2].symbol, "Y");
@@ -96,25 +76,24 @@ TEST(AggregateTest, SeparateSymbolsIndependent) {
 
 TEST(AggregateTest, ShutdownPreventsFurtherCallbacks) {
     auto parent = std::make_shared<TestParent>();
-    size_t N = 1;
-    std::vector<std::shared_ptr<INode>> children(N, std::make_shared<DummyChild>());
-    Aggregate agg(children, parent);
+    Aggregate agg(1, parent);
 
-    // Normal callback
     agg.onValue(SymbolValue{"Z", 5.0});
     EXPECT_EQ(parent->count.load(), 1);
 
-    // Shutdown and attempt to send again
     agg.shutdown();
     parent->received.clear(); parent->count = 0;
     agg.onValue(SymbolValue{"Z", 6.0});
+    // After shutdown parent_ is reset, so no more callbacks
     EXPECT_EQ(parent->count.load(), 0);
 }
 
-TEST(AggregateTest, NoCrashWithEmptyChildren) {
+TEST(AggregateTest, DoesNotTriggerBelowArity) {
     auto parent = std::make_shared<TestParent>();
-    std::vector<std::shared_ptr<INode>> children;
-    Aggregate agg(children, parent);
-    // Sending any values should not crash; behavior undefined, but safe
-    EXPECT_NO_THROW(agg.onValue(SymbolValue{"E", 0.0}));
+    Aggregate agg(3, parent);
+
+    agg.onValue(SymbolValue{"S", 1.0});
+    agg.onValue(SymbolValue{"S", 2.0});
+    // Only 2 of 3 received — should not trigger
+    EXPECT_EQ(parent->count.load(), 0);
 }

@@ -7,7 +7,10 @@ Interval::Interval(std::chrono::milliseconds period,
                    gma::rt::ThreadPool* pool)
   : period_(period), child_(std::move(child)), pool_(pool)
 {
-  bool expected=false;
+}
+
+void Interval::start() {
+  bool expected = false;
   if (scheduled_.compare_exchange_strong(expected, true)) {
     auto self = shared_from_this();
     pool_->post([self]{ self->tickOnce(); });

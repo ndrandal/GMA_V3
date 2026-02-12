@@ -54,12 +54,12 @@ tools/                # Python/shell utility scripts (compile.sh, mapping tools,
 - **MarketDispatcher**: Routes market ticks to listeners, maintains symbol history, triggers atomic computations.
 - **AtomicStore**: Thread-safe key-value store for computed results.
 - **FunctionMap**: Singleton registry of available atomic functions.
-- **ThreadPool**: Global thread pool (`gma::gThreadPool`), default 4 threads.
+- **ThreadPool**: Global thread pool (`gma::gThreadPool`), default `hardware_concurrency` threads.
 - **ShutdownCoordinator**: `gma::gShutdown` for graceful sequenced teardown.
 
 ## Tech Stack
 
-- **C++17** (CMake configured) / C++20 features used in code
+- **C++20** (CMake configured)
 - **CMake 3.20+**
 - **Boost.Asio / Beast** — networking and WebSocket
 - **RapidJSON** — JSON parsing and validation
