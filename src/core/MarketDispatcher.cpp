@@ -22,7 +22,7 @@ void MarketDispatcher::registerListener(const std::string& symbol,
                                         const std::string& field,
                                         std::shared_ptr<INode> listener)
 {
-  std::unique_lock<std::shared_mutex> lock(_mutex);
+  std::unique_lock<std::shared_mutex> lock(_listenerMutex);
   _listeners[symbol][field].emplace_back(std::move(listener));
 }
 
@@ -30,7 +30,7 @@ void MarketDispatcher::unregisterListener(const std::string& symbol,
                                           const std::string& field,
                                           std::shared_ptr<INode> listener)
 {
-  std::unique_lock<std::shared_mutex> lock(_mutex);
+  std::unique_lock<std::shared_mutex> lock(_listenerMutex);
   auto symIt = _listeners.find(symbol);
   if (symIt == _listeners.end()) return;
   auto& fieldMap = symIt->second;
@@ -43,11 +43,11 @@ void MarketDispatcher::unregisterListener(const std::string& symbol,
 }
 
 void MarketDispatcher::onTick(const SymbolTick& tick) {
-  // Collect (field, listener) pairs for this symbol — snapshot under lock
+  // Collect (field, listener) pairs for this symbol — snapshot under listener lock
   std::vector<std::pair<std::string, std::shared_ptr<INode>>> toNotify;
 
   {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
+    std::shared_lock<std::shared_mutex> lock(_listenerMutex);
     auto lit = _listeners.find(tick.symbol);
     if (lit != _listeners.end()) {
       for (auto& kv : lit->second) {
@@ -77,18 +77,18 @@ void MarketDispatcher::onTick(const SymbolTick& tick) {
       continue;
     }
 
-    // Update history and take a snapshot under lock
-    std::deque<double> histCopy;
+    // Update history and build contiguous vector under history lock
+    std::vector<double> histVec;
     {
-      std::unique_lock<std::shared_mutex> lock(_mutex);
+      std::unique_lock<std::shared_mutex> lock(_histMutex);
       auto& hist = _histories[tick.symbol][field];
       hist.push_back(raw);
       if (hist.size() > MAX_HISTORY) hist.pop_front();
-      histCopy = hist; // safe copy while locked
+      histVec.assign(hist.begin(), hist.end());
     }
 
-    // Compute atomics on the snapshot (no lock needed)
-    computeAndStoreAtomics(tick.symbol, field, histCopy);
+    // Compute atomics on the contiguous snapshot (no lock needed)
+    computeAndStoreAtomics(tick.symbol, field, histVec);
 
     // Notify the raw-value subscriber
     SymbolValue out{ tick.symbol, raw };
@@ -104,24 +104,23 @@ void MarketDispatcher::onTick(const SymbolTick& tick) {
 
 void MarketDispatcher::computeAndStoreAtomics(const std::string& symbol,
                                               const std::string& field,
-                                              const std::deque<double>& history)
+                                              const std::vector<double>& history)
 {
   auto& fmap = FunctionMap::instance();
 
-  // Iterate under the FunctionMap's lock via forEach — no copy needed
-  for (const auto& [fnName, fn] : fmap.getAll()) {
-    if (!fn) continue;
+  // Iterate under FunctionMap's shared_lock via forEach — no copy of std::function objects
+  fmap.forEach([&](const std::string& fnName, const Func& fn) {
+    if (!fn) return;
 
-    std::vector<double> vec(history.begin(), history.end());
     double result = 0.0;
     try {
-      result = fn(vec);
+      result = fn(history);  // history is already a contiguous vector — no conversion
     } catch (const std::exception& ex) {
       gma::util::logger().log(gma::util::LogLevel::Warn,
                               "MarketDispatcher: atomic function error",
                               { {"symbol", symbol}, {"fn", fnName},
                                 {"err", ex.what()} });
-      continue;
+      return;
     }
 
     if (_store) {
@@ -131,7 +130,7 @@ void MarketDispatcher::computeAndStoreAtomics(const std::string& symbol,
     // Collect subscribers for (symbol, fnName)
     std::vector<std::shared_ptr<INode>> subs;
     {
-      std::shared_lock<std::shared_mutex> lock(_mutex);
+      std::shared_lock<std::shared_mutex> lock(_listenerMutex);
       auto sit = _listeners.find(symbol);
       if (sit != _listeners.end()) {
         auto fit = sit->second.find(fnName);
@@ -150,5 +149,5 @@ void MarketDispatcher::computeAndStoreAtomics(const std::string& symbol,
         if (listener) listener->onValue(SymbolValue{ symbol, result });
       }
     }
-  }
+  });
 }

@@ -47,7 +47,7 @@ private:
   // Recompute all atomic functions (from FunctionMap) for the (symbol, field) history.
   void computeAndStoreAtomics(const std::string& symbol,
                               const std::string& field,
-                              const std::deque<double>& history);
+                              const std::vector<double>& history);
 
 private:
   // History buffers per (symbol, field)
@@ -68,9 +68,10 @@ private:
       >
   > _listeners;
 
-  mutable std::shared_mutex _mutex;   // protects _histories and _listeners
-  gma::rt::ThreadPool* _threadPool;   // for offloading work (not owned)
-  AtomicStore* _store;                // where atomic results are written (not owned)
+  mutable std::shared_mutex _histMutex;      // protects _histories
+  mutable std::shared_mutex _listenerMutex;  // protects _listeners
+  gma::rt::ThreadPool* _threadPool;          // for offloading work (not owned)
+  AtomicStore* _store;                       // where atomic results are written (not owned)
   static constexpr size_t MAX_HISTORY = 1000;
 };
 

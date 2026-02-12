@@ -16,6 +16,11 @@ public:
   AtomicStore() = default;
 
   void set(const std::string& symbol, const std::string& field, ArgType value);
+
+  /// Write multiple fields for a symbol under a single lock acquisition.
+  void setBatch(const std::string& symbol,
+                const std::vector<std::pair<std::string, ArgType>>& fields);
+
   std::optional<ArgType> get(const std::string& symbol, const std::string& field) const;
 
 private:

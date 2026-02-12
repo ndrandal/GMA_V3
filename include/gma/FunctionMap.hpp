@@ -21,6 +21,16 @@ public:
     /// Returns a snapshot of all registered [name->Func] pairs.
     std::vector<std::pair<std::string, Func>> getAll() const;
 
+    /// Iterate all registered functions under shared_lock without copying.
+    /// Callback signature: void(const std::string& name, const Func& fn)
+    template <typename Callback>
+    void forEach(Callback&& cb) const {
+        std::shared_lock lock(_mutex);
+        for (const auto& kv : _map) {
+            cb(kv.first, kv.second);
+        }
+    }
+
 private:
     std::unordered_map<std::string, Func> _map;
     mutable std::shared_mutex _mutex;

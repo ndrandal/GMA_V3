@@ -3,6 +3,7 @@ project(GMA_V3 LANGUAGES CXX)
 
 # ---- Options ----
 option(GMA_BUILD_TESTS "Build unit tests in tests/" OFF)
+option(GMA_BUILD_BENCHMARKS "Build Google Benchmark suite in benchmarks/" OFF)
 option(GMA_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 
 # ---- C++ standard ----
@@ -139,6 +140,26 @@ if (WIN32)
   add_definitions(-D_WIN32_WINNT=0x0A00 -DNOMINMAX)
 endif()
 
+# =======================
+# Release optimizations
+# =======================
+if (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+  if (MSVC)
+    target_compile_options(gma PRIVATE /O2 /Ob2 /GL)
+    target_link_options(gma PUBLIC /LTCG)
+  else()
+    target_compile_options(gma PRIVATE -O3 -march=native)
+  endif()
+
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT ipo_supported OUTPUT ipo_output)
+  if (ipo_supported)
+    set_property(TARGET gma PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    message(STATUS "LTO enabled for gma")
+  else()
+    message(STATUS "LTO not supported: ${ipo_output}")
+  endif()
+endif()
 
 # App executable (if src/main.cpp exists)
 if (EXISTS "${MAIN_SRC}")
@@ -195,4 +216,54 @@ if (GMA_BUILD_TESTS)
     GTest::gtest_main
   )
   add_test(NAME gma_tests COMMAND gma_tests)
+endif()
+
+# Benchmarks (opt-in)
+if (GMA_BUILD_BENCHMARKS)
+  include(FetchContent)
+  FetchContent_Declare(
+    googlebenchmark
+    GIT_REPOSITORY https://github.com/google/benchmark.git
+    GIT_TAG        v1.8.3
+  )
+  set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+  set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googlebenchmark)
+
+  # Helper: create a benchmark executable from a single source file
+  function(gma_add_benchmark NAME SRC)
+    add_executable(${NAME} ${SRC})
+    target_include_directories(${NAME} PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    if (Boost_FOUND)
+      target_include_directories(${NAME} PRIVATE ${Boost_INCLUDE_DIRS})
+      target_link_libraries(${NAME} PRIVATE gma Boost::system)
+    else()
+      target_link_libraries(${NAME} PRIVATE gma Boost::system)
+      target_compile_definitions(${NAME} PRIVATE
+        BOOST_ALL_NO_LIB
+        BOOST_ERROR_CODE_HEADER_ONLY
+        BOOST_SYSTEM_NO_DEPRECATED
+        BOOST_ASIO_NO_DEPRECATED
+        BOOST_BEAST_USE_STD_STRING_VIEW
+      )
+    endif()
+    target_link_libraries(${NAME} PRIVATE
+      Threads::Threads
+      RapidJSON::rapidjson
+      benchmark::benchmark
+    )
+  endfunction()
+
+  gma_add_benchmark(bench_atomic_functions  "${CMAKE_SOURCE_DIR}/benchmarks/AtomicFunctionsBench.cpp")
+  gma_add_benchmark(bench_dispatcher        "${CMAKE_SOURCE_DIR}/benchmarks/DispatcherBench.cpp")
+  gma_add_benchmark(bench_atomic_store      "${CMAKE_SOURCE_DIR}/benchmarks/AtomicStoreBench.cpp")
+  gma_add_benchmark(bench_thread_pool       "${CMAKE_SOURCE_DIR}/benchmarks/ThreadPoolBench.cpp")
+
+  # Convenience target: build all benchmarks at once
+  add_custom_target(gma_benchmarks DEPENDS
+    bench_atomic_functions
+    bench_dispatcher
+    bench_atomic_store
+    bench_thread_pool
+  )
 endif()

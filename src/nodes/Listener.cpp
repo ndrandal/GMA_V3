@@ -32,9 +32,8 @@ void Listener::onValue(const gma::SymbolValue& sv) {
   if (!down) return;
 
   if (pool_) {
-    gma::SymbolValue copy = sv;
-    pool_->post([d = std::move(down), v = std::move(copy)]() mutable {
-      d->onValue(v);
+    pool_->post([d = std::move(down), sym = sv.symbol, val = sv.value]() mutable {
+      d->onValue(gma::SymbolValue{std::move(sym), std::move(val)});
     });
   } else {
     down->onValue(sv);

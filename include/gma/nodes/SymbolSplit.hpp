@@ -1,7 +1,7 @@
 #pragma once
 #include <functional>
 #include <memory>
-#include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include "gma/nodes/INode.hpp"
@@ -18,7 +18,7 @@ public:
   void shutdown() noexcept override;
 
 private:
-  std::mutex mx_;
+  mutable std::shared_mutex mx_;
   Factory makeChild_;
   std::unordered_map<std::string, std::shared_ptr<INode>> children_;
 };
