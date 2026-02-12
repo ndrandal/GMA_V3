@@ -9,7 +9,7 @@ namespace gma::nodes {
 /// Sends each SymbolValue back to the client via a callback.
 class Responder : public INode {
 public:
-    /// \param send  the callback (_key, SymbolValue) → void
+    /// \param send  callback (key, SymbolValue) -> void
     /// \param key   the request key to correlate responses
     Responder(std::function<void(int,const SymbolValue&)> send,
               int key);
@@ -18,8 +18,8 @@ public:
     void shutdown() noexcept override;
 
 private:
-    std::function<void(int,const SymbolValue&)> _send;
-    int _key;
+    std::function<void(int,const SymbolValue&)> send_;
+    int key_;
 };
 
 } // namespace gma::nodes

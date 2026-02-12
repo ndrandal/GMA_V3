@@ -45,12 +45,20 @@ TEST(ResponderTest, ExceptionInCallbackIsCaught) {
     EXPECT_NO_THROW(responder.onValue({"S", 0}));
 }
 
-TEST(ResponderTest, ShutdownDoesNotAffectOnValue) {
-    bool called = false;
-    auto callback = [&](int, const SymbolValue&) { called = true; };
+TEST(ResponderTest, ShutdownStopsSending) {
+    int count = 0;
+    auto callback = [&](int, const SymbolValue&) { ++count; };
     Responder responder(callback, 100);
-    responder.shutdown();
-    // shutdown is a no-op; subsequent onValue should still invoke callback
     responder.onValue({"S", 5});
-    EXPECT_TRUE(called);
+    EXPECT_EQ(count, 1);
+    responder.shutdown();
+    // After shutdown, callback is cleared — onValue is a no-op
+    responder.onValue({"S", 10});
+    EXPECT_EQ(count, 1);
+}
+
+TEST(ResponderTest, NullCallbackSafe) {
+    Responder responder(nullptr, 0);
+    // Should not throw bad_function_call
+    EXPECT_NO_THROW(responder.onValue({"S", 1}));
 }

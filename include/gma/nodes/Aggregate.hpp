@@ -1,4 +1,5 @@
 #pragma once
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 #include <memory>
@@ -7,9 +8,11 @@
 
 namespace gma {
 
+// Fan-in node: collects N values per symbol before forwarding the batch
+// to parent. Thread-safe — multiple upstream nodes may call onValue()
+// concurrently.
 class Aggregate final : public INode {
 public:
-  // Fan-in of N children (wired externally); forwards a batch to parent
   Aggregate(std::size_t arity, std::shared_ptr<INode> parent);
 
   void onValue(const SymbolValue& sv) override;
@@ -22,6 +25,8 @@ private:
 
   const std::size_t arity_;
   std::weak_ptr<INode> parent_;
+
+  mutable std::mutex mx_;
   std::unordered_map<std::string, SymBuf> buf_;
 };
 

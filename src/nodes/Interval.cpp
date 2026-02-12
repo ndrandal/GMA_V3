@@ -11,30 +11,37 @@ Interval::Interval(std::chrono::milliseconds period,
 
 void Interval::start() {
   bool expected = false;
-  if (scheduled_.compare_exchange_strong(expected, true)) {
-    auto self = shared_from_this();
-    pool_->post([self]{ self->tickOnce(); });
-  }
+  if (!started_.compare_exchange_strong(expected, true))
+    return; // already started
+
+  timerThread_ = std::thread([self = shared_from_this()] {
+    self->timerLoop();
+  });
 }
 
-void Interval::tickOnce() {
-  if (stopping_.load(std::memory_order_acquire)) {
-    scheduled_.store(false, std::memory_order_release);
-    return;
-  }
+void Interval::timerLoop() {
+  while (true) {
+    {
+      std::unique_lock<std::mutex> lk(mx_);
+      if (cv_.wait_for(lk, period_, [this] {
+            return stopping_.load(std::memory_order_acquire);
+          })) {
+        break; // woken by shutdown
+      }
+    }
 
-  // Emit a “tick”. We use an empty symbol/value – downstream nodes that care
-  // (e.g. AtomicAccessor) will ignore the input payload and pull from storage.
-  if (auto c = child_.lock()) {
-    c->onValue(SymbolValue{ /*symbol*/"", /*value*/ 0.0 });
-  }
+    if (stopping_.load(std::memory_order_acquire))
+      break;
 
-  // re-schedule
-  auto self = shared_from_this();
-  pool_->post([self]{
-    std::this_thread::sleep_for(self->period_);
-    self->tickOnce();
-  });
+    auto c = child_.lock();
+    if (!c) break; // child gone, stop ticking
+
+    if (pool_) {
+      pool_->post([c] { c->onValue(SymbolValue{"", 0.0}); });
+    } else {
+      c->onValue(SymbolValue{"", 0.0});
+    }
+  }
 }
 
 void Interval::onValue(const SymbolValue&) {
@@ -43,6 +50,8 @@ void Interval::onValue(const SymbolValue&) {
 
 void Interval::shutdown() noexcept {
   stopping_.store(true, std::memory_order_release);
+  cv_.notify_all();
+  if (timerThread_.joinable()) timerThread_.join();
 }
 
 } // namespace gma

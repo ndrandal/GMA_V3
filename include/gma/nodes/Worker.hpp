@@ -1,6 +1,7 @@
 #pragma once
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 #include "gma/nodes/INode.hpp"
@@ -8,7 +9,10 @@
 
 namespace gma {
 
-// A simple "apply(fn(values_for_symbol)) -> one value" node
+// Applies fn to accumulated per-symbol values and forwards the result.
+// Computes on every incoming value (accumulator contains all values seen so far
+// for that symbol since last clear). For deterministic N-ary batching, wire
+// Aggregate(N) upstream.
 class Worker final : public INode {
 public:
   using Fn = std::function<ArgType(Span<const ArgType>)>;
@@ -22,7 +26,7 @@ private:
   Fn fn_;
   std::weak_ptr<INode> downstream_;
 
-  // Per-symbol accumulation (feed it via Aggregate or by multiple upstreams)
+  mutable std::mutex mx_;
   std::unordered_map<std::string, std::vector<ArgType>> acc_;
 };
 

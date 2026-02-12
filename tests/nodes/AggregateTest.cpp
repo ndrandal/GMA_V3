@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 #include <atomic>
+#include <thread>
 
 using namespace gma;
 
@@ -96,4 +97,25 @@ TEST(AggregateTest, DoesNotTriggerBelowArity) {
     agg.onValue(SymbolValue{"S", 2.0});
     // Only 2 of 3 received — should not trigger
     EXPECT_EQ(parent->count.load(), 0);
+}
+
+TEST(AggregateTest, ConcurrentOnValueIsSafe) {
+    auto parent = std::make_shared<TestParent>();
+    const std::size_t arity = 1; // trigger on every value for easy counting
+    Aggregate agg(arity, parent);
+
+    const int numThreads = 4;
+    const int perThread = 100;
+    std::vector<std::thread> threads;
+    for (int t = 0; t < numThreads; ++t) {
+        threads.emplace_back([&agg, t, perThread]() {
+            for (int i = 0; i < perThread; ++i) {
+                agg.onValue(SymbolValue{"SYM_" + std::to_string(t),
+                                        static_cast<double>(i)});
+            }
+        });
+    }
+    for (auto& th : threads) th.join();
+
+    EXPECT_EQ(parent->count.load(), numThreads * perThread);
 }

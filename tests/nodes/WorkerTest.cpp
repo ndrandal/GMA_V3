@@ -4,6 +4,8 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <vector>
+#include <thread>
+#include <atomic>
 
 using namespace gma;
 
@@ -87,4 +89,28 @@ TEST(WorkerTest, NoCrashWithNullDownstream) {
     Worker::Fn anyFn = [](Span<const ArgType>) -> ArgType { return ArgType(0.0); };
     Worker worker(anyFn, nullptr);
     EXPECT_NO_THROW(worker.onValue({"S", 1.0}));
+}
+
+TEST(WorkerTest, ConcurrentOnValueIsSafe) {
+    auto stub = std::make_shared<WStubNode>();
+    std::atomic<int> callCount{0};
+    Worker::Fn countFn = [&callCount](Span<const ArgType> inputs) -> ArgType {
+        ++callCount;
+        return inputs.empty() ? ArgType(0.0) : inputs[0];
+    };
+    Worker worker(countFn, stub);
+
+    const int numThreads = 4;
+    const int perThread = 100;
+    std::vector<std::thread> threads;
+    for (int t = 0; t < numThreads; ++t) {
+        threads.emplace_back([&worker, t, perThread]() {
+            for (int i = 0; i < perThread; ++i) {
+                worker.onValue({"SYM_" + std::to_string(t), static_cast<double>(i)});
+            }
+        });
+    }
+    for (auto& th : threads) th.join();
+
+    EXPECT_EQ(callCount.load(), numThreads * perThread);
 }

@@ -1,6 +1,7 @@
 #include "gma/nodes/Listener.hpp"
 #include "gma/MarketDispatcher.hpp"
 #include "gma/rt/ThreadPool.hpp"
+#include "gma/util/Logger.hpp"
 
 using namespace gma::nodes;
 
@@ -46,6 +47,14 @@ void Listener::shutdown() noexcept {
     if (dispatcher_) {
       dispatcher_->unregisterListener(symbol_, field_, shared_from_this());
     }
-  } catch (...) {}
+  } catch (const std::exception& ex) {
+    gma::util::logger().log(gma::util::LogLevel::Error,
+                            "Listener shutdown error",
+                            { {"symbol", symbol_}, {"err", ex.what()} });
+  } catch (...) {
+    gma::util::logger().log(gma::util::LogLevel::Error,
+                            "Listener shutdown unknown error",
+                            { {"symbol", symbol_} });
+  }
   downstream_.reset();
 }
