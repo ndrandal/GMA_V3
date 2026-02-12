@@ -18,7 +18,6 @@
 #include "gma/AtomicStore.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include "gma/MarketDispatcher.hpp"
-#include "gma/rt/ThreadPool.hpp"  // for gma::gThreadPool
 
 
 //
@@ -274,9 +273,6 @@ static std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
     if (field.empty())
       throw std::runtime_error("Listener: missing 'field'");
 
-    std::size_t cap = sizeOr(v, "queueCap", 1024);
-    (void)cap; // currently unused, kept for future queue sizing
-
     using gma::nodes::Listener;
     auto sp = std::make_shared<Listener>(symbol,
                                          field,
@@ -290,8 +286,11 @@ static std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
 
   // --- Interval ---
   if (type == "Interval") {
-    if (!gma::gThreadPool)
-      throw std::runtime_error("Interval: global gThreadPool not initialized");
+    gma::rt::ThreadPool* pool = deps.pool;
+    if (!pool && gma::gThreadPool)
+      pool = gma::gThreadPool.get();
+    if (!pool)
+      throw std::runtime_error("Interval: no thread pool available");
 
     int ms = intOr(v, "ms", intOr(v, "periodMs", 0));
     if (ms <= 0)
@@ -306,7 +305,7 @@ static std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
 
     return std::make_shared<gma::Interval>(std::chrono::milliseconds(ms),
                                           child,
-                                          gma::gThreadPool.get());
+                                          pool);
   }
 
 
@@ -387,6 +386,11 @@ static std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
 // -------- Public API: buildNode / buildSimple / buildForRequest --------
 //
 
+std::shared_ptr<gma::INode> buildTree(const rapidjson::Value& rootSpec,
+                                      const Deps&             deps) {
+  return buildOne(rootSpec, /*defaultSymbol=*/"", deps, /*downstream=*/nullptr);
+}
+
 std::shared_ptr<gma::INode> buildNode(const rapidjson::Value&      spec,
                                       const std::string&           defaultSymbol,
                                       const Deps&                  deps,
@@ -408,11 +412,14 @@ std::shared_ptr<gma::INode> buildSimple(const std::string&      symbol,
     std::make_shared<gma::AtomicAccessor>(symbol, field, deps.store, terminal);
 
   if (pollMs > 0) {
-    if (!gma::gThreadPool)
-      throw std::runtime_error("buildSimple: global gThreadPool not initialized");
+    gma::rt::ThreadPool* pool = deps.pool;
+    if (!pool && gma::gThreadPool)
+      pool = gma::gThreadPool.get();
+    if (!pool)
+      throw std::runtime_error("buildSimple: no thread pool available");
     return std::make_shared<gma::Interval>(std::chrono::milliseconds(pollMs),
                                           accessor,
-                                          gma::gThreadPool.get());
+                                          pool);
   }
   return accessor;
 
@@ -431,7 +438,6 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
 
   const std::string symbol = rq["symbol"].GetString();
   const std::string field  = rq["field"].GetString();
-  const std::size_t cap    = sizeOr(rq, "queueCap", 1024);
 
   // Optional mid-pipeline, ultimately forwarding into terminal
   std::shared_ptr<gma::INode> midHead = terminal;
@@ -467,7 +473,6 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
                                         midHead,
                                         deps.pool,
                                         deps.dispatcher);
-  head->start();
   head->start();
 
   BuiltChain out;

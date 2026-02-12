@@ -5,6 +5,7 @@
 #include "gma/nodes/INode.hpp"
 #include "gma/SymbolValue.hpp"
 #include "gma/SymbolTick.hpp"
+#include "gma/util/Logger.hpp"
 
 #include <algorithm>
 #include <shared_mutex>
@@ -42,19 +43,16 @@ void MarketDispatcher::unregisterListener(const std::string& symbol,
 }
 
 void MarketDispatcher::onTick(const SymbolTick& tick) {
-  // Collect (field, listener) pairs for this symbol — we’ll notify outside the lock
+  // Collect (field, listener) pairs for this symbol — snapshot under lock
   std::vector<std::pair<std::string, std::shared_ptr<INode>>> toNotify;
 
   {
     std::shared_lock<std::shared_mutex> lock(_mutex);
     auto lit = _listeners.find(tick.symbol);
     if (lit != _listeners.end()) {
-      // If any subscribers registered to specific raw fields, they must exist as keys
       for (auto& kv : lit->second) {
         const std::string& field = kv.first;
         for (auto& sp : kv.second) {
-          // Capture only raw fields that appear in the payload; function results will be
-          // dispatched later by computeAndStoreAtomics using their function names.
           if (tick.payload && tick.payload->HasMember(field.c_str())) {
             toNotify.emplace_back(field, sp);
           }
@@ -63,40 +61,43 @@ void MarketDispatcher::onTick(const SymbolTick& tick) {
     }
   }
 
-  // Process raw values for the (symbol, field) and update history
-  if (tick.payload) {
-    for (auto& [field, node] : toNotify) {
-      double raw = 0.0;
-      try {
-        const auto& v = (*tick.payload)[field.c_str()];
-        if (!v.IsNumber()) continue;
-        raw = v.GetDouble();
-      } catch (...) {
-        continue;
-      }
+  if (!tick.payload) return;
 
-      // Update per-(symbol,field) history
-      std::deque<double>* histPtr = nullptr;
-      {
-        std::unique_lock<std::shared_mutex> lock(_mutex);
-        auto& hist = _histories[tick.symbol][field];
-        hist.push_back(raw);
-        if (hist.size() > MAX_HISTORY) hist.pop_front();
-        histPtr = &hist;
-      }
+  for (auto& [field, node] : toNotify) {
+    double raw = 0.0;
+    try {
+      const auto& v = (*tick.payload)[field.c_str()];
+      if (!v.IsNumber()) continue;
+      raw = v.GetDouble();
+    } catch (const std::exception& ex) {
+      gma::util::logger().log(gma::util::LogLevel::Warn,
+                              "MarketDispatcher: tick field read error",
+                              { {"symbol", tick.symbol}, {"field", field},
+                                {"err", ex.what()} });
+      continue;
+    }
 
-      // Recompute all atomic functions for this (symbol,field)
-      computeAndStoreAtomics(tick.symbol, field, *histPtr);
+    // Update history and take a snapshot under lock
+    std::deque<double> histCopy;
+    {
+      std::unique_lock<std::shared_mutex> lock(_mutex);
+      auto& hist = _histories[tick.symbol][field];
+      hist.push_back(raw);
+      if (hist.size() > MAX_HISTORY) hist.pop_front();
+      histCopy = hist; // safe copy while locked
+    }
 
-      // Notify the raw-value subscriber
-      SymbolValue out{ tick.symbol, raw };
-      if (_threadPool) {
-        _threadPool->post([node, out]() {
-          if (node) node->onValue(out);
-        });
-      } else {
+    // Compute atomics on the snapshot (no lock needed)
+    computeAndStoreAtomics(tick.symbol, field, histCopy);
+
+    // Notify the raw-value subscriber
+    SymbolValue out{ tick.symbol, raw };
+    if (_threadPool) {
+      _threadPool->post([node, out]() {
         if (node) node->onValue(out);
-      }
+      });
+    } else {
+      if (node) node->onValue(out);
     }
   }
 }
@@ -105,23 +106,24 @@ void MarketDispatcher::computeAndStoreAtomics(const std::string& symbol,
                                               const std::string& field,
                                               const std::deque<double>& history)
 {
-  // Snapshot registered atomic functions
-  std::vector<std::pair<std::string, Func>> funcs = FunctionMap::instance().getAll();
+  auto& fmap = FunctionMap::instance();
 
-  for (auto& [fnName, fn] : funcs) {
-    // Defensive: skip empty
+  // Iterate under the FunctionMap's lock via forEach — no copy needed
+  for (const auto& [fnName, fn] : fmap.getAll()) {
     if (!fn) continue;
 
-    // Compute atomic result
     std::vector<double> vec(history.begin(), history.end());
     double result = 0.0;
     try {
       result = fn(vec);
-    } catch (...) {
+    } catch (const std::exception& ex) {
+      gma::util::logger().log(gma::util::LogLevel::Warn,
+                              "MarketDispatcher: atomic function error",
+                              { {"symbol", symbol}, {"fn", fnName},
+                                {"err", ex.what()} });
       continue;
     }
 
-    // Store under key == function name (users subscribe to fnName)
     if (_store) {
       _store->set(symbol, fnName, result);
     }
@@ -139,7 +141,6 @@ void MarketDispatcher::computeAndStoreAtomics(const std::string& symbol,
       }
     }
 
-    // Dispatch the atomic result to each subscriber
     for (auto& listener : subs) {
       if (_threadPool) {
         _threadPool->post([listener, symbol, result]() {
