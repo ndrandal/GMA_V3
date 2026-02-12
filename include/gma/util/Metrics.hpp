@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -36,20 +37,30 @@ public:
   void startReporter(unsigned int intervalSeconds = 10) {
     if (intervalSeconds == 0) intervalSeconds = 1;
 
-    bool expected = false;
-    if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-      return; // already running
-    }
+    std::lock_guard<std::mutex> lk(thrMu_);
+    if (running_.load(std::memory_order_acquire)) return; // already running
+    running_.store(true, std::memory_order_release);
 
     thr_ = std::thread([this, intervalSeconds]() { reporterLoop(intervalSeconds); });
   }
 
   void stopReporter() {
-    bool wasRunning = running_.exchange(false, std::memory_order_acq_rel);
-    if (!wasRunning) return;
-
-    if (thr_.joinable()) {
-      thr_.join();
+    std::thread toJoin;
+    {
+      std::lock_guard<std::mutex> lk(thrMu_);
+      if (!running_.load(std::memory_order_acquire)) return;
+      // Signal stop under cvMu_ to prevent lost wake-up.
+      {
+        std::lock_guard<std::mutex> cvLk(cvMu_);
+        running_.store(false, std::memory_order_release);
+      }
+      cv_.notify_all();
+      if (thr_.joinable()) {
+        toJoin = std::move(thr_);
+      }
+    }
+    if (toJoin.joinable()) {
+      toJoin.join();
     }
   }
 
@@ -77,10 +88,12 @@ public:
 
 private:
   void reporterLoop(unsigned int intervalSeconds) {
-    using namespace std::chrono_literals;
-
     while (running_.load(std::memory_order_acquire)) {
-      std::this_thread::sleep_for(std::chrono::seconds(intervalSeconds));
+      std::unique_lock<std::mutex> lk(cvMu_);
+      cv_.wait_for(lk, std::chrono::seconds(intervalSeconds), [this]() {
+        return !running_.load(std::memory_order_acquire);
+      });
+      lk.unlock();
       if (!running_.load(std::memory_order_acquire)) break;
 
       // NOTE: We intentionally do not print here to avoid forcing iostream
@@ -94,6 +107,9 @@ private:
   std::unordered_map<std::string, double> counters_;
   std::unordered_map<std::string, double> gauges_;
 
+  std::mutex thrMu_;                 // protects thr_ start/stop
+  std::mutex cvMu_;                  // protects cv_ wait predicate
+  std::condition_variable cv_;       // signaled on stop for prompt shutdown
   std::atomic<bool> running_{false};
   std::thread thr_;
 };

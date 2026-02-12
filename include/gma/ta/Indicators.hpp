@@ -86,6 +86,7 @@ struct RsiState {
   double avgLoss = NaN();
   bool   init    = false;
   double lastPx  = NaN();
+  size_t count   = 0;     // samples processed during init phase
 };
 
 inline double rsi_update(RsiState& st, double newPx, size_t period) {
@@ -98,18 +99,21 @@ inline double rsi_update(RsiState& st, double newPx, size_t period) {
   double loss = chg < 0 ? -chg : 0.0;
 
   if (!st.init) {
-    // First cycle: seed with simple means (caller should call this at least 'period' times)
+    // Seed phase: accumulate running average over 'period' samples.
     if (!isFinite(st.avgGain)) st.avgGain = 0.0;
     if (!isFinite(st.avgLoss)) st.avgLoss = 0.0;
     st.avgGain = ((st.avgGain * (period - 1)) + gain) / double(period);
     st.avgLoss = ((st.avgLoss * (period - 1)) + loss) / double(period);
-    // Mark init after we’ve processed >= period samples (caller tracks count)
-    return NaN();
+    ++st.count;
+    if (st.count < period) return NaN();
+    // Enough samples — transition to Wilder smoothing.
+    // First RSI is computed from the seeded averages directly.
+    st.init = true;
+  } else {
+    // Wilder smoothing for subsequent updates.
+    st.avgGain = (st.avgGain * (period - 1) + gain) / double(period);
+    st.avgLoss = (st.avgLoss * (period - 1) + loss) / double(period);
   }
-
-  // Wilder smoothing
-  st.avgGain = (st.avgGain * (period - 1) + gain) / double(period);
-  st.avgLoss = (st.avgLoss * (period - 1) + loss) / double(period);
 
   if (st.avgLoss <= 0.0) return 100.0;
   const double rs = st.avgGain / st.avgLoss;

@@ -5,6 +5,9 @@
 #include <atomic>
 #include <mutex>
 #include <algorithm>
+#include <stdexcept>
+
+#include "gma/util/Logger.hpp"
 
 namespace gma::rt {
 
@@ -27,7 +30,7 @@ public:
     {
       std::lock_guard<std::mutex> lk(mx_);
       if (!sorted_) {
-        std::sort(steps_.begin(), steps_.end(), [](const Step& a, const Step& b){
+        std::stable_sort(steps_.begin(), steps_.end(), [](const Step& a, const Step& b){
           return a.order < b.order;
         });
         sorted_ = true;
@@ -35,7 +38,16 @@ public:
       run = steps_;
     }
     for (auto &s : run) {
-      try { s.fn(); } catch (...) { /* best-effort */ }
+      try {
+        s.fn();
+      } catch (const std::exception& ex) {
+        gma::util::logger().log(gma::util::LogLevel::Error,
+          "Shutdown step failed: " + s.name,
+          {{"error", ex.what()}});
+      } catch (...) {
+        gma::util::logger().log(gma::util::LogLevel::Error,
+          "Shutdown step failed with unknown exception: " + s.name);
+      }
     }
   }
 

@@ -16,18 +16,17 @@ public:
 
   TAComputer() = default;
 
-  // Get/create per-symbol state (non-const).
-  SymState& sym(const std::string& symbol);
-
-  // Const accessor; throws if missing to avoid accidental mutation.
-  const SymState& symConst(const std::string& symbol) const;
-
-  // Optional helpers you might already call elsewhere:
+  // Thread-safe accessors — all work done under the lock.
   void setLastPrice(const std::string& symbol, double px);
   double getLastPrice(const std::string& symbol) const;
 
+  // Return a copy of per-symbol state (safe: no dangling references).
+  SymState getState(const std::string& symbol) const;
+
+  // Check if symbol exists.
+  bool has(const std::string& symbol) const;
+
 private:
-  // maps symbol -> state
   mutable std::mutex mx_;
   std::unordered_map<std::string, SymState> map_;
 };

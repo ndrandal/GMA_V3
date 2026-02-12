@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <vector>
 #include <mutex>
@@ -25,6 +26,7 @@ LogLevel parseLevel(const std::string& s);
 class Logger {
 public:
   Logger();
+  ~Logger();
 
   void setLevel(LogLevel lvl);
   void setFormatJson(bool json);
@@ -34,21 +36,25 @@ public:
 
   void log(LogLevel lvl, const std::string& msg, const std::vector<Field>& fields = {});
 
-  // Thread-local context helper
+  // Thread-local context helper. Adds fields on construction,
+  // removes them on destruction (RAII).
   class Scoped {
   public:
     explicit Scoped(const std::vector<Field>& add);
     ~Scoped();
+  private:
+    std::vector<std::string> addedKeys_;
   };
 
 private:
   void writeLine(LogLevel lvl, const std::string& msg, const std::vector<Field>& fields);
+  static void escapeJson(std::ostringstream& oss, const std::string& s);
 
 private:
-  mutable std::mutex mx_;
+  std::mutex mx_;
   void* file_ = nullptr;            // FILE* stored as void* to avoid <cstdio> in header
-  LogLevel lvl_ = LogLevel::Info;
-  bool json_ = false;
+  std::atomic<LogLevel> lvl_{LogLevel::Info};
+  std::atomic<bool> json_{false};
 };
 
 Logger& logger();

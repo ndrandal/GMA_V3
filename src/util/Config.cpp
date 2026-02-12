@@ -46,13 +46,8 @@ bool Config::loadFromFile(const std::string& path) {
   if (!f) return false;
 #endif
 
-  std::string buf;
-  buf.resize(8 * 1024);
-
   std::string line;
   line.reserve(1024);
-
-  bool ok = true;
 
   // Read whole file
   while (true) {
@@ -85,7 +80,7 @@ bool Config::loadFromFile(const std::string& path) {
   if (taMACD_slow < taMACD_fast) std::swap(taMACD_slow, taMACD_fast);
   if (taBBands_stdK <= 0.0) taBBands_stdK = 2.0;
 
-  return ok;
+  return true;
 }
 
 } // namespace util
