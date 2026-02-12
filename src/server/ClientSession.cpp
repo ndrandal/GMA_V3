@@ -230,6 +230,17 @@ void ClientSession::sendText(const std::string& s) {
   boost::asio::dispatch(strand_, [self, s]() {
     if (!self->open_.load()) return;
 
+    // Backpressure: if a slow/dead client lets the queue grow too large,
+    // close the connection rather than exhausting server memory.
+    if (self->outbox_.size() >= MAX_OUTBOX_SIZE) {
+      gma::util::logger().log(gma::util::LogLevel::Warn,
+                              "ws.outbox_overflow",
+                              {{"sessionId", std::to_string(self->sessionId_)},
+                               {"queueSize", std::to_string(self->outbox_.size())}});
+      self->close();
+      return;
+    }
+
     self->outbox_.push_back(s);
     if (!self->writing_) {
       self->writing_ = true;

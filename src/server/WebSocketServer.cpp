@@ -41,13 +41,13 @@ WebSocketServer::WebSocketServer(boost::asio::io_context& ioc,
 }
 
 void WebSocketServer::run() {
-  if (accepting_) return;
-  accepting_ = true;
+  bool expected = false;
+  if (!accepting_.compare_exchange_strong(expected, true)) return;
   doAccept();
 }
 
 void WebSocketServer::stopAccept() {
-  accepting_ = false;
+  accepting_.store(false);
   boost::system::error_code ec;
   acceptor_.cancel(ec); // ignore ec; cancel pending accept
 }
@@ -78,7 +78,7 @@ void WebSocketServer::unregisterSession(std::size_t id) {
 }
 
 void WebSocketServer::doAccept() {
-  if (!accepting_) return;
+  if (!accepting_.load()) return;
 
   acceptor_.async_accept(
     boost::asio::make_strand(ioc_),
@@ -88,7 +88,7 @@ void WebSocketServer::doAccept() {
 }
 
 void WebSocketServer::onAccept(boost::system::error_code ec, tcp::socket socket) {
-  if (!accepting_) return;
+  if (!accepting_.load()) return;
 
   if (!ec) {
     // Construct a ClientSession that knows how to talk WebSocket/Beast.

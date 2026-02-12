@@ -36,6 +36,11 @@ public:
     boost::system::error_code ec;
     socket_.shutdown(tcp::socket::shutdown_both, ec);
     socket_.close(ec);
+    // Remove ourselves from the owner's session set.
+    if (owner_) {
+      std::lock_guard<std::mutex> lk(owner_->mu_);
+      owner_->sessions_.erase(shared_from_this());
+    }
   }
 
 private:
@@ -72,37 +77,59 @@ private:
     doRead(); // continue reading
   }
 
+  static constexpr std::size_t MAX_LINE_SIZE = 64 * 1024; // 64 KB
+
   void handleLine(const std::string& line) {
     if (!dispatcher_) return;
-    // Smoke-test framing: newline-delimited JSON objects.
-    // Required: {"symbol":"AAPL", ... numeric fields ... }
+
     GMA_METRIC_HIT("feed.line_in");
 
-    auto doc = std::make_shared<rapidjson::Document>();
-    doc->Parse(line.c_str());
-    if (doc->HasParseError() || !doc->IsObject()) {
+    // Guard against oversized lines (DoS prevention).
+    if (line.size() > MAX_LINE_SIZE) {
       GMA_METRIC_HIT("feed.tick_bad");
       gma::util::logger().log(gma::util::LogLevel::Warn,
-                              "feed.line.bad_json",
-                              { {"line", line} });
+                              "feed.line.too_large",
+                              {{"size", std::to_string(line.size())}});
       return;
     }
 
-    if (!doc->HasMember("symbol") || !(*doc)["symbol"].IsString()) {
+    try {
+      auto doc = std::make_shared<rapidjson::Document>();
+      doc->Parse(line.c_str());
+      if (doc->HasParseError() || !doc->IsObject()) {
+        GMA_METRIC_HIT("feed.tick_bad");
+        gma::util::logger().log(gma::util::LogLevel::Warn,
+                                "feed.line.bad_json",
+                                {{"line", line.substr(0, 200)}});
+        return;
+      }
+
+      if (!doc->HasMember("symbol") || !(*doc)["symbol"].IsString()) {
+        GMA_METRIC_HIT("feed.tick_bad");
+        gma::util::logger().log(gma::util::LogLevel::Warn,
+                                "feed.line.missing_symbol",
+                                {{"line", line.substr(0, 200)}});
+        return;
+      }
+
+      gma::SymbolTick t;
+      t.symbol  = (*doc)["symbol"].GetString();
+      t.payload = std::move(doc);
+
+      GMA_METRIC_HIT("feed.tick_ok");
+      GMA_METRIC_HIT("dispatch.tick");
+      dispatcher_->onTick(t);
+
+    } catch (const std::exception& ex) {
       GMA_METRIC_HIT("feed.tick_bad");
-      gma::util::logger().log(gma::util::LogLevel::Warn,
-                              "feed.line.missing_symbol",
-                              { {"line", line} });
-      return;
+      gma::util::logger().log(gma::util::LogLevel::Error,
+                              "feed.handleLine exception",
+                              {{"err", ex.what()}});
+    } catch (...) {
+      GMA_METRIC_HIT("feed.tick_bad");
+      gma::util::logger().log(gma::util::LogLevel::Error,
+                              "feed.handleLine unknown exception");
     }
-
-    gma::SymbolTick t;
-    t.symbol  = (*doc)["symbol"].GetString();
-    t.payload = std::move(doc);
-
-    GMA_METRIC_HIT("feed.tick_ok");
-    GMA_METRIC_HIT("dispatch.tick");
-    dispatcher_->onTick(t);
   }
 
 private:
@@ -140,13 +167,13 @@ FeedServer::FeedServer(boost::asio::io_context& ioc,
 }
 
 void FeedServer::run() {
-  if (accepting_) return;
-  accepting_ = true;
+  bool expected = false;
+  if (!accepting_.compare_exchange_strong(expected, true)) return;
   doAccept();
 }
 
 void FeedServer::stop() {
-  accepting_ = false;
+  accepting_.store(false);
 
   boost::system::error_code ec;
   acceptor_.cancel(ec);
@@ -163,7 +190,7 @@ void FeedServer::stop() {
 }
 
 void FeedServer::doAccept() {
-  if (!accepting_) return;
+  if (!accepting_.load()) return;
 
   acceptor_.async_accept(
     boost::asio::make_strand(ioc_),
@@ -173,7 +200,7 @@ void FeedServer::doAccept() {
 }
 
 void FeedServer::onAccept(boost::system::error_code ec, tcp::socket socket) {
-  if (!accepting_) return;
+  if (!accepting_.load()) return;
 
   if (!ec) {
     auto sp = std::make_shared<FeedSession>(std::move(socket), dispatcher_, this);

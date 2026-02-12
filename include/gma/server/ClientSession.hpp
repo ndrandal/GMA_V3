@@ -67,6 +67,7 @@ private:
   std::uint64_t sessionId_{0};
 
   // Outbound write serialization (Responder can call sendText from worker threads).
+  static constexpr std::size_t MAX_OUTBOX_SIZE = 4096;
   std::deque<std::string> outbox_;
   bool writing_{false};
 

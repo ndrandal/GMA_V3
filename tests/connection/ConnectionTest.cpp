@@ -1,4 +1,4 @@
-#include "gma/ClientConnection.hpp"
+#include "gma/ws/ClientConnection.hpp"
 #include "gma/RequestRegistry.hpp"
 #include "gma/nodes/INode.hpp"
 #include "gma/SymbolValue.hpp"

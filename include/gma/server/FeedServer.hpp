@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <unordered_set>
@@ -36,7 +37,7 @@ private:
 private:
   boost::asio::io_context& ioc_;
   tcp::acceptor            acceptor_;
-  bool                     accepting_{false};
+  std::atomic<bool>        accepting_{false};
 
   MarketDispatcher*        dispatcher_; // not owned
 

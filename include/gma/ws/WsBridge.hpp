@@ -24,6 +24,8 @@ public:
   void onClose(const std::string& connId);
 
 private:
+  void sendTo(const std::string& connId, const std::string& msg);
+
   std::mutex mx_;
   std::unordered_map<std::string, SendFn> connections_;
   std::shared_ptr<gma::MarketDispatcher> dispatcher_;
