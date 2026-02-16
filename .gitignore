@@ -119,3 +119,9 @@ Thumbs.db
 
 /external/**
 !/external/.gitkeep
+
+##############################
+# Third-party Dependencies
+##############################
+
+/third_party/
