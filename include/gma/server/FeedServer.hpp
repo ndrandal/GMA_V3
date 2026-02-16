@@ -10,6 +10,7 @@
 namespace gma {
 
 class MarketDispatcher;   // fwd-declare to keep header light
+class OrderBookManager;   // fwd-declare for OB routing
 
 /// Minimal TCP feed server that accepts producer connections and forwards
 /// incoming messages to a MarketDispatcher. The actual deserialization is
@@ -20,6 +21,11 @@ public:
 
   FeedServer(boost::asio::io_context& ioc,
              MarketDispatcher* dispatcher,
+             unsigned short port);
+
+  FeedServer(boost::asio::io_context& ioc,
+             MarketDispatcher* dispatcher,
+             OrderBookManager* obManager,
              unsigned short port);
 
   FeedServer(const FeedServer&) = delete;
@@ -40,6 +46,7 @@ private:
   std::atomic<bool>        accepting_{false};
 
   MarketDispatcher*        dispatcher_; // not owned
+  OrderBookManager*        obManager_{nullptr}; // not owned
 
   std::mutex                                  mu_;
   std::unordered_set<std::shared_ptr<FeedSession>> sessions_;

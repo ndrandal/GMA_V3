@@ -176,7 +176,7 @@ int main(int argc, char* argv[]) {
   gma::WebSocketServer ws(ioc, &exec, dispatcher.get(), wsPort);
   ws.run();
 
-  gma::FeedServer feed(ioc, dispatcher.get(), feedPort);
+  gma::FeedServer feed(ioc, dispatcher.get(), obManager.get(), feedPort);
   feed.run();
 
   // 9) Shutdown sequencing — all captured objects are still alive when shutdown runs
