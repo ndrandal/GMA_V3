@@ -319,7 +319,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\SymbolTick.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\SymbolValue.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\TreeBuilder.hpp" />
-    <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\atomic\AtomicProveiderRegistry.hpp" />
+    <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\atomic\AtomicProviderRegistry.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\book\DepthTypes.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\book\OrderBook.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\book\OrderBookManager.hpp" />

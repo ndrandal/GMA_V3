@@ -8,6 +8,7 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include "gma/util/Logger.hpp"
 
 namespace gma {
 namespace util {
@@ -96,9 +97,15 @@ private:
       lk.unlock();
       if (!running_.load(std::memory_order_acquire)) break;
 
-      // NOTE: We intentionally do not print here to avoid forcing iostream
-      // into every TU. If you want printing, add a .cpp or include <iostream>.
-      // Typical usage: call snapshotCounters() from your own logger.
+      // Report counters and gauges via Logger
+      auto c = snapshotCounters();
+      auto g = snapshotGauges();
+      if (!c.empty() || !g.empty()) {
+        std::vector<gma::util::Field> fields;
+        for (const auto& [k, v] : c) fields.push_back({"c:" + k, std::to_string(static_cast<int64_t>(v))});
+        for (const auto& [k, v] : g) fields.push_back({"g:" + k, std::to_string(v)});
+        gma::util::logger().log(gma::util::LogLevel::Info, "metrics.report", fields);
+      }
     }
   }
 

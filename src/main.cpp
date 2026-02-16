@@ -1,6 +1,7 @@
 // File: src/main.cpp
 #include <csignal>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <string>
 #include <chrono>
@@ -22,13 +23,15 @@
 
 // -------- TA --------
 #include "gma/ta/AtomicNames.hpp"
+#include "gma/AtomicFunctions.hpp"
 
 // -------- OB --------
-#include "gma/atomic/AtomicProveiderRegistry.hpp"
+#include "gma/atomic/AtomicProviderRegistry.hpp"
 #include "gma/ob/FunctionalSnapshotSource.hpp"
 #include "gma/ob/ObProvider.hpp"
 #include "gma/ob/ObMaterializer.hpp"
 #include "gma/ob/ObKeysCatalog.hpp"
+#include "gma/book/OrderBookManager.hpp"
 
 // ---------------------------
 // Globals
@@ -94,18 +97,78 @@ int main(int argc, char* argv[]) {
     {{"wsPort", std::to_string(wsPort)}, {"feedPort", std::to_string(feedPort)}}
   );
 
-  // 3) Thread pool (global)
-  unsigned poolSize = std::thread::hardware_concurrency();
+  // 3) Register built-in atomic functions (mean, sum, min, max, etc.)
+  gma::registerBuiltinFunctions();
+
+  // 4) Thread pool (global) — use config threadPoolSize if set
+  unsigned poolSize = cfg.threadPoolSize > 0
+      ? static_cast<unsigned>(cfg.threadPoolSize)
+      : std::thread::hardware_concurrency();
   if (poolSize == 0) poolSize = 4;
   gma::gThreadPool = std::make_shared<gma::rt::ThreadPool>(poolSize);
   shutdown.registerStep("pool-drain",   80, []{ if (gma::gThreadPool) gma::gThreadPool->drain(); });
   shutdown.registerStep("pool-destroy", 85, []{ gma::gThreadPool.reset(); });
 
-  // 4) Core components
+  // 5) Core components
   auto store      = std::make_shared<gma::AtomicStore>();
-  auto dispatcher = std::make_shared<gma::MarketDispatcher>(gma::gThreadPool.get(), store.get());
+  auto dispatcher = std::make_shared<gma::MarketDispatcher>(gma::gThreadPool.get(), store.get(), cfg);
 
-  // 5) ASIO + servers
+  // 6) Metrics reporter
+  if (cfg.metricsEnabled) {
+    gma::util::MetricRegistry::instance().startReporter(
+        static_cast<unsigned>(cfg.metricsIntervalSec));
+    shutdown.registerStep("metrics-stop", 10, []{
+      gma::util::MetricRegistry::instance().stopReporter();
+    });
+  }
+
+  // 7) Order Book system
+  auto obManager = std::make_shared<gma::OrderBookManager>();
+
+  auto snapSource = std::make_shared<gma::ob::FunctionalSnapshotSource>(
+    // Capture function: produce a Snapshot from the OrderBookManager
+    [obManager](const std::string& symbol,
+                size_t maxLevels,
+                gma::ob::Mode /*mode*/,
+                std::optional<std::pair<double,double>> /*priceBand*/) -> gma::ob::Snapshot {
+      gma::ob::Snapshot snap;
+      auto ds = obManager->buildSnapshot(symbol, maxLevels);
+      double tick = obManager->getTickSize(symbol);
+      // Build bid ladder (Price is integer ticks — convert to double)
+      for (const auto& [px, sz] : ds.bids) {
+        double dpx = static_cast<double>(px.ticks) * tick;
+        snap.bids.levels.push_back({dpx, static_cast<double>(sz),
+            std::numeric_limits<double>::quiet_NaN(), dpx * static_cast<double>(sz)});
+      }
+      // Build ask ladder
+      for (const auto& [px, sz] : ds.asks) {
+        double dpx = static_cast<double>(px.ticks) * tick;
+        snap.asks.levels.push_back({dpx, static_cast<double>(sz),
+            std::numeric_limits<double>::quiet_NaN(), dpx * static_cast<double>(sz)});
+      }
+      snap.meta.seq = ds.seq;
+      snap.meta.epoch = ds.epoch;
+      snap.meta.bidLevels = snap.bids.levels.size();
+      snap.meta.askLevels = snap.asks.levels.size();
+      return snap;
+    },
+    // Tick size function
+    [obManager](const std::string& symbol) -> double {
+      return obManager->getTickSize(symbol);
+    }
+  );
+
+  auto obProvider = std::make_shared<gma::ob::Provider>(snapSource, 10, 10);
+
+  // Register OB provider for "ob.*" keys
+  gma::AtomicProviderRegistry::registerNamespace("ob",
+    [obProvider](const std::string& symbol, const std::string& fullKey) -> double {
+      return obProvider->get(symbol, fullKey);
+    });
+
+  shutdown.registerStep("ob-provider-clear", 50, []{ gma::AtomicProviderRegistry::clear(); });
+
+  // 8) ASIO + servers
   boost::asio::io_context ioc;
 
   gma::ExecutionContext exec(store.get(), gma::gThreadPool.get());
@@ -116,7 +179,7 @@ int main(int argc, char* argv[]) {
   gma::FeedServer feed(ioc, dispatcher.get(), feedPort);
   feed.run();
 
-  // 6) Shutdown sequencing — all captured objects are still alive when shutdown runs
+  // 9) Shutdown sequencing — all captured objects are still alive when shutdown runs
   shutdown.registerStep("ws-stop-accept",    5,  [&ws]{ try { ws.stopAccept(); } catch (...) {} });
   shutdown.registerStep("ws-close-sessions", 40, [&ws]{ try { ws.closeAll(); } catch (...) {} });
   shutdown.registerStep("feed-stop",         55, [&feed]{ try { feed.stop(); } catch (...) {} });
@@ -128,7 +191,7 @@ int main(int argc, char* argv[]) {
     {{"wsPort", std::to_string(wsPort)}, {"feedPort", std::to_string(feedPort)}}
   );
 
-  // 7) Run
+  // 10) Run
   try {
     ioc.run();
   } catch (const std::exception& ex) {

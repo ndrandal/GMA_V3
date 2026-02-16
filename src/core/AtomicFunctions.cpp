@@ -1,6 +1,7 @@
 
 // File: src/core/AtomicFunctions.cpp
 #include "gma/AtomicFunctions.hpp"
+#include "gma/FunctionMap.hpp"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -222,6 +223,60 @@ void computeAllAtomicValues(
 
     // Single lock acquisition for all writes
     store.setBatch(symbol, results);
+}
+
+void registerBuiltinFunctions() {
+    auto& fm = FunctionMap::instance();
+
+    fm.registerFunction("mean", [](const std::vector<double>& v) -> double {
+        if (v.empty()) return 0.0;
+        double s = 0.0;
+        for (double x : v) s += x;
+        return s / static_cast<double>(v.size());
+    });
+
+    fm.registerFunction("sum", [](const std::vector<double>& v) -> double {
+        double s = 0.0;
+        for (double x : v) s += x;
+        return s;
+    });
+
+    fm.registerFunction("min", [](const std::vector<double>& v) -> double {
+        if (v.empty()) return 0.0;
+        double m = v[0];
+        for (size_t i = 1; i < v.size(); ++i) m = std::min(m, v[i]);
+        return m;
+    });
+
+    fm.registerFunction("max", [](const std::vector<double>& v) -> double {
+        if (v.empty()) return 0.0;
+        double m = v[0];
+        for (size_t i = 1; i < v.size(); ++i) m = std::max(m, v[i]);
+        return m;
+    });
+
+    fm.registerFunction("last", [](const std::vector<double>& v) -> double {
+        return v.empty() ? 0.0 : v.back();
+    });
+
+    fm.registerFunction("first", [](const std::vector<double>& v) -> double {
+        return v.empty() ? 0.0 : v.front();
+    });
+
+    fm.registerFunction("count", [](const std::vector<double>& v) -> double {
+        return static_cast<double>(v.size());
+    });
+
+    fm.registerFunction("stddev", [](const std::vector<double>& v) -> double {
+        if (v.size() < 2) return 0.0;
+        double n = static_cast<double>(v.size());
+        double s = 0.0;
+        for (double x : v) s += x;
+        double mean = s / n;
+        double ss = 0.0;
+        for (double x : v) { double d = x - mean; ss += d * d; }
+        return std::sqrt(ss / n);
+    });
 }
 
 } // namespace gma

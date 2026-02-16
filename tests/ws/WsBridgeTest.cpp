@@ -30,26 +30,47 @@ struct Capture {
 };
 
 static std::unique_ptr<WsBridge> makeBridge() {
-    // null dispatcher/store — we're only testing bridge protocol logic
+    // null dispatcher/store — subscribe will fail with an error, but protocol
+    // logic (error reporting, cancel, open/close) is what we test.
     return std::make_unique<WsBridge>(nullptr, nullptr);
 }
 
-TEST(WsBridgeTest, OnOpenAndSubscribeAck) {
+TEST(WsBridgeTest, OnOpenAndSubscribeError) {
+    // subscribe with null dispatcher should produce an error (missing dispatcher/pool)
     auto bridge = makeBridge();
     Capture cap;
     bridge->onOpen("c1", cap.makeSend());
-    bridge->onMessage("c1", R"({"type":"subscribe","symbol":"AAPL"})");
-    ASSERT_EQ(cap.size(), 1u);
-    EXPECT_NE(cap.last().find("ack"), std::string::npos);
+    bridge->onMessage("c1",
+        R"({"type":"subscribe","requests":[{"id":"1","symbol":"AAPL","field":"lastPrice"}]})");
+    ASSERT_GE(cap.size(), 1u);
+    EXPECT_NE(cap.last().find("error"), std::string::npos);
 }
 
-TEST(WsBridgeTest, CancelAck) {
+TEST(WsBridgeTest, SubscribeMissingRequestsArray) {
+    auto bridge = makeBridge();
+    Capture cap;
+    bridge->onOpen("c1", cap.makeSend());
+    bridge->onMessage("c1", R"({"type":"subscribe"})");
+    ASSERT_EQ(cap.size(), 1u);
+    EXPECT_NE(cap.last().find("missing"), std::string::npos);
+}
+
+TEST(WsBridgeTest, CancelWithIds) {
+    auto bridge = makeBridge();
+    Capture cap;
+    bridge->onOpen("c1", cap.makeSend());
+    bridge->onMessage("c1", R"({"type":"cancel","ids":["req1"]})");
+    ASSERT_EQ(cap.size(), 1u);
+    EXPECT_NE(cap.last().find("canceled"), std::string::npos);
+}
+
+TEST(WsBridgeTest, CancelMissingIdsArray) {
     auto bridge = makeBridge();
     Capture cap;
     bridge->onOpen("c1", cap.makeSend());
     bridge->onMessage("c1", R"({"type":"cancel"})");
     ASSERT_EQ(cap.size(), 1u);
-    EXPECT_NE(cap.last().find("ack"), std::string::npos);
+    EXPECT_NE(cap.last().find("missing"), std::string::npos);
 }
 
 TEST(WsBridgeTest, InvalidJsonError) {
@@ -86,14 +107,15 @@ TEST(WsBridgeTest, OnCloseRemovesConnection) {
     bridge->onOpen("c1", cap.makeSend());
     bridge->onClose("c1");
     // Messages after close should not be delivered
-    bridge->onMessage("c1", R"({"type":"subscribe"})");
+    bridge->onMessage("c1", R"({"type":"subscribe","requests":[]})");
     EXPECT_EQ(cap.size(), 0u);
 }
 
 TEST(WsBridgeTest, MessageToUnknownConnNoCrash) {
     auto bridge = makeBridge();
     // Should not crash or throw
-    EXPECT_NO_THROW(bridge->onMessage("unknown", R"({"type":"subscribe"})"));
+    EXPECT_NO_THROW(bridge->onMessage("unknown",
+        R"({"type":"subscribe","requests":[]})"));
 }
 
 TEST(WsBridgeTest, MultipleConnectionsIndependent) {
@@ -102,11 +124,14 @@ TEST(WsBridgeTest, MultipleConnectionsIndependent) {
     bridge->onOpen("c1", cap1.makeSend());
     bridge->onOpen("c2", cap2.makeSend());
 
-    bridge->onMessage("c1", R"({"type":"subscribe"})");
-    bridge->onMessage("c2", R"({"type":"cancel"})");
+    bridge->onMessage("c1",
+        R"({"type":"subscribe","requests":[{"id":"1","symbol":"X","field":"f"}]})");
+    bridge->onMessage("c2",
+        R"({"type":"cancel","ids":["req1"]})");
 
     EXPECT_EQ(cap1.size(), 1u);
     EXPECT_EQ(cap2.size(), 1u);
-    EXPECT_NE(cap1.last().find("subscribe"), std::string::npos);
-    EXPECT_NE(cap2.last().find("cancel"), std::string::npos);
+    // c1 gets an error (no dispatcher), c2 gets a cancel ack
+    EXPECT_NE(cap1.last().find("error"), std::string::npos);
+    EXPECT_NE(cap2.last().find("canceled"), std::string::npos);
 }

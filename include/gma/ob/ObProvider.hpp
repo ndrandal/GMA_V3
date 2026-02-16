@@ -3,7 +3,7 @@
 #include <string>
 #include <cstddef>
 #include "gma/ob/FunctionalSnapshotSource.hpp"
-#include "gma/ob/ObEngine.hpp" // for Mode
+#include "gma/ob/ObKey.hpp" // for Mode
 
 namespace gma::ob {
 

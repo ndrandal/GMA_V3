@@ -13,7 +13,8 @@ void Worker::onValue(const SymbolValue& sv) {
     auto& vec = acc_[sv.symbol];
     vec.push_back(sv.value);
     out = fn_(Span<const ArgType>(vec.data(), vec.size()));
-    vec.clear();
+    // Accumulator retains all values seen for this symbol.
+    // For deterministic N-ary batching, wire Aggregate(N) upstream.
   }
 
   if (auto ds = downstream_.lock()) {

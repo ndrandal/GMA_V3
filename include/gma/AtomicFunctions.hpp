@@ -23,4 +23,13 @@ void computeAllAtomicValues(
     const util::Config& cfg = util::Config{}
 );
 
+/**
+ * Register basic per-field statistical functions into FunctionMap.
+ * These operate on vector<double> (per-field history) and are evaluated
+ * by MarketDispatcher::computeAndStoreAtomics() on every tick.
+ *
+ * Registered functions: mean, sum, min, max, last, first, count, stddev
+ */
+void registerBuiltinFunctions();
+
 } // namespace gma

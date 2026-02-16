@@ -26,22 +26,42 @@ public:
 
 } // anonymous namespace
 
-// Worker currently applies fn immediately on every onValue and clears accumulator.
-// Each call receives a Span of size 1 containing the latest value.
+// Worker accumulates values per symbol and applies fn on every onValue.
+// The Span grows with each call for the same symbol.
 
 TEST(WorkerTest, PropagatesOnEveryValue) {
-    Worker::Fn identityFn = [](Span<const ArgType> inputs) -> ArgType {
+    // "last" function returns the most recently pushed value
+    Worker::Fn lastFn = [](Span<const ArgType> inputs) -> ArgType {
         if (inputs.empty()) return ArgType(0.0);
-        return inputs[0];
+        return inputs[inputs.size() - 1];
     };
     auto stub = std::make_shared<WStubNode>();
-    Worker worker(identityFn, stub);
+    Worker worker(lastFn, stub);
 
     worker.onValue({"SYM", 1.0});
     worker.onValue({"SYM", 2.0});
     worker.onValue({"SYM", 3.0});
 
     ASSERT_EQ(stub->received.size(), 3u);
+    EXPECT_DOUBLE_EQ(std::get<double>(stub->received[0].value), 1.0);
+    EXPECT_DOUBLE_EQ(std::get<double>(stub->received[1].value), 2.0);
+    EXPECT_DOUBLE_EQ(std::get<double>(stub->received[2].value), 3.0);
+}
+
+TEST(WorkerTest, AccumulatesValues) {
+    // "count" function returns accumulator size
+    Worker::Fn countFn = [](Span<const ArgType> inputs) -> ArgType {
+        return ArgType(static_cast<double>(inputs.size()));
+    };
+    auto stub = std::make_shared<WStubNode>();
+    Worker worker(countFn, stub);
+
+    worker.onValue({"SYM", 1.0});
+    worker.onValue({"SYM", 2.0});
+    worker.onValue({"SYM", 3.0});
+
+    ASSERT_EQ(stub->received.size(), 3u);
+    // Accumulator should grow: 1, 2, 3
     EXPECT_DOUBLE_EQ(std::get<double>(stub->received[0].value), 1.0);
     EXPECT_DOUBLE_EQ(std::get<double>(stub->received[1].value), 2.0);
     EXPECT_DOUBLE_EQ(std::get<double>(stub->received[2].value), 3.0);

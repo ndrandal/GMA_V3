@@ -48,6 +48,19 @@ public:
   int wsPort   = 8080;
   int feedPort = 9001;
 
+  // Thread pool size (0 = use hardware_concurrency)
+  int threadPoolSize = 0;
+
+  // History cap for MarketDispatcher
+  int taHistoryMax = 1000;
+
+  // Metrics reporter
+  bool metricsEnabled = false;
+  int  metricsIntervalSec = 15;
+
+  // Logging
+  std::string logLevel = "info";
+
 private:
   static bool parseLineKV(const std::string& line, std::string& k, std::string& v);
   static std::string trim(const std::string& s);

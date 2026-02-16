@@ -5,6 +5,7 @@
 #include "gma/ExecutionContext.hpp"
 #include "gma/MarketDispatcher.hpp"
 #include "gma/TreeBuilder.hpp"
+#include "gma/JsonValidator.hpp"
 #include "gma/nodes/Responder.hpp"
 #include "gma/util/Logger.hpp"
 #include "gma/util/Metrics.hpp"
@@ -444,6 +445,26 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
       ::rapidjson::Value node(::rapidjson::kObjectType);
       node.CopyFrom(r["node"], a);
       rq.AddMember("node", node, a);
+    }
+
+    // Validate pipeline/stages/node sub-trees before building
+    try {
+      if (r.HasMember("pipeline") && r["pipeline"].IsArray()) {
+        for (const auto& elem : r["pipeline"].GetArray()) {
+          if (elem.IsObject()) gma::JsonValidator::validateTree(elem);
+        }
+      }
+      if (r.HasMember("stages") && r["stages"].IsArray()) {
+        for (const auto& elem : r["stages"].GetArray()) {
+          if (elem.IsObject()) gma::JsonValidator::validateTree(elem);
+        }
+      }
+      if (r.HasMember("node") && r["node"].IsObject()) {
+        gma::JsonValidator::validateTree(r["node"]);
+      }
+    } catch (const std::exception& ex) {
+      sendError("validate", ex.what());
+      continue;
     }
 
     gma::tree::Deps deps;

@@ -62,6 +62,7 @@ SymbolTick makeTick(const std::string& symbol, const std::string& field, double 
 
 TEST(IntegrationTest, AggregateToWorkerPipeline) {
     // Wire: Aggregate(2) -> Worker(sum) -> Terminal
+    // Worker accumulates: after value 1 sum=10, after value 2 sum=10+20=30
     auto terminal = std::make_shared<PipelineTerminal>();
 
     Worker::Fn sumFn = [](Span<const ArgType> inputs) -> ArgType {
@@ -77,7 +78,7 @@ TEST(IntegrationTest, AggregateToWorkerPipeline) {
 
     ASSERT_EQ(terminal->received.size(), 2u);
     EXPECT_DOUBLE_EQ(std::get<double>(terminal->received[0].value), 10.0);
-    EXPECT_DOUBLE_EQ(std::get<double>(terminal->received[1].value), 20.0);
+    EXPECT_DOUBLE_EQ(std::get<double>(terminal->received[1].value), 30.0); // accumulated: 10+20
 }
 
 TEST(IntegrationTest, AtomicStoreBasicRoundTrip) {
@@ -220,7 +221,8 @@ TEST(IntegrationTest, TickToListenerToTerminal) {
 }
 
 TEST(IntegrationTest, TickToListenerToWorkerToTerminal) {
-    // Full pipeline: tick → Listener → Worker(double) → Terminal
+    // Full pipeline: tick → Listener → Worker(double-last) → Terminal
+    // Worker accumulates values; function doubles the latest (last) value.
     rt::ThreadPool pool(2);
     AtomicStore store;
     MarketDispatcher dispatcher(&pool, &store);
@@ -228,7 +230,7 @@ TEST(IntegrationTest, TickToListenerToWorkerToTerminal) {
     auto terminal = std::make_shared<PipelineTerminal>();
     Worker::Fn doubleFn = [](Span<const ArgType> inputs) -> ArgType {
         if (inputs.empty()) return ArgType(0.0);
-        return ArgType(std::get<double>(inputs[0]) * 2.0);
+        return ArgType(std::get<double>(inputs[inputs.size() - 1]) * 2.0);
     };
     auto worker = std::make_shared<Worker>(doubleFn, terminal);
 

@@ -1,4 +1,5 @@
 #include "gma/MarketDispatcher.hpp"
+#include "gma/AtomicFunctions.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include "gma/AtomicStore.hpp"
 #include "gma/FunctionMap.hpp"
@@ -14,9 +15,11 @@
 using namespace gma;
 
 MarketDispatcher::MarketDispatcher(rt::ThreadPool* threadPool,
-                                   AtomicStore* store)
+                                   AtomicStore* store,
+                                   const util::Config& cfg)
   : _threadPool(threadPool)
-  , _store(store) {}
+  , _store(store)
+  , _cfg(cfg) {}
 
 void MarketDispatcher::registerListener(const std::string& symbol,
                                         const std::string& field,
@@ -63,6 +66,9 @@ void MarketDispatcher::onTick(const SymbolTick& tick) {
 
   if (!tick.payload) return;
 
+  // Update symbol-level history and run full TA suite
+  updateSymbolHistory(tick.symbol, tick);
+
   for (auto& [field, node] : toNotify) {
     double raw = 0.0;
     try {
@@ -77,7 +83,7 @@ void MarketDispatcher::onTick(const SymbolTick& tick) {
       continue;
     }
 
-    // Update history and build contiguous vector under history lock
+    // Update per-field history and build contiguous vector under history lock
     std::vector<double> histVec;
     {
       std::unique_lock<std::shared_mutex> lock(_histMutex);
@@ -87,7 +93,7 @@ void MarketDispatcher::onTick(const SymbolTick& tick) {
       histVec.assign(hist.begin(), hist.end());
     }
 
-    // Compute atomics on the contiguous snapshot (no lock needed)
+    // Compute per-field atomics on the contiguous snapshot (no lock needed)
     computeAndStoreAtomics(tick.symbol, field, histVec);
 
     // Notify the raw-value subscriber
@@ -100,6 +106,50 @@ void MarketDispatcher::onTick(const SymbolTick& tick) {
       if (node) node->onValue(out);
     }
   }
+}
+
+void MarketDispatcher::updateSymbolHistory(const std::string& symbol,
+                                           const SymbolTick& tick) {
+  if (!_store || !tick.payload) return;
+
+  // Extract price and volume from the tick payload
+  double price  = 0.0;
+  double volume = 0.0;
+  bool hasPrice = false;
+
+  const auto& doc = *tick.payload;
+
+  // Try common price field names
+  for (const char* pf : {"lastPrice", "price", "last", "px"}) {
+    if (doc.HasMember(pf) && doc[pf].IsNumber()) {
+      price = doc[pf].GetDouble();
+      hasPrice = true;
+      break;
+    }
+  }
+
+  if (!hasPrice) return; // No price data — skip TA computation
+
+  // Try common volume field names
+  for (const char* vf : {"volume", "vol", "qty", "size"}) {
+    if (doc.HasMember(vf) && doc[vf].IsNumber()) {
+      volume = doc[vf].GetDouble();
+      break;
+    }
+  }
+
+  // Update symbol history under lock, then compute TA outside lock
+  SymbolHistory histCopy;
+  {
+    std::unique_lock<std::shared_mutex> lock(_histMutex);
+    auto& hist = _symbolHistories[symbol];
+    hist.push_back(TickEntry{price, volume});
+    if (hist.size() > MAX_HISTORY) hist.pop_front();
+    histCopy = hist; // snapshot for TA computation
+  }
+
+  // Run the full TA suite — writes results to AtomicStore via setBatch
+  computeAllAtomicValues(symbol, histCopy, *_store, _cfg);
 }
 
 void MarketDispatcher::computeAndStoreAtomics(const std::string& symbol,

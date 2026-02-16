@@ -77,6 +77,11 @@ bool Config::loadFromFile(const std::string& path) {
     else if (key == "taVolAvg")       taVolAvg       = std::max(1, std::atoi(val.c_str()));
     else if (key == "wsPort")        { int p = std::atoi(val.c_str()); if (p > 0 && p <= 65535) wsPort = p; }
     else if (key == "feedPort")      { int p = std::atoi(val.c_str()); if (p > 0 && p <= 65535) feedPort = p; }
+    else if (key == "threadPoolSize") { int v = std::atoi(val.c_str()); if (v >= 0) threadPoolSize = v; }
+    else if (key == "taHistoryMax") { int v = std::atoi(val.c_str()); if (v > 0) taHistoryMax = v; }
+    else if (key == "metricsEnabled") { metricsEnabled = (val == "true" || val == "1" || val == "yes"); }
+    else if (key == "metricsIntervalSec") { int v = std::atoi(val.c_str()); if (v > 0) metricsIntervalSec = v; }
+    else if (key == "logLevel") { logLevel = val; }
     else if (key == "taSMA") {
       taSMA.clear();
       std::istringstream ss(val);
