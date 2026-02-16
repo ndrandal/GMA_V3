@@ -21,7 +21,6 @@
 #include "gma/ExecutionContext.hpp"
 
 // -------- TA --------
-#include "gma/ta/TAComputer.hpp"
 #include "gma/ta/AtomicNames.hpp"
 
 // -------- OB --------
@@ -70,16 +69,19 @@ int main(int argc, char* argv[]) {
   //    argv[3] = feedPort (optional)
   Config cfg;
 
-  unsigned short wsPort   = 8080;
-  unsigned short feedPort = 9001;
-
-  if (argc > 1) {
-    wsPort = parsePort(argv[1], wsPort);
-  }
+  // Load config file first (if provided) so its port values are available as defaults
   if (argc > 2) {
     if (!cfg.loadFromFile(argv[2])) {
       std::cerr << "[config] warning: failed to load file: " << argv[2] << "\n";
     }
+  }
+
+  // CLI args override config file values
+  unsigned short wsPort   = static_cast<unsigned short>(cfg.wsPort);
+  unsigned short feedPort = static_cast<unsigned short>(cfg.feedPort);
+
+  if (argc > 1) {
+    wsPort = parsePort(argv[1], wsPort);
   }
   if (argc > 3) {
     feedPort = parsePort(argv[3], feedPort);

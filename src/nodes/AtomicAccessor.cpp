@@ -12,16 +12,13 @@ AtomicAccessor::AtomicAccessor(std::string symbol,
   , downstream_(std::move(downstream))
 {}
 
-void AtomicAccessor::onValue(const SymbolValue& sv) {
-  // If caller provided a symbol on the tick, prefer it; else use fixed symbol_
-  const std::string& sym = sv.symbol.empty() ? symbol_ : sv.symbol;
-
+void AtomicAccessor::onValue(const SymbolValue&) {
   if (!store_) return;
-  auto opt = store_->get(sym, field_);
+  auto opt = store_->get(symbol_, field_);
   if (!opt.has_value()) return;
 
   if (auto ds = downstream_.lock()) {
-    ds->onValue(SymbolValue{ sym, opt.value() });
+    ds->onValue(SymbolValue{ symbol_, opt.value() });
   }
 }
 

@@ -1,5 +1,6 @@
 #include "gma/FunctionMap.hpp"
 #include <stdexcept>
+#include <mutex>
 
 using namespace gma;
 

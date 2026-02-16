@@ -123,7 +123,6 @@ double rangePxReduce(const Snapshot& s, const RangePxSpec& spec, double /*tick*/
   const auto& L = bySide(s, spec.side);
 
   double acc = 0.0;
-  double qty = 0.0;
   int count = 0;
 
   for (const auto& lvl : L.levels) {
@@ -203,15 +202,106 @@ double imbalanceBand(const Snapshot& s, double p1, double p2, double /*tick*/) {
 }
 
 // ------------------------------------------------------------
+// Cumulative levels
+// ------------------------------------------------------------
+
+double cumLevels(const Snapshot& s, Side side, int N, Target target) {
+  const auto& L = bySide(s, side);
+  if (L.levels.empty() || N <= 0)
+    return 0.0;
+
+  const int count = std::min(N, static_cast<int>(L.levels.size()));
+  double acc = 0.0;
+
+  for (int i = 0; i < count; ++i) {
+    const auto& lvl = L.levels[i];
+    switch (target) {
+      case Target::Price:    acc += lvl.price; break;
+      case Target::Size:     acc += lvl.size; break;
+      case Target::Orders:   acc += lvl.orders; break;
+      case Target::Notional: acc += lvl.notional; break;
+      default: break;
+    }
+  }
+  return acc;
+}
+
+// ------------------------------------------------------------
+// VWAP (by level range)
+// ------------------------------------------------------------
+
+double vwapLevels(const Snapshot& s, Side side, Range r) {
+  const auto& L = bySide(s, side);
+  if (L.levels.empty())
+    return std::numeric_limits<double>::quiet_NaN();
+
+  const int lo = std::max(1, r.a);
+  const int hi = std::min(static_cast<int>(L.levels.size()), r.b);
+  if (lo > hi)
+    return std::numeric_limits<double>::quiet_NaN();
+
+  double sumPV = 0.0;
+  double sumV  = 0.0;
+
+  for (int i = lo - 1; i < hi; ++i) {
+    const auto& lvl = L.levels[i];
+    sumPV += lvl.price * lvl.size;
+    sumV  += lvl.size;
+  }
+
+  if (sumV <= 0.0)
+    return std::numeric_limits<double>::quiet_NaN();
+
+  return sumPV / sumV;
+}
+
+// ------------------------------------------------------------
+// VWAP (by price band)
+// ------------------------------------------------------------
+
+double vwapPriceBand(const Snapshot& s, Side side, double p1, double p2, double /*tick*/) {
+  const auto& L = bySide(s, side);
+
+  double sumPV = 0.0;
+  double sumV  = 0.0;
+
+  for (const auto& lvl : L.levels) {
+    if (lvl.price < p1 || lvl.price > p2)
+      continue;
+    sumPV += lvl.price * lvl.size;
+    sumV  += lvl.size;
+  }
+
+  if (sumV <= 0.0)
+    return std::numeric_limits<double>::quiet_NaN();
+
+  return sumPV / sumV;
+}
+
+// ------------------------------------------------------------
+// Meta
+// ------------------------------------------------------------
+
+double meta(const Snapshot& s, const std::string& field) {
+  if (field == "seq")            return static_cast<double>(s.meta.seq);
+  if (field == "epoch")          return static_cast<double>(s.meta.epoch);
+  if (field == "is_stale")       return s.meta.stale ? 1.0 : 0.0;
+  if (field == "levels.bid")     return static_cast<double>(s.meta.bidLevels);
+  if (field == "levels.ask")     return static_cast<double>(s.meta.askLevels);
+  if (field == "last_change_ms") return static_cast<double>(s.meta.lastChangeMs);
+  return std::numeric_limits<double>::quiet_NaN();
+}
+
+// ------------------------------------------------------------
 // Dispatcher
 // ------------------------------------------------------------
 
 double eval(const Snapshot& s, const ObKey& k) {
   switch (k.metric) {
     case Metric::Best:
-      return (k.bestSide == Side::Bid)
-             ? bestPrice(s, Side::Bid)
-             : bestPrice(s, Side::Ask);
+      if (k.bestAttr == Target::Size)
+        return bestSize(s, k.bestSide);
+      return bestPrice(s, k.bestSide);
 
     case Metric::LevelIdx:
       return levelIdx(s, k.levelIdx);
@@ -224,6 +314,14 @@ double eval(const Snapshot& s, const ObKey& k) {
 
     case Metric::RangePx:
       return rangePxReduce(s, k.rangePx, 0.0);
+
+    case Metric::Cum:
+      return cumLevels(s, k.cumSide, k.cumN, k.cumTarget);
+
+    case Metric::VWAP:
+      return k.vwapByLevels
+             ? vwapLevels(s, k.vwapSide, k.vwapLv)
+             : vwapPriceBand(s, k.vwapSide, k.vwapP1, k.vwapP2, 0.0);
 
     case Metric::Imbalance:
       return k.imbByLevels

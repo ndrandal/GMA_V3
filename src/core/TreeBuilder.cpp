@@ -227,10 +227,10 @@ gma::Worker::Fn fnFromName(const rapidjson::Value& spec) {
 //
 namespace gma::tree {
 
-static std::shared_ptr<gma::INode> buildOne(const rapidjson::Value& spec,
-                                            const std::string&      defaultSymbol,
-                                            const Deps&             deps,
-                                            std::shared_ptr<gma::INode> downstream);
+std::shared_ptr<gma::INode> buildOne(const rapidjson::Value& spec,
+                                     const std::string&      defaultSymbol,
+                                     const Deps&             deps,
+                                     std::shared_ptr<gma::INode> downstream);
 
 // Helper for Aggregate: build many inputs and wrap into CompositeRoot
 static std::shared_ptr<gma::INode> buildManyAsRoot(const rapidjson::Value&      arr,
@@ -256,10 +256,10 @@ static std::shared_ptr<gma::INode> buildManyAsRoot(const rapidjson::Value&      
   return std::make_shared<CompositeRoot>(std::move(roots));
 }
 
-static std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
-                                            const std::string&           defaultSymbol,
-                                            const Deps&                 deps,
-                                            std::shared_ptr<gma::INode> downstream) {
+std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
+                                     const std::string&           defaultSymbol,
+                                     const Deps&                 deps,
+                                     std::shared_ptr<gma::INode> downstream) {
   const auto& v    = expectObj(spec, "node");
   const std::string type = expectType(v);
 

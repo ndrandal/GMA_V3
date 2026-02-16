@@ -9,6 +9,7 @@
 #include <rapidjson/document.h> // easiest: include real type here (prevents forward-decl mistakes)
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -74,6 +75,14 @@ private:
   // Active requests for this session.
   std::mutex reqMu_;
   std::unordered_map<int, std::shared_ptr<INode>> active_;
+
+  // Rate limiting: token-bucket for subscribe requests
+  static constexpr int    RATE_LIMIT_BURST    = 20;   // max burst of subscribes
+  static constexpr double RATE_LIMIT_PER_SEC  = 5.0;  // sustained rate
+  static constexpr std::size_t MAX_SUBSCRIPTIONS = 256; // max concurrent subscriptions
+  double rateTokens_{static_cast<double>(RATE_LIMIT_BURST)};
+  std::chrono::steady_clock::time_point rateLastRefill_{std::chrono::steady_clock::now()};
+  bool rateLimitCheck();
 };
 
 } // namespace gma

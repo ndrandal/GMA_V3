@@ -31,7 +31,7 @@ void ThreadPool::post(std::function<void()> fn) {
 
 void ThreadPool::drain() {
   std::unique_lock<std::mutex> lk(mx_);
-  cv_.wait(lk, [this]{ return q_.empty(); });
+  idleCv_.wait(lk, [this]{ return q_.empty() && inFlight_.load(std::memory_order_acquire) == 0; });
 }
 
 void ThreadPool::shutdown() {
@@ -52,8 +52,11 @@ void ThreadPool::workerLoop() {
       cv_.wait(lk, [this]{ return stopping_ || !q_.empty(); });
       if (stopping_ && q_.empty()) return;
       fn = std::move(q_.front()); q_.pop();
+      inFlight_.fetch_add(1, std::memory_order_relaxed);
     }
-    try { fn(); } catch (...) { /* swallow: keep the pool alive */ }
+    try { fn(); } catch (...) {}
+    inFlight_.fetch_sub(1, std::memory_order_release);
+    idleCv_.notify_all();
   }
 }
 

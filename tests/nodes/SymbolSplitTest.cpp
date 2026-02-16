@@ -10,6 +10,8 @@
 
 using namespace gma;
 
+namespace {
+
 class StubNode : public INode {
 public:
     std::atomic<int> count{0};
@@ -22,6 +24,8 @@ public:
         shutdownCalled = true;
     }
 };
+
+} // anonymous namespace
 
 TEST(SymbolSplitTest, FactoryCalledPerUniqueSymbol) {
     std::atomic<int> factoryCalls{0};

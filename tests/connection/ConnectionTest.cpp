@@ -10,12 +10,16 @@ using namespace gma;
 // Test RequestRegistry as a stand-in for connection-level request management,
 // since ClientConnection requires a running io_context and TCP connection.
 
+namespace {
+
 class StubNode : public INode {
 public:
     bool shutdownCalled = false;
     void onValue(const SymbolValue&) override {}
     void shutdown() noexcept override { shutdownCalled = true; }
 };
+
+} // anonymous namespace
 
 TEST(ConnectionTest, RequestRegistryRegisterAndUnregister) {
     RequestRegistry registry;

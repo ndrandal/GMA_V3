@@ -1,5 +1,6 @@
 // src/core/AtomicStore.cpp
 #include "gma/AtomicStore.hpp"
+#include <mutex>
 
 namespace gma {
 

@@ -6,18 +6,25 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <mutex>
 
 using namespace gma;
+
+namespace {
 
 // Stub INode to record onValue calls
 class WStubNode : public INode {
 public:
+    std::mutex mx;
     std::vector<SymbolValue> received;
     void onValue(const SymbolValue& sv) override {
+        std::lock_guard<std::mutex> lk(mx);
         received.push_back(sv);
     }
     void shutdown() noexcept override {}
 };
+
+} // anonymous namespace
 
 // Worker currently applies fn immediately on every onValue and clears accumulator.
 // Each call receives a Span of size 1 containing the latest value.

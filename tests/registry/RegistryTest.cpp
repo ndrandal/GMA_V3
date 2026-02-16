@@ -9,6 +9,8 @@
 
 using namespace gma;
 
+namespace {
+
 // Stub implementation to track shutdown calls
 class StubNode : public INode {
 public:
@@ -16,6 +18,8 @@ public:
     void onValue(const SymbolValue&) override {}  // Not used in registry
     void shutdown() noexcept override { shutdownCalled = true; }
 };
+
+} // anonymous namespace
 
 TEST(RequestRegistryTest, RegisterAndShutdownAll) {
     RequestRegistry reg;

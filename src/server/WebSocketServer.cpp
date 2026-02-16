@@ -8,8 +8,9 @@
 
 // Project headers (adjust paths if your tree differs)
 #include "gma/server/ClientSession.hpp"
-#include "gma/MarketDispatcher.hpp"   // <-- adjust if your header lives elsewhere
-#include "gma/ExecutionContext.hpp"        // <-- adjust or remove if your project puts this elsewhere
+#include "gma/MarketDispatcher.hpp"
+#include "gma/ExecutionContext.hpp"
+#include "gma/util/Metrics.hpp"
 
 namespace gma {
 
@@ -66,15 +67,26 @@ void WebSocketServer::closeAll() {
 }
 
 std::size_t WebSocketServer::registerSession(const std::shared_ptr<ClientSession>& sp) {
-  std::lock_guard<std::mutex> lk(sessions_mu_);
-  const std::size_t id = next_session_id_++;
-  sessions_.emplace(id, sp);
+  std::size_t id;
+  std::size_t count;
+  {
+    std::lock_guard<std::mutex> lk(sessions_mu_);
+    id = next_session_id_++;
+    sessions_.emplace(id, sp);
+    count = sessions_.size();
+  }
+  GMA_METRIC_SET("ws.active_connections", static_cast<double>(count));
   return id;
 }
 
 void WebSocketServer::unregisterSession(std::size_t id) {
-  std::lock_guard<std::mutex> lk(sessions_mu_);
-  sessions_.erase(id);
+  std::size_t count;
+  {
+    std::lock_guard<std::mutex> lk(sessions_mu_);
+    sessions_.erase(id);
+    count = sessions_.size();
+  }
+  GMA_METRIC_SET("ws.active_connections", static_cast<double>(count));
 }
 
 void WebSocketServer::doAccept() {

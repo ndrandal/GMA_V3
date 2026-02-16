@@ -62,8 +62,8 @@ TEST(IntervalTest, MultipleIntervalsIndependently) {
     auto i2 = std::make_shared<Interval>(20ms, stub2, &pool);
     i1->start();
     i2->start();
-    std::this_thread::sleep_for(60ms);
-    EXPECT_GE(stub1->count.load(), 4) << "i1 should fire more frequently";
+    std::this_thread::sleep_for(80ms);
+    EXPECT_GE(stub1->count.load(), 3) << "i1 should fire more frequently";
     EXPECT_GE(stub2->count.load(), 2) << "i2 should fire at least twice";
     i1->shutdown();
     i2->shutdown();

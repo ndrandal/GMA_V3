@@ -100,7 +100,14 @@ ClientSession::ClientSession(tcp::socket socket,
 void ClientSession::run() {
   auto self = shared_from_this();
 
-  ws_.set_option(websocket::stream_base::timeout::suggested(beast::role_type::server));
+  // Heartbeat: send pings after 30s idle, close if no pong within timeout.
+  {
+    websocket::stream_base::timeout opt{};
+    opt.handshake_timeout = std::chrono::seconds(30);
+    opt.idle_timeout      = std::chrono::seconds(30);
+    opt.keep_alive_pings  = true;
+    ws_.set_option(opt);
+  }
   ws_.set_option(websocket::stream_base::decorator(
       [](websocket::response_type& res) {
         res.set(http::field::server,
@@ -338,9 +345,25 @@ void ClientSession::handleMessage(const std::string& text) {
   sendError("type", "unknown type: " + type);
 }
 
+bool ClientSession::rateLimitCheck() {
+  auto now = std::chrono::steady_clock::now();
+  double elapsed = std::chrono::duration<double>(now - rateLastRefill_).count();
+  rateLastRefill_ = now;
+  rateTokens_ = std::min(static_cast<double>(RATE_LIMIT_BURST),
+                          rateTokens_ + elapsed * RATE_LIMIT_PER_SEC);
+  if (rateTokens_ < 1.0) return false;
+  rateTokens_ -= 1.0;
+  return true;
+}
+
 void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
   if (!exec_ || !dispatcher_) {
     sendError("subscribe", "server missing exec/dispatcher");
+    return;
+  }
+
+  if (!rateLimitCheck()) {
+    sendError("subscribe", "rate limit exceeded");
     return;
   }
 
@@ -437,6 +460,9 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
         auto it = active_.find(key);
         if (it != active_.end() && it->second) {
           it->second->shutdown();
+        } else if (active_.size() >= MAX_SUBSCRIPTIONS) {
+          sendError("subscribe", "max subscriptions reached");
+          continue;
         }
         active_[key] = built.head;
       }

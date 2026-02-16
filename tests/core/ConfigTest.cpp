@@ -80,3 +80,38 @@ TEST(ConfigTest, ReturnsFalseForMissingFile) {
     Config cfg;
     EXPECT_FALSE(cfg.loadFromFile("nonexistent_file_12345.ini"));
 }
+
+TEST(ConfigTest, NewTAFieldsParsing) {
+    const char* path = "test_config_ta.ini";
+    {
+        std::ofstream f(path);
+        f << "taSMA=3,7,15\n"
+          << "taEMA=5,10\n"
+          << "taRSI=7\n"
+          << "taATR=10\n"
+          << "taMomentum=5\n"
+          << "taMACD_signal=7\n"
+          << "taVolAvg=10\n";
+    }
+    Config cfg;
+    EXPECT_TRUE(cfg.loadFromFile(path));
+    EXPECT_EQ(cfg.taSMA, (std::vector<int>{3, 7, 15}));
+    EXPECT_EQ(cfg.taEMA, (std::vector<int>{5, 10}));
+    EXPECT_EQ(cfg.taRSI, 7);
+    EXPECT_EQ(cfg.taATR, 10);
+    EXPECT_EQ(cfg.taMomentum, 5);
+    EXPECT_EQ(cfg.taMACD_signal, 7);
+    EXPECT_EQ(cfg.taVolAvg, 10);
+    std::remove(path);
+}
+
+TEST(ConfigTest, DefaultNewTAFields) {
+    Config cfg;
+    EXPECT_EQ(cfg.taSMA, (std::vector<int>{5, 20}));
+    EXPECT_EQ(cfg.taEMA, (std::vector<int>{12, 26}));
+    EXPECT_EQ(cfg.taRSI, 14);
+    EXPECT_EQ(cfg.taATR, 14);
+    EXPECT_EQ(cfg.taMomentum, 10);
+    EXPECT_EQ(cfg.taMACD_signal, 9);
+    EXPECT_EQ(cfg.taVolAvg, 20);
+}

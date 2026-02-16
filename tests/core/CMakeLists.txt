@@ -5,7 +5,6 @@ add_executable(tests_core
     ThreadPoolTest.cpp
     AtomicStoreTest.cpp
     AtomicFunctionsTest.cpp
-    TAComputerTest.cpp
     IndicatorsTest.cpp
 )
 

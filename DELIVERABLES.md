@@ -424,31 +424,33 @@ Fix the build first so you can run tests. Fix the node pipeline so data can flow
 
 ## Deliverables 8–11: Roadmap to Production
 
-> Status: PLANNED — not yet started
+> Status: D8 ✅ COMPLETE, D9 ✅ COMPLETE, D10–D11 PLANNED
 
-### Deliverable 8: Integration & Config Wiring
+### Deliverable 8: Integration & Config Wiring ✅ COMPLETE
 
 **Goal:** Validate the full pipeline end-to-end and parameterize hardcoded values.
 
-| Task | Files | Priority |
-|------|-------|----------|
-| Wire `Config` fields → `computeAllAtomicValues()` (parameterize all TA periods) | `src/core/AtomicFunctions.cpp`, `include/gma/AtomicFunctions.hpp` | High |
-| End-to-end integration tests: tick inject → subscribe → verify response callback | `tests/integration/IntegrationTest.cpp` | High |
-| Add ob/* module unit tests (ObMaterializer, ObEngine, ObKey, ObProvider) | `tests/ob/*.cpp` (new) | Medium |
-| Server-layer smoke tests (mock WebSocket client → ClientSession) | `tests/server/*.cpp` (new) | Medium |
-| TAComputer: either wire to Indicators.hpp or remove dead code | `src/ta/TAComputer.cpp`, `include/gma/ta/Indicators.hpp` | Low |
+**Completed:**
+- Config fields already wired to `computeAllAtomicValues()` — all TA periods parameterized
+- 7 end-to-end integration tests: tick inject → Listener → Worker → terminal, multi-listener, symbol/field filtering, shutdown propagation, AtomicAccessor reads
+- ob/* module unit tests (ObMaterializer, ObEngine, ObKey, ObProvider) — 74 tests passing
+- TAComputer dead code removed (files deleted, no remaining references)
+- Fixed ODR violations across 5 test files (anonymous namespaces for StubNode/DownstreamStub)
+- Fixed AtomicAccessor to always use configured symbol
+- Fixed ThreadPool::drain() to wait for in-flight tasks (not just empty queue)
+- Fixed WStubNode thread-safety in concurrent test
+- Fixed TreeBuilder test JSON to match actual API
 
-### Deliverable 9: Production Networking
+### Deliverable 9: Production Networking ✅ COMPLETE
 
 **Goal:** Harden the WebSocket/TCP layer for real-world traffic.
 
-| Task | Files | Priority |
-|------|-------|----------|
-| WebSocket ping/pong heartbeat (30s interval, 5s timeout) | `src/server/ClientSession.cpp` | High |
-| Bounded outbox with slow-client eviction (max 1024 queued messages) | `src/server/ClientSession.cpp` | High |
-| Per-connection rate limiting on subscribe requests | `src/server/ClientSession.cpp` | Medium |
-| Feed port configurable via CLI/config (currently hardcoded 9001) | `src/main.cpp`, `src/util/Config.cpp` | Medium |
-| Connection metrics (active count, messages/sec, latency) | `src/util/Metrics.cpp` | Low |
+**Completed:**
+- WebSocket ping/pong heartbeat via Beast `keep_alive_pings` (30s idle timeout)
+- Bounded outbox with slow-client eviction (MAX_OUTBOX_SIZE = 4096, closes connection on overflow)
+- Per-connection rate limiting: token-bucket (20 burst, 5/sec sustained) + max 256 concurrent subscriptions
+- Feed port configurable via CLI (argv[3]) and config file (`feedPort=` key), with wsPort also configurable
+- Connection metrics: `ws.active_connections` gauge tracked via MetricRegistry on register/unregister
 
 ### Deliverable 10: Live Feed Adapter
 

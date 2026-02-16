@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <sstream>
 #include <algorithm>
 
 #ifdef _WIN32
@@ -69,6 +70,33 @@ bool Config::loadFromFile(const std::string& path) {
     else if (key == "taMACD_slow")    taMACD_slow    = std::max(1, std::atoi(val.c_str()));
     else if (key == "taBBands_n")     taBBands_n     = std::max(1, std::atoi(val.c_str()));
     else if (key == "taBBands_stdK")  taBBands_stdK  = std::atof(val.c_str());
+    else if (key == "taRSI")          taRSI          = std::max(1, std::atoi(val.c_str()));
+    else if (key == "taATR")          taATR          = std::max(1, std::atoi(val.c_str()));
+    else if (key == "taMomentum")     taMomentum     = std::max(1, std::atoi(val.c_str()));
+    else if (key == "taMACD_signal")  taMACD_signal  = std::max(1, std::atoi(val.c_str()));
+    else if (key == "taVolAvg")       taVolAvg       = std::max(1, std::atoi(val.c_str()));
+    else if (key == "wsPort")        { int p = std::atoi(val.c_str()); if (p > 0 && p <= 65535) wsPort = p; }
+    else if (key == "feedPort")      { int p = std::atoi(val.c_str()); if (p > 0 && p <= 65535) feedPort = p; }
+    else if (key == "taSMA") {
+      taSMA.clear();
+      std::istringstream ss(val);
+      std::string tok;
+      while (std::getline(ss, tok, ',')) {
+        int v = std::atoi(trim(tok).c_str());
+        if (v > 0) taSMA.push_back(v);
+      }
+      if (taSMA.empty()) taSMA = {5, 20};
+    }
+    else if (key == "taEMA") {
+      taEMA.clear();
+      std::istringstream ss(val);
+      std::string tok;
+      while (std::getline(ss, tok, ',')) {
+        int v = std::atoi(trim(tok).c_str());
+        if (v > 0) taEMA.push_back(v);
+      }
+      if (taEMA.empty()) taEMA = {12, 26};
+    }
     else {
       // Unknown key; ignore to stay forward-compatible
     }

@@ -6,6 +6,7 @@
 #include <chrono>
 
 using namespace gma;
+using namespace gma::rt;
 
 TEST(ThreadPoolTest, ExecutesTasks) {
     ThreadPool pool(4);

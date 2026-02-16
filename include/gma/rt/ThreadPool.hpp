@@ -25,8 +25,7 @@ public:
   // Enqueue work
   void post(std::function<void()> fn);
 
-  // Best-effort drain: waits until queue is empty (does not guarantee workers are idle
-  // if tasks enqueue more tasks).
+  // Waits until queue is empty AND all in-flight tasks have completed.
   void drain();
 
   // Drain queue, then stop all workers and join threads.
@@ -40,8 +39,10 @@ private:
   std::vector<std::thread>           threads_;
   std::mutex                        mx_;
   std::condition_variable           cv_;
+  std::condition_variable           idleCv_;
   std::queue<std::function<void()>> q_;
   std::atomic<bool>                 stopping_{false};
+  std::atomic<int>                  inFlight_{0};
 };
 
 } // namespace gma::rt

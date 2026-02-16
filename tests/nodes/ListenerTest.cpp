@@ -8,20 +8,33 @@
 #include <memory>
 #include <vector>
 #include <atomic>
+#include <mutex>
 
 using namespace gma;
 using namespace gma::nodes;
 
+namespace {
+
 class DownstreamStub : public INode {
 public:
+    std::mutex mx;
     std::vector<SymbolValue> received;
     std::atomic<int> count{0};
     void onValue(const SymbolValue& sv) override {
-        received.push_back(sv);
-        ++count;
+        {
+            std::lock_guard<std::mutex> lk(mx);
+            received.push_back(sv);
+        }
+        count.fetch_add(1, std::memory_order_release);
+    }
+    size_t safeSize() {
+        std::lock_guard<std::mutex> lk(mx);
+        return received.size();
     }
     void shutdown() noexcept override {}
 };
+
+} // anonymous namespace
 
 TEST(ListenerTest, ForwardsValueToDownstreamViaPool) {
     rt::ThreadPool pool(1);
@@ -32,14 +45,13 @@ TEST(ListenerTest, ForwardsValueToDownstreamViaPool) {
     auto listener = std::make_shared<Listener>("SYM", "field", stub, &pool, &dispatcher);
     listener->start();
 
-    // Call onValue directly to test forwarding through pool
     listener->onValue(SymbolValue{"SYM", 1.0});
     listener->onValue(SymbolValue{"SYM", 2.0});
     listener->onValue(SymbolValue{"SYM", 3.0});
 
     pool.shutdown();
 
-    ASSERT_EQ(stub->received.size(), 3u);
+    ASSERT_EQ(stub->safeSize(), 3u);
     EXPECT_DOUBLE_EQ(std::get<double>(stub->received[0].value), 1.0);
     EXPECT_DOUBLE_EQ(std::get<double>(stub->received[1].value), 2.0);
     EXPECT_DOUBLE_EQ(std::get<double>(stub->received[2].value), 3.0);
@@ -95,7 +107,7 @@ TEST(ListenerTest, HandlesRapidDispatch) {
     }
 
     pool.shutdown();
-    EXPECT_EQ(stub->received.size(), static_cast<size_t>(sends));
+    EXPECT_EQ(stub->safeSize(), static_cast<size_t>(sends));
 }
 
 TEST(ListenerTest, NoCrashOnDestructionWithoutStart) {

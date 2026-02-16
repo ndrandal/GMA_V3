@@ -297,7 +297,6 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\server\ClientSession.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\server\FeedServer.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\server\WebSocketServer.cpp" />
-    <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\ta\TAComputer.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\util\Config.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\util\Logger.cpp" />
     <ClCompile Include="C:\Users\nickr\Downloads\GMA_V3\src\util\Metrics.cpp" />
@@ -348,7 +347,6 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\server\WebSocketServer.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\ta\AtomicNames.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\ta\Indicators.hpp" />
-    <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\ta\TAComputer.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\util\Config.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\util\Logger.hpp" />
     <ClInclude Include="C:\Users\nickr\Downloads\GMA_V3\include\gma\util\Metrics.hpp" />

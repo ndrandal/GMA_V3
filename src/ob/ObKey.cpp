@@ -89,8 +89,8 @@ std::optional<ObKey> parseObKey(const std::string& keyStr){
     return k;
   }
 
-  // range.bid.levels.A-B.(sum|avg|min|max|count).(size|price|orders|notional)
-  if(t.size()==8 && t[1]=="range" && t[3]=="levels"){
+  // range.bid.levels.A-B.sum.size (7 tokens) | range.bid.levels.A-B.count (6 tokens)
+  if((t.size()==7 || t.size()==6) && t[1]=="range" && t[3]=="levels"){
     k.metric=Metric::RangeIdx;
     if(!parseSide(t[2], k.rangeIdx.side)) return std::nullopt;
     auto ab = split(t[4], '-'); if(ab.size()!=2) return std::nullopt;
@@ -98,15 +98,16 @@ std::optional<ObKey> parseObKey(const std::string& keyStr){
     if(k.rangeIdx.lv.a<1 || k.rangeIdx.lv.b<k.rangeIdx.lv.a) return std::nullopt;
     if(!parseReduce(t[5], k.rangeIdx.reduce)) return std::nullopt;
     if(k.rangeIdx.reduce!=Reduce::Count){
+      if(t.size()!=7) return std::nullopt;
       if(!parseTarget(t[6], k.rangeIdx.target)) return std::nullopt;
     } else {
-      k.rangeIdx.target = Target::None; // target ignored for count
+      k.rangeIdx.target = Target::None;
     }
     return k;
   }
 
-  // range.bid.price.P1-P2.(sum|avg|min|max|count).(size|price|orders|notional)
-  if(t.size()==8 && t[1]=="range" && t[3]=="price"){
+  // range.bid.price.P1-P2.sum.size (7 tokens) | range.bid.price.P1-P2.count (6 tokens)
+  if((t.size()==7 || t.size()==6) && t[1]=="range" && t[3]=="price"){
     k.metric=Metric::RangePx;
     if(!parseSide(t[2], k.rangePx.side)) return std::nullopt;
     auto ab = split(t[4], '-'); if(ab.size()!=2) return std::nullopt;
@@ -114,6 +115,7 @@ std::optional<ObKey> parseObKey(const std::string& keyStr){
     if(k.rangePx.p2 < k.rangePx.p1) return std::nullopt;
     if(!parseReduce(t[5], k.rangePx.reduce)) return std::nullopt;
     if(k.rangePx.reduce!=Reduce::Count){
+      if(t.size()!=7) return std::nullopt;
       if(!parseTarget(t[6], k.rangePx.target)) return std::nullopt;
     } else {
       k.rangePx.target = Target::None;
@@ -130,24 +132,25 @@ std::optional<ObKey> parseObKey(const std::string& keyStr){
     return k;
   }
 
-  // vwap.bid.levels.A-B  | vwap.bid.levels.N  | vwap.bid.price.P1-P2
+  // vwap.bid.levels.N  | vwap.bid.levels.A-B  | vwap.bid.price.P1-P2
   if(t.size()>=5 && t[1]=="vwap"){
     k.metric=Metric::VWAP;
     if(!parseSide(t[2], k.vwapSide)) return std::nullopt;
-    if(t[3]=="levels"){
-      if(t.size()==5){ // N
-        int n=0; if(!parseInt(t[4], n) || n<1) return std::nullopt;
+    if(t[3]=="levels" && t.size()==5){
+      // Try single N first, then A-B range
+      int n=0;
+      if(parseInt(t[4], n) && n>=1) {
         k.vwapLv = {1, n}; k.vwapByLevels = true; return k;
       }
-      if(t.size()==6){ // A-B
-        auto ab = split(t[4], '-'); if(ab.size()!=2) return std::nullopt;
+      auto ab = split(t[4], '-');
+      if(ab.size()==2) {
         if(!parseInt(ab[0], k.vwapLv.a) || !parseInt(ab[1], k.vwapLv.b)) return std::nullopt;
         if(k.vwapLv.a<1 || k.vwapLv.b<k.vwapLv.a) return std::nullopt;
         k.vwapByLevels = true; return k;
       }
       return std::nullopt;
     }
-    if(t[3]=="price" && t.size()==6){
+    if(t[3]=="price" && t.size()==5){
       auto ab = split(t[4], '-'); if(ab.size()!=2) return std::nullopt;
       if(!parseDouble(ab[0], k.vwapP1) || !parseDouble(ab[1], k.vwapP2)) return std::nullopt;
       if(k.vwapP2 < k.vwapP1) return std::nullopt;
@@ -156,23 +159,24 @@ std::optional<ObKey> parseObKey(const std::string& keyStr){
     return std::nullopt;
   }
 
-  // imbalance.levels.A-B | imbalance.levels.N | imbalance.price.P1-P2
-  if(t.size()>=4 && t[1]=="imbalance"){
+  // imbalance.levels.N | imbalance.levels.A-B | imbalance.price.P1-P2
+  if(t.size()>=3 && t[1]=="imbalance"){
     k.metric=Metric::Imbalance;
-    if(t[2]=="levels"){
-      if(t.size()==4){ // N
-        int n=0; if(!parseInt(t[3], n) || n<1) return std::nullopt;
+    if(t[2]=="levels" && t.size()==4){
+      // Try single N first, then A-B range
+      int n=0;
+      if(parseInt(t[3], n) && n>=1) {
         k.imbLv = {1, n}; k.imbByLevels = true; return k;
       }
-      if(t.size()==5){ // A-B
-        auto ab = split(t[3], '-'); if(ab.size()!=2) return std::nullopt;
+      auto ab = split(t[3], '-');
+      if(ab.size()==2) {
         if(!parseInt(ab[0], k.imbLv.a) || !parseInt(ab[1], k.imbLv.b)) return std::nullopt;
         if(k.imbLv.a<1 || k.imbLv.b<k.imbLv.a) return std::nullopt;
         k.imbByLevels = true; return k;
       }
       return std::nullopt;
     }
-    if(t[2]=="price" && t.size()==5){
+    if(t[2]=="price" && t.size()==4){
       auto ab = split(t[3], '-'); if(ab.size()!=2) return std::nullopt;
       if(!parseDouble(ab[0], k.imbP1) || !parseDouble(ab[1], k.imbP2)) return std::nullopt;
       if(k.imbP2 < k.imbP1) return std::nullopt;

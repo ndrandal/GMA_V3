@@ -1,6 +1,7 @@
 #include "gma/AtomicFunctions.hpp"
 #include "gma/AtomicStore.hpp"
 #include "gma/SymbolHistory.hpp"
+#include "gma/util/Config.hpp"
 #include <gtest/gtest.h>
 #include <string>
 #include <cmath>
@@ -113,4 +114,36 @@ TEST(AtomicFunctionsTest, OverwriteOnSecondCall) {
     computeAllAtomicValues(sym, hist, store);
     EXPECT_DOUBLE_EQ(getDouble(store, sym, "lastPrice"), 20.0);
     EXPECT_DOUBLE_EQ(getDouble(store, sym, "mean"), 15.0);
+}
+
+TEST(AtomicFunctionsTest, CustomConfigPeriods) {
+    // Use enough history to cover all custom periods
+    SymbolHistory hist;
+    for (int i = 1; i <= 25; ++i) hist.push_back({static_cast<double>(i), static_cast<double>(i)});
+
+    util::Config cfg;
+    cfg.taSMA = {3};
+    cfg.taEMA = {5};
+    cfg.taRSI = 5;
+
+    AtomicStore store;
+    const std::string sym = "CUSTOM";
+    computeAllAtomicValues(sym, hist, store, cfg);
+
+    // sma_3 should exist (custom period)
+    EXPECT_TRUE(store.get(sym, "sma_3").has_value());
+    // sma_5 should NOT exist (not in custom taSMA)
+    EXPECT_FALSE(store.get(sym, "sma_5").has_value());
+    // sma_20 should NOT exist (default period, not in custom config)
+    EXPECT_FALSE(store.get(sym, "sma_20").has_value());
+
+    // ema_5 should exist (custom period)
+    EXPECT_TRUE(store.get(sym, "ema_5").has_value());
+    // ema_12 should NOT exist (default period, not in custom config)
+    EXPECT_FALSE(store.get(sym, "ema_12").has_value());
+
+    // rsi_5 should exist (custom period)
+    EXPECT_TRUE(store.get(sym, "rsi_5").has_value());
+    // rsi_14 should NOT exist
+    EXPECT_FALSE(store.get(sym, "rsi_14").has_value());
 }

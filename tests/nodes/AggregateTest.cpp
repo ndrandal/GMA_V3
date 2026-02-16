@@ -6,15 +6,18 @@
 #include <vector>
 #include <atomic>
 #include <thread>
+#include <mutex>
 
 using namespace gma;
 
 // Parent stub collects all received SymbolValues
 class TestParent : public INode {
 public:
+    std::mutex mx;
     std::vector<SymbolValue> received;
     std::atomic<int> count{0};
     void onValue(const SymbolValue& sv) override {
+        std::lock_guard<std::mutex> lk(mx);
         received.push_back(sv);
         ++count;
     }

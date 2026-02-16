@@ -7,6 +7,8 @@
 
 using namespace gma;
 
+namespace {
+
 // Downstream stub that records received values
 class DownstreamStub : public INode {
 public:
@@ -16,6 +18,8 @@ public:
     }
     void shutdown() noexcept override {}
 };
+
+} // anonymous namespace
 
 TEST(AtomicAccessorTest, NoValueInStoreDoesNotPropagate) {
     AtomicStore store;

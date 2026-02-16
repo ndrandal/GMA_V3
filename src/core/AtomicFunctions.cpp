@@ -37,7 +37,8 @@ static double emaOverSeries(const std::vector<double>& series, size_t period) {
 void computeAllAtomicValues(
     const std::string& symbol,
     const SymbolHistory& hist,
-    AtomicStore& store
+    AtomicStore& store,
+    const util::Config& cfg
 ) {
     const size_t n = hist.size();
     if (n == 0) return;
@@ -89,8 +90,6 @@ void computeAllAtomicValues(
     };
 
     // EMA over hist prices — full-history seeding (standard approach).
-    // Seed at hist[0], iterate forward through all bars.
-    // Consistent with the MACD incremental computation below.
     auto ema = [&](size_t period) -> double {
         if (n < period) return 0.0;
         double k = 2.0 / (period + 1);
@@ -100,101 +99,113 @@ void computeAllAtomicValues(
         return val;
     };
 
-    // Pre-compute SMA(20) once for storage, Bollinger, and volatility_rank
-    double sma20 = sma(20);
-    const bool have20 = (n >= 20);
+    // Pre-compute SMA(BBands_n) once for Bollinger and volatility_rank
+    const size_t bbandsN = static_cast<size_t>(cfg.taBBands_n);
+    double smaBB = sma(bbandsN);
+    const bool haveBB = (n >= bbandsN);
 
-    results.emplace_back("sma_5",  sma(5));
-    results.emplace_back("sma_20", sma20);
-    results.emplace_back("ema_12", ema(12));
-    results.emplace_back("ema_26", ema(26));
+    // SMA for each configured period
+    for (int period : cfg.taSMA) {
+        double val = sma(static_cast<size_t>(period));
+        results.emplace_back("sma_" + std::to_string(period), val);
+    }
 
-    // RSI(14)
-    if (n >= 15) {
+    // EMA for each configured period
+    for (int period : cfg.taEMA) {
+        results.emplace_back("ema_" + std::to_string(period), ema(static_cast<size_t>(period)));
+    }
+
+    // RSI
+    const size_t rsiP = static_cast<size_t>(cfg.taRSI);
+    if (n >= rsiP + 1) {
         double gain = 0.0, loss = 0.0;
-        for (size_t i = n - 14; i < n; ++i) {
+        for (size_t i = n - rsiP; i < n; ++i) {
             double d = hist[i].price - hist[i-1].price;
             if (d > 0) gain += d;
             else loss += -d;
         }
         double rs = gain / (loss > 0.0 ? loss : 1e-6);
-        results.emplace_back("rsi_14", 100.0 - (100.0 / (1.0 + rs)));
+        results.emplace_back("rsi_" + std::to_string(cfg.taRSI), 100.0 - (100.0 / (1.0 + rs)));
     }
 
-    // MACD: line = EMA(12) - EMA(26), signal = 9-period EMA of MACD line series
-    // O(n) single-pass: seed both EMAs at hist[0], update incrementally.
-    // Uses the same full-history seeding as the ema() lambda above.
-    if (n >= 26) {
-        const double k12 = 2.0 / (12 + 1);
-        const double k26 = 2.0 / (26 + 1);
+    // MACD
+    const size_t macdFast = static_cast<size_t>(cfg.taMACD_fast);
+    const size_t macdSlow = static_cast<size_t>(cfg.taMACD_slow);
+    const size_t macdSig  = static_cast<size_t>(cfg.taMACD_signal);
+    if (n >= macdSlow) {
+        const double kFast = 2.0 / (macdFast + 1);
+        const double kSlow = 2.0 / (macdSlow + 1);
 
-        double ema12val = hist[0].price;
-        double ema26val = hist[0].price;
+        double emaFastVal = hist[0].price;
+        double emaSlowVal = hist[0].price;
 
         std::vector<double> macdSeries;
-        macdSeries.reserve(n - 25);
+        macdSeries.reserve(n - macdSlow + 1);
 
         for (size_t i = 1; i < n; ++i) {
             double p = hist[i].price;
-            ema12val = k12 * p + (1.0 - k12) * ema12val;
-            ema26val = k26 * p + (1.0 - k26) * ema26val;
+            emaFastVal = kFast * p + (1.0 - kFast) * emaFastVal;
+            emaSlowVal = kSlow * p + (1.0 - kSlow) * emaSlowVal;
 
-            if (i >= 25) {
-                macdSeries.push_back(ema12val - ema26val);
+            if (i >= macdSlow - 1) {
+                macdSeries.push_back(emaFastVal - emaSlowVal);
             }
         }
 
         double macdLine = macdSeries.back();
         results.emplace_back("macd_line", macdLine);
 
-        double signal = emaOverSeries(macdSeries, 9);
+        double signal = emaOverSeries(macdSeries, macdSig);
         results.emplace_back("macd_signal", signal);
         results.emplace_back("macd_histogram", macdLine - signal);
     } else {
-        double macdLine = ema(12) - ema(26);
+        double macdLine = ema(macdFast) - ema(macdSlow);
         results.emplace_back("macd_line", macdLine);
         results.emplace_back("macd_signal", 0.0);
         results.emplace_back("macd_histogram", 0.0);
     }
 
-    // Compute stddev(20) for Bollinger + volatility_rank (reuses sma20)
-    double stddev20 = 0.0;
-    if (have20) {
+    // Compute stddev(BBands_n) for Bollinger + volatility_rank (reuses smaBB)
+    double stddevBB = 0.0;
+    if (haveBB) {
         double sumSq = 0.0;
-        for (size_t i = n - 20; i < n; ++i) {
-            double d = hist[i].price - sma20;
+        for (size_t i = n - bbandsN; i < n; ++i) {
+            double d = hist[i].price - smaBB;
             sumSq += d * d;
         }
-        stddev20 = std::sqrt(sumSq / 20.0);
+        stddevBB = std::sqrt(sumSq / static_cast<double>(bbandsN));
     }
 
-    // Bollinger Bands (20 period, 2 stddev)
-    if (have20) {
-        results.emplace_back("bollinger_upper", sma20 + 2.0 * stddev20);
-        results.emplace_back("bollinger_lower", sma20 - 2.0 * stddev20);
+    // Bollinger Bands
+    if (haveBB) {
+        results.emplace_back("bollinger_upper", smaBB + cfg.taBBands_stdK * stddevBB);
+        results.emplace_back("bollinger_lower", smaBB - cfg.taBBands_stdK * stddevBB);
     }
 
-    // Momentum and ROC (10)
-    if (n >= 11) {
-        double prev10 = hist[n-11].price;
-        results.emplace_back("momentum_10", last - prev10);
-        results.emplace_back("roc_10", 100.0 * (last - prev10) / (prev10 != 0.0 ? prev10 : 1e-6));
+    // Momentum and ROC
+    const size_t momP = static_cast<size_t>(cfg.taMomentum);
+    if (n >= momP + 1) {
+        double prevM = hist[n - momP - 1].price;
+        results.emplace_back("momentum_" + std::to_string(cfg.taMomentum), last - prevM);
+        results.emplace_back("roc_" + std::to_string(cfg.taMomentum), 100.0 * (last - prevM) / (prevM != 0.0 ? prevM : 1e-6));
     }
 
-    // ATR(14)
-    if (n >= 15) {
+    // ATR
+    const size_t atrP = static_cast<size_t>(cfg.taATR);
+    if (n >= atrP + 1) {
         double trSum = 0.0;
-        for (size_t i = n - 14; i < n; ++i)
+        for (size_t i = n - atrP; i < n; ++i)
             trSum += std::abs(hist[i].price - hist[i-1].price);
-        results.emplace_back("atr_14", trSum / 14.0);
+        results.emplace_back("atr_" + std::to_string(cfg.taATR), trSum / static_cast<double>(atrP));
     }
 
     // Volume metrics
     results.emplace_back("volume", hist.back().volume);
-    if (have20) {
-        double vol20 = 0.0;
-        for (size_t i = n - 20; i < n; ++i) vol20 += hist[i].volume;
-        results.emplace_back("volume_avg_20", vol20 / 20.0);
+    const size_t volP = static_cast<size_t>(cfg.taVolAvg);
+    if (n >= volP) {
+        double vol = 0.0;
+        for (size_t i = n - volP; i < n; ++i) vol += hist[i].volume;
+        results.emplace_back("volume_avg_" + std::to_string(cfg.taVolAvg), vol / static_cast<double>(volP));
     }
 
     // On-balance volume
@@ -204,9 +215,9 @@ void computeAllAtomicValues(
                 (hist[i].price < hist[i-1].price ? -hist[i].volume : 0.0));
     results.emplace_back("obv", obv);
 
-    // Volatility rank (stddev/mean capped at 1) — reuses sma20/stddev20
-    if (mean != 0.0 && have20) {
-        results.emplace_back("volatility_rank", std::min(stddev20 / std::abs(mean), 1.0));
+    // Volatility rank (stddev/mean capped at 1) — reuses smaBB/stddevBB
+    if (mean != 0.0 && haveBB) {
+        results.emplace_back("volatility_rank", std::min(stddevBB / std::abs(mean), 1.0));
     }
 
     // Single lock acquisition for all writes
