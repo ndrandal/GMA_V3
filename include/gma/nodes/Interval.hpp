@@ -20,6 +20,8 @@ public:
            std::shared_ptr<INode> child,
            gma::rt::ThreadPool* pool);
 
+  ~Interval();
+
   // Must be called after construction when owned by a shared_ptr.
   void start();
 

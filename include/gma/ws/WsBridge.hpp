@@ -38,6 +38,10 @@ private:
   std::unordered_map<std::string,
     std::unordered_map<std::string, std::shared_ptr<gma::INode>>> active_;
 
+  // Keep intermediate pipeline nodes alive (Listener uses weak_ptr downstream).
+  std::unordered_map<std::string,
+    std::unordered_map<std::string, std::vector<std::shared_ptr<gma::INode>>>> chains_;
+
   std::shared_ptr<gma::MarketDispatcher> dispatcher_;
   std::shared_ptr<gma::AtomicStore>      store_;
   gma::rt::ThreadPool*                    pool_ = nullptr;

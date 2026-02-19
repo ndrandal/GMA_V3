@@ -14,6 +14,7 @@ AtomicAccessor::AtomicAccessor(std::string symbol,
 {}
 
 void AtomicAccessor::onValue(const SymbolValue&) {
+  if (stopping_.load(std::memory_order_acquire)) return;
   if (!store_) return;
 
   // First check AtomicStore for the field
@@ -29,12 +30,19 @@ void AtomicAccessor::onValue(const SymbolValue&) {
 
   if (!opt.has_value()) return;
 
-  if (auto ds = downstream_.lock()) {
+  std::shared_ptr<INode> ds;
+  {
+    std::lock_guard<std::mutex> lk(mx_);
+    ds = downstream_;
+  }
+  if (ds) {
     ds->onValue(SymbolValue{ symbol_, opt.value() });
   }
 }
 
 void AtomicAccessor::shutdown() noexcept {
+  stopping_.store(true, std::memory_order_release);
+  std::lock_guard<std::mutex> lk(mx_);
   downstream_.reset();
 }
 

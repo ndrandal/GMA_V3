@@ -41,6 +41,8 @@ private:
   void onAccept(boost::system::error_code ec, tcp::socket socket);
 
 private:
+  static constexpr std::size_t MAX_FEED_SESSIONS = 64;
+
   boost::asio::io_context& ioc_;
   tcp::acceptor            acceptor_;
   std::atomic<bool>        accepting_{false};

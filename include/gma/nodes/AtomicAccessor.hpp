@@ -1,5 +1,7 @@
 #pragma once
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include "gma/nodes/INode.hpp"
 #include "gma/AtomicStore.hpp"
@@ -20,7 +22,10 @@ private:
   std::string symbol_;
   std::string field_;
   AtomicStore* store_;
-  std::weak_ptr<INode> downstream_;
+
+  std::atomic<bool> stopping_{false};
+  mutable std::mutex mx_;
+  std::shared_ptr<INode> downstream_;
 };
 
 } // namespace gma

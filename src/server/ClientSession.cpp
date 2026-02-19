@@ -101,6 +101,10 @@ ClientSession::ClientSession(tcp::socket socket,
 void ClientSession::run() {
   auto self = shared_from_this();
 
+  // Cap incoming WebSocket frame size to prevent memory exhaustion from
+  // a malicious client sending a multi-gigabyte message.
+  ws_.read_message_max(64 * 1024);  // 64 KB
+
   // Heartbeat: send pings after 30s idle, close if no pong within timeout.
   {
     websocket::stream_base::timeout opt{};
@@ -197,9 +201,12 @@ void ClientSession::close() {
     {
       std::lock_guard<std::mutex> lk(self->reqMu_);
       for (auto& kv : self->active_) {
-        if (kv.second) kv.second->shutdown();
+        if (kv.second) {
+          try { kv.second->shutdown(); } catch (...) {}
+        }
       }
       self->active_.clear();
+      self->chains_.clear();
     }
 
     websocket::close_reason cr;
@@ -402,9 +409,28 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     const std::string symbol = r["symbol"].GetString();
     const std::string field  = r["field"].GetString();
 
+    // Validate symbol/field length to prevent absurdly large map keys.
+    static constexpr std::size_t MAX_SYMBOL_LEN = 64;
+    static constexpr std::size_t MAX_FIELD_LEN  = 128;
+    if (symbol.empty() || symbol.size() > MAX_SYMBOL_LEN) {
+      sendError("subscribe", "invalid 'symbol' (empty or too long, max "
+                + std::to_string(MAX_SYMBOL_LEN) + ")");
+      continue;
+    }
+    if (field.empty() || field.size() > MAX_FIELD_LEN) {
+      sendError("subscribe", "invalid 'field' (empty or too long, max "
+                + std::to_string(MAX_FIELD_LEN) + ")");
+      continue;
+    }
+
     // Callback from Responder -> send update message over this WS session.
-    auto self = shared_from_this();
-    auto sendFn = [self](int reqKey, const gma::SymbolValue& sv) {
+    // Capture weak_ptr to avoid reference cycle:
+    //   ClientSession → chains_ → Responder → sendFn → ClientSession
+    auto weak = weak_from_this();
+    auto sendFn = [weak](int reqKey, const gma::SymbolValue& sv) {
+      auto self = weak.lock();
+      if (!self) return;
+
       ::rapidjson::StringBuffer sb;
       ::rapidjson::Writer<::rapidjson::StringBuffer> w(sb);
 
@@ -482,10 +508,14 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
         if (it != active_.end() && it->second) {
           it->second->shutdown();
         } else if (active_.size() >= MAX_SUBSCRIPTIONS) {
+          // Shut down the already-started pipeline (Listener registered with
+          // dispatcher) to prevent a leaked subscription.
+          built.head->shutdown();
           sendError("subscribe", "max subscriptions reached");
           continue;
         }
         active_[key] = built.head;
+        chains_[key] = std::move(built.keepAlive);
       }
 
       // Ack
@@ -533,6 +563,7 @@ void ClientSession::handleCancel(const ::rapidjson::Document& doc) {
         root = std::move(it->second);
         active_.erase(it);
       }
+      chains_.erase(key);
     }
 
     if (root) root->shutdown();

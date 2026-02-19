@@ -46,6 +46,9 @@ void MarketDispatcher::unregisterListener(const std::string& symbol,
 }
 
 void MarketDispatcher::onTick(const SymbolTick& tick) {
+  // Early-out: reject empty symbols and null payloads before touching any state.
+  if (tick.symbol.empty() || !tick.payload) return;
+
   // Collect (field, listener) pairs for this symbol — snapshot under listener lock
   std::vector<std::pair<std::string, std::shared_ptr<INode>>> toNotify;
 
@@ -56,15 +59,13 @@ void MarketDispatcher::onTick(const SymbolTick& tick) {
       for (auto& kv : lit->second) {
         const std::string& field = kv.first;
         for (auto& sp : kv.second) {
-          if (tick.payload && tick.payload->HasMember(field.c_str())) {
+          if (tick.payload->HasMember(field.c_str())) {
             toNotify.emplace_back(field, sp);
           }
         }
       }
     }
   }
-
-  if (!tick.payload) return;
 
   // Update symbol-level history and run full TA suite
   updateSymbolHistory(tick.symbol, tick);
@@ -87,6 +88,11 @@ void MarketDispatcher::onTick(const SymbolTick& tick) {
     std::vector<double> histVec;
     {
       std::unique_lock<std::shared_mutex> lock(_histMutex);
+      // Cap distinct symbol count to bound memory growth.
+      if (_histories.find(tick.symbol) == _histories.end() &&
+          _histories.size() >= MAX_SYMBOLS) {
+        continue;
+      }
       auto& hist = _histories[tick.symbol][field];
       hist.push_back(raw);
       if (hist.size() > MAX_HISTORY) hist.pop_front();
@@ -138,25 +144,42 @@ void MarketDispatcher::updateSymbolHistory(const std::string& symbol,
     }
   }
 
-  // Update symbol history under lock, then compute TA outside lock
-  SymbolHistory histCopy;
+  // Update symbol history under lock, then compute TA outside lock.
+  // Snapshot into a vector for contiguous memory and better cache locality.
+  std::vector<TickEntry> histVec;
   {
     std::unique_lock<std::shared_mutex> lock(_histMutex);
+    // Cap distinct symbol count to bound memory growth.
+    if (_symbolHistories.find(symbol) == _symbolHistories.end() &&
+        _symbolHistories.size() >= MAX_SYMBOLS) {
+      return;
+    }
     auto& hist = _symbolHistories[symbol];
     hist.push_back(TickEntry{price, volume});
     if (hist.size() > MAX_HISTORY) hist.pop_front();
-    histCopy = hist; // snapshot for TA computation
+    histVec.assign(hist.begin(), hist.end());
   }
 
   // Run the full TA suite — writes results to AtomicStore via setBatch
-  computeAllAtomicValues(symbol, histCopy, *_store, _cfg);
+  computeAllAtomicValues(symbol, histVec, *_store, _cfg);
 }
 
 void MarketDispatcher::computeAndStoreAtomics(const std::string& symbol,
-                                              const std::string& field,
+                                              const std::string& /*field*/,
                                               const std::vector<double>& history)
 {
   auto& fmap = FunctionMap::instance();
+
+  // Snapshot all listeners for this symbol once, avoiding repeated lock
+  // acquisitions inside the forEach loop (one lock instead of N).
+  std::map<std::string, std::vector<std::shared_ptr<INode>>> symListeners;
+  {
+    std::shared_lock<std::shared_mutex> lock(_listenerMutex);
+    auto sit = _listeners.find(symbol);
+    if (sit != _listeners.end()) {
+      symListeners = sit->second;
+    }
+  }
 
   // Iterate under FunctionMap's shared_lock via forEach — no copy of std::function objects
   fmap.forEach([&](const std::string& fnName, const Func& fn) {
@@ -177,20 +200,11 @@ void MarketDispatcher::computeAndStoreAtomics(const std::string& symbol,
       _store->set(symbol, fnName, result);
     }
 
-    // Collect subscribers for (symbol, fnName)
-    std::vector<std::shared_ptr<INode>> subs;
-    {
-      std::shared_lock<std::shared_mutex> lock(_listenerMutex);
-      auto sit = _listeners.find(symbol);
-      if (sit != _listeners.end()) {
-        auto fit = sit->second.find(fnName);
-        if (fit != sit->second.end()) {
-          subs = fit->second;
-        }
-      }
-    }
+    // Notify subscribers for (symbol, fnName) from the snapshot
+    auto fit = symListeners.find(fnName);
+    if (fit == symListeners.end()) return;
 
-    for (auto& listener : subs) {
+    for (auto& listener : fit->second) {
       if (_threadPool) {
         _threadPool->post([listener, symbol, result]() {
           if (listener) listener->onValue(SymbolValue{ symbol, result });

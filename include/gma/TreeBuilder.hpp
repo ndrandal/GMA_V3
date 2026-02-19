@@ -3,6 +3,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "gma/Span.hpp"
 #include "gma/SymbolValue.hpp"
@@ -25,9 +26,11 @@ namespace tree {
     MarketDispatcher* dispatcher { nullptr };   // for Listener wiring
   };
 
-  // Simple result type for "buildForRequest" – head of the chain
+  // Result of buildForRequest – head plus the downstream chain.
+  // `keepAlive` retains every pipeline node to prevent weak_ptr expiry.
   struct BuiltChain {
     std::shared_ptr<INode> head;
+    std::vector<std::shared_ptr<INode>> keepAlive;
   };
 
   // Convenience alias for Worker functions

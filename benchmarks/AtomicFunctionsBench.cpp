@@ -4,8 +4,8 @@
 #include "gma/SymbolHistory.hpp"
 #include <cmath>
 
-static gma::SymbolHistory makeHistory(size_t n) {
-    gma::SymbolHistory hist;
+static std::vector<gma::TickEntry> makeHistory(size_t n) {
+    std::vector<gma::TickEntry> hist;
     for (size_t i = 0; i < n; ++i) {
         double price = 100.0 + 10.0 * std::sin(static_cast<double>(i) * 0.1);
         double volume = 1000.0 + 500.0 * std::cos(static_cast<double>(i) * 0.05);

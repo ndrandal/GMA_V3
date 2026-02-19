@@ -15,6 +15,12 @@ class ShutdownCoordinator {
 public:
   // Lower order runs earlier; higher order runs later.
   void registerStep(std::string name, int order, std::function<void()> fn) {
+    if (stopping_.load(std::memory_order_acquire)) {
+      gma::util::logger().log(gma::util::LogLevel::Warn,
+        "ShutdownCoordinator: registerStep after stop(), step ignored",
+        {{"step", name}});
+      return;
+    }
     std::lock_guard<std::mutex> lk(mx_);
     steps_.push_back({std::move(name), order, std::move(fn)});
     sorted_ = false;

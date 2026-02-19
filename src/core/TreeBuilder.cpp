@@ -72,7 +72,9 @@ public:
     : roots_(std::move(roots)) {}
 
   void onValue(const gma::SymbolValue&) override {
-    // Composite roots are sources; they don't receive upstream values
+    // No-op. CompositeRoot is a lifecycle wrapper for multiple Listener
+    // source nodes. Listeners receive values from MarketDispatcher, not
+    // from upstream pipeline wiring.
   }
 
   void shutdown() noexcept override {
@@ -232,30 +234,6 @@ std::shared_ptr<gma::INode> buildOne(const rapidjson::Value& spec,
                                      const Deps&             deps,
                                      std::shared_ptr<gma::INode> downstream);
 
-// Helper for Aggregate: build many inputs and wrap into CompositeRoot
-static std::shared_ptr<gma::INode> buildManyAsRoot(const rapidjson::Value&      arr,
-                                                   const std::string&           defaultSymbol,
-                                                   const Deps&                 deps,
-                                                   std::shared_ptr<gma::INode> downstream) {
-  if (!arr.IsArray())
-    throw std::runtime_error("TreeBuilder: 'inputs' must be an array");
-
-  std::vector<std::shared_ptr<gma::INode>> roots;
-  roots.reserve(arr.Size());
-
-  for (auto& it : arr.GetArray()) {
-    roots.push_back(buildOne(it, defaultSymbol, deps, downstream));
-  }
-
-  if (roots.empty())
-    throw std::runtime_error("TreeBuilder: empty 'inputs' array");
-
-  if (roots.size() == 1)
-    return roots.front();
-
-  return std::make_shared<CompositeRoot>(std::move(roots));
-}
-
 std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
                                      const std::string&           defaultSymbol,
                                      const Deps&                 deps,
@@ -270,6 +248,8 @@ std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
 
     const std::string symbol = strOr(v, "symbol", defaultSymbol);
     const std::string field  = strOr(v, "field",  "");
+    if (symbol.empty())
+      throw std::runtime_error("Listener: missing 'symbol'");
     if (field.empty())
       throw std::runtime_error("Listener: missing 'field'");
 
@@ -295,6 +275,9 @@ std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
     int ms = intOr(v, "ms", intOr(v, "periodMs", 0));
     if (ms <= 0)
       throw std::runtime_error("Interval: positive 'ms' required");
+    static constexpr int MAX_INTERVAL_MS = 3600000; // 1 hour
+    if (ms > MAX_INTERVAL_MS)
+      throw std::runtime_error("Interval: 'ms' exceeds maximum (3600000)");
 
     const rapidjson::Value* childSpec =
       v.HasMember("child") ? &v["child"] : nullptr;
@@ -303,9 +286,10 @@ std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
     if (childSpec)
       child = buildOne(*childSpec, defaultSymbol, deps, downstream);
 
-    return std::make_shared<gma::Interval>(std::chrono::milliseconds(ms),
-                                          child,
-                                          pool);
+    auto interval = std::make_shared<gma::Interval>(
+        std::chrono::milliseconds(ms), child, pool);
+    interval->start();
+    return interval;
   }
 
 
@@ -338,11 +322,26 @@ std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
 
     auto agg = std::make_shared<gma::Aggregate>(arity, downstream);
 
-    if (!v.HasMember("inputs"))
-      throw std::runtime_error("Aggregate: missing 'inputs'");
+    if (!v.HasMember("inputs") || !v["inputs"].IsArray())
+      throw std::runtime_error("Aggregate: 'inputs' must be an array");
 
-    auto root = buildManyAsRoot(v["inputs"], defaultSymbol, deps, agg);
-    return root;
+    const auto& inputArr = v["inputs"];
+    std::vector<std::shared_ptr<gma::INode>> roots;
+    roots.reserve(inputArr.Size() + 1);
+    for (auto& it : inputArr.GetArray()) {
+      roots.push_back(buildOne(it, defaultSymbol, deps, agg));
+    }
+    if (roots.empty())
+      throw std::runtime_error("Aggregate: empty 'inputs' array");
+
+    // Keep the Aggregate alive alongside input heads — Listeners hold
+    // only a weak_ptr to their downstream, so without this the Aggregate
+    // would be destroyed when the local shared_ptr goes out of scope.
+    roots.push_back(agg);
+
+    if (roots.size() == 1)
+      return roots.front();
+    return std::make_shared<CompositeRoot>(std::move(roots));
   }
 
   // --- SymbolSplit ---
@@ -350,11 +349,16 @@ std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
     if (!v.HasMember("child"))
       throw std::runtime_error("SymbolSplit: missing 'child'");
 
-    const rapidjson::Value* childSpec = &v["child"];
+    // Deep-copy the child spec into a shared_ptr<Document> so the factory
+    // lambda owns the JSON.  The original v["child"] lives inside a
+    // stack-local rapidjson::Document in the caller and will be destroyed
+    // before the factory is ever invoked by SymbolSplit::onValue().
+    auto childDoc = std::make_shared<rapidjson::Document>();
+    childDoc->CopyFrom(v["child"], childDoc->GetAllocator());
 
     gma::SymbolSplit::Factory f =
-      [childSpec, defaultSymbol, deps, downstream](const std::string& sym) {
-        return buildOne(*childSpec,
+      [childDoc, defaultSymbol, deps, downstream](const std::string& sym) {
+        return buildOne(*childDoc,
                         sym.empty() ? defaultSymbol : sym,
                         deps,
                         downstream);
@@ -370,6 +374,8 @@ std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
 
     auto curDown = downstream;
     const auto& stages = v["stages"];
+    if (stages.Size() == 0)
+      throw std::runtime_error("Chain: 'stages' must not be empty");
     for (int i = static_cast<int>(stages.Size()) - 1; i >= 0; --i) {
       curDown = buildOne(stages[static_cast<rapidjson::SizeType>(i)],
                          defaultSymbol,
@@ -417,9 +423,10 @@ std::shared_ptr<gma::INode> buildSimple(const std::string&      symbol,
       pool = gma::gThreadPool.get();
     if (!pool)
       throw std::runtime_error("buildSimple: no thread pool available");
-    return std::make_shared<gma::Interval>(std::chrono::milliseconds(pollMs),
-                                          accessor,
-                                          pool);
+    auto interval = std::make_shared<gma::Interval>(
+        std::chrono::milliseconds(pollMs), accessor, pool);
+    interval->start();
+    return interval;
   }
   return accessor;
 
@@ -439,12 +446,22 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   const std::string symbol = rq["symbol"].GetString();
   const std::string field  = rq["field"].GetString();
 
+  if (symbol.empty())
+    throw std::runtime_error("buildForRequest: 'symbol' must not be empty");
+  if (field.empty())
+    throw std::runtime_error("buildForRequest: 'field' must not be empty");
+
+  // Collect every node so callers can keep them alive (all use weak_ptr downstream).
+  std::vector<std::shared_ptr<gma::INode>> keepAlive;
+  keepAlive.push_back(terminal);
+
   // Optional mid-pipeline, ultimately forwarding into terminal
   std::shared_ptr<gma::INode> midHead = terminal;
 
   // Single node under "node"
   if (rq.HasMember("node") && rq["node"].IsObject()) {
     midHead = buildOne(rq["node"], symbol, deps, terminal);
+    keepAlive.push_back(midHead);
   }
 
   // Or an array pipeline under "pipeline" or "stages"
@@ -458,6 +475,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
                            symbol,
                            deps,
                            curDown);
+        keepAlive.push_back(curDown);
       }
       midHead = curDown;
       break;
@@ -476,7 +494,8 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   head->start();
 
   BuiltChain out;
-  out.head = head;
+  out.head      = head;
+  out.keepAlive = std::move(keepAlive);
   return out;
 }
 

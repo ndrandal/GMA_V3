@@ -17,6 +17,8 @@ public:
   double get(const std::string& symbol, const std::string& fullKey) const;
 
 private:
+  double getImpl(const std::string& symbol, const std::string& fullKey) const;
+
   std::shared_ptr<FunctionalSnapshotSource> src_;
   std::size_t defPer_;
   std::size_t defAgg_;

@@ -36,10 +36,21 @@ public:
     auto dot = key.find('.');
     if (dot == std::string::npos) return std::nullopt;
     const std::string ns = key.substr(0, dot);
-    std::lock_guard<std::mutex> lk(mx());
-    auto it = map().find(ns);
-    if (it == map().end()) return std::nullopt;
-    return it->second(symbol, key);
+
+    // Copy the provider function under lock, then call outside lock
+    // to avoid blocking all concurrent resolves while one provider executes.
+    ProviderFn fn;
+    {
+      std::lock_guard<std::mutex> lk(mx());
+      auto it = map().find(ns);
+      if (it == map().end()) return std::nullopt;
+      fn = it->second;
+    }
+    try {
+      return fn(symbol, key);
+    } catch (...) {
+      return std::nullopt;
+    }
   }
 
 private:

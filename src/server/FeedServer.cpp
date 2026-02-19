@@ -65,6 +65,18 @@ private:
 
     // Very simple framing: treat incoming as newline-delimited text messages
     pending_.insert(pending_.end(), buf_.data(), buf_.data() + n);
+
+    // Guard against slow-send DoS: disconnect if pending data exceeds limit
+    // without producing a complete line.
+    if (pending_.size() > MAX_PENDING) {
+      GMA_METRIC_HIT("feed.pending_overflow");
+      gma::util::logger().log(gma::util::LogLevel::Warn,
+                              "feed.pending_overflow",
+                              {{"size", std::to_string(pending_.size())}});
+      close();
+      return;
+    }
+
     std::size_t start = 0;
     for (std::size_t i = 0; i < pending_.size(); ++i) {
       if (pending_[i] == '\n') {
@@ -80,7 +92,8 @@ private:
     doRead(); // continue reading
   }
 
-  static constexpr std::size_t MAX_LINE_SIZE = 64 * 1024; // 64 KB
+  static constexpr std::size_t MAX_LINE_SIZE = 64 * 1024;  // 64 KB
+  static constexpr std::size_t MAX_PENDING  = 128 * 1024; // 128 KB
 
   void handleLine(const std::string& line) {
     GMA_METRIC_HIT("feed.line_in");
@@ -148,6 +161,15 @@ private:
     gma::SymbolTick t;
     t.symbol = doc["symbol"].GetString();
 
+    // Reject empty or absurdly long symbols.
+    if (t.symbol.empty() || t.symbol.size() > 64) {
+      GMA_METRIC_HIT("feed.tick_bad");
+      gma::util::logger().log(gma::util::LogLevel::Warn,
+                              "feed.line.bad_symbol",
+                              {{"len", std::to_string(t.symbol.size())}});
+      return;
+    }
+
     // Move doc onto heap for shared ownership in the tick
     auto shared = std::make_shared<rapidjson::Document>(std::move(doc));
     t.payload = std::move(shared);
@@ -174,6 +196,11 @@ private:
 
     const std::string symbol = doc["symbol"].GetString();
     const std::string action = doc["action"].GetString();
+
+    if (symbol.empty() || symbol.size() > 64) {
+      GMA_METRIC_HIT("feed.ob_bad");
+      return;
+    }
 
     if (action == "ticksize") {
       if (!doc.HasMember("tickSize") || !doc["tickSize"].IsNumber()) {
@@ -348,6 +375,21 @@ void FeedServer::onAccept(boost::system::error_code ec, tcp::socket socket) {
   if (!accepting_.load()) return;
 
   if (!ec) {
+    // Guard against fd-exhaustion DoS: reject new connections once the limit
+    // is reached.  Feed producers are few; 64 is generous.
+    {
+      std::lock_guard<std::mutex> lk(mu_);
+      if (sessions_.size() >= MAX_FEED_SESSIONS) {
+        GMA_METRIC_HIT("feed.conn_rejected");
+        gma::util::logger().log(gma::util::LogLevel::Warn,
+                                "feed.max_sessions_reached",
+                                {{"max", std::to_string(MAX_FEED_SESSIONS)}});
+        // Let socket close on scope exit.
+        doAccept();
+        return;
+      }
+    }
+
     auto sp = std::make_shared<FeedSession>(std::move(socket), dispatcher_, obManager_, this);
     {
       std::lock_guard<std::mutex> lk(mu_);

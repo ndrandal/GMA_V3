@@ -2,7 +2,9 @@
 
 #include "gma/nodes/INode.hpp"
 #include "gma/SymbolValue.hpp"
+#include <atomic>
 #include <functional>
+#include <mutex>
 
 namespace gma::nodes {
 
@@ -18,6 +20,8 @@ public:
     void shutdown() noexcept override;
 
 private:
+    std::atomic<bool> stopped_{false};
+    std::mutex mx_;
     std::function<void(int,const SymbolValue&)> send_;
     int key_;
 };

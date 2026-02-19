@@ -87,6 +87,7 @@ private:
   AtomicStore* _store;                       // where atomic results are written (not owned)
   util::Config _cfg;                         // TA configuration
   static constexpr size_t MAX_HISTORY = 1000;
+  static constexpr size_t MAX_SYMBOLS = 10000;
 };
 
 } // namespace gma

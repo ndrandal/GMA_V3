@@ -331,15 +331,17 @@ bool OrderBook::updateImpl(const OrderKey& key,
         return true;
     }
 
-    // migrate price level
+    // migrate price level — copy the order BEFORE erasing, since `ord` is a
+    // reference into the list node that erase() destroys (use-after-free).
+    Order moved = ord;
+    moved.price = tgtPrice;
+    moved.size  = tgtSize;
+
     if (lvl->totalSize >= oldSize) lvl->totalSize -= oldSize; else lvl->totalSize = 0;
     lvl->orders.erase(loc.it);
     eraseLevelIfEmpty(loc.side, oldPrice);
 
     PriceLevel& newLvl = getOrCreateLevel(loc.side, tgtPrice);
-    Order moved = ord;
-    moved.price = tgtPrice;
-    moved.size  = tgtSize;
     newLvl.orders.push_back(moved);
     auto newIt = std::prev(newLvl.orders.end());
     newLvl.totalSize += tgtSize;

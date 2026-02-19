@@ -56,6 +56,16 @@ bool Config::loadFromFile(const std::string& path) {
     if (!std::fgets(tmp, sizeof(tmp), f)) break;
     line.assign(tmp);
 
+    // Detect truncated lines (fgets fills the buffer without a newline).
+    // Discard the rest of the line to avoid silent data corruption.
+    if (line.size() == sizeof(tmp) - 1 && !line.empty() && line.back() != '\n') {
+      // Consume remainder of the oversized line
+      while (std::fgets(tmp, sizeof(tmp), f)) {
+        if (std::strchr(tmp, '\n')) break;
+      }
+      continue; // skip this line entirely
+    }
+
     // Strip CR/LF
     while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
 

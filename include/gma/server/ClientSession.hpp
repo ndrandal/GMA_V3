@@ -75,6 +75,7 @@ private:
   // Active requests for this session.
   std::mutex reqMu_;
   std::unordered_map<int, std::shared_ptr<INode>> active_;
+  std::unordered_map<int, std::vector<std::shared_ptr<INode>>> chains_; // keeps pipeline alive
 
   // Rate limiting: token-bucket for subscribe requests
   static constexpr int    RATE_LIMIT_BURST    = 20;   // max burst of subscribes

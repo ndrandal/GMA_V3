@@ -9,6 +9,21 @@ Interval::Interval(std::chrono::milliseconds period,
 {
 }
 
+Interval::~Interval() {
+  stopping_.store(true, std::memory_order_release);
+  cv_.notify_all();
+  if (timerThread_.joinable()) {
+    // If the destructor is running from the timer thread itself (the thread
+    // held the last shared_from_this() and released it on loop exit), join()
+    // would deadlock.  Detach instead — the thread is about to return.
+    if (timerThread_.get_id() == std::this_thread::get_id()) {
+      timerThread_.detach();
+    } else {
+      timerThread_.join();
+    }
+  }
+}
+
 void Interval::start() {
   bool expected = false;
   if (!started_.compare_exchange_strong(expected, true))
@@ -51,7 +66,15 @@ void Interval::onValue(const SymbolValue&) {
 void Interval::shutdown() noexcept {
   stopping_.store(true, std::memory_order_release);
   cv_.notify_all();
-  if (timerThread_.joinable()) timerThread_.join();
+  if (timerThread_.joinable()) {
+    // Mirror the destructor guard: if shutdown() is called from the timer
+    // thread itself (e.g. via a downstream callback), join() would deadlock.
+    if (timerThread_.get_id() == std::this_thread::get_id()) {
+      timerThread_.detach();
+    } else {
+      timerThread_.join();
+    }
+  }
 }
 
 } // namespace gma

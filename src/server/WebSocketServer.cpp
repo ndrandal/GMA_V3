@@ -60,8 +60,12 @@ void WebSocketServer::closeAll() {
     copy = sessions_;
   }
   for (auto& kv : copy) {
-    if (auto sp = kv.second.lock()) {
-      sp->close();
+    try {
+      if (auto sp = kv.second.lock()) {
+        sp->close();
+      }
+    } catch (...) {
+      // Don't let one session failure prevent remaining sessions from closing.
     }
   }
 }
@@ -103,6 +107,17 @@ void WebSocketServer::onAccept(boost::system::error_code ec, tcp::socket socket)
   if (!accepting_.load()) return;
 
   if (!ec) {
+    // Guard against connection-flood DoS: cap concurrent WS sessions.
+    {
+      std::lock_guard<std::mutex> lk(sessions_mu_);
+      if (sessions_.size() >= MAX_WS_SESSIONS) {
+        GMA_METRIC_HIT("ws.conn_rejected");
+        // Let socket close on scope exit — don't create a session.
+        doAccept();
+        return;
+      }
+    }
+
     // Construct a ClientSession that knows how to talk WebSocket/Beast.
     auto session = std::make_shared<ClientSession>(
         std::move(socket),

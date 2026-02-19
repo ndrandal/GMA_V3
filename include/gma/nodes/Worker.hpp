@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -24,8 +25,12 @@ public:
 
 private:
   Fn fn_;
-  std::weak_ptr<INode> downstream_;
+  std::shared_ptr<INode> downstream_;
 
+  static constexpr std::size_t MAX_ACC     = 1000;
+  static constexpr std::size_t MAX_SYMBOLS = 10000;
+
+  std::atomic<bool> stopping_{false};
   mutable std::mutex mx_;
   std::unordered_map<std::string, std::vector<ArgType>> acc_;
 };

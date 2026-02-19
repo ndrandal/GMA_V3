@@ -116,7 +116,7 @@ TEST(IntegrationTest, AtomicStoreBatchWrite) {
 }
 
 TEST(IntegrationTest, ComputeAtomicValuesStoresResults) {
-    SymbolHistory hist;
+    std::vector<TickEntry> hist;
     for (int i = 1; i <= 25; ++i)
         hist.push_back({static_cast<double>(i), static_cast<double>(i * 2)});
 
@@ -139,10 +139,10 @@ TEST(IntegrationTest, ComputeAtomicValuesStoresResults) {
 TEST(IntegrationTest, MultipleSymbolsIndependent) {
     AtomicStore store;
 
-    SymbolHistory hist1;
+    std::vector<TickEntry> hist1;
     for (int i = 1; i <= 10; ++i) hist1.push_back({static_cast<double>(i), 1.0});
 
-    SymbolHistory hist2;
+    std::vector<TickEntry> hist2;
     for (int i = 100; i <= 110; ++i) hist2.push_back({static_cast<double>(i), 1.0});
 
     computeAllAtomicValues("SYM_A", hist1, store);
@@ -170,7 +170,7 @@ TEST(IntegrationTest, ConfigRoundTrip) {
     util::Config cfg;
     ASSERT_TRUE(cfg.loadFromFile(path));
 
-    SymbolHistory hist;
+    std::vector<TickEntry> hist;
     for (int i = 1; i <= 25; ++i) hist.push_back({static_cast<double>(i), 1.0});
 
     AtomicStore store;
@@ -306,7 +306,7 @@ TEST(IntegrationTest, ListenerIgnoresUnrelatedFields) {
 TEST(IntegrationTest, AtomicAccessorReadsComputedValues) {
     // Compute atomics, then verify AtomicAccessor reads from store
     AtomicStore store;
-    SymbolHistory hist;
+    std::vector<TickEntry> hist;
     for (int i = 1; i <= 25; ++i) hist.push_back({static_cast<double>(i), 1.0});
     computeAllAtomicValues("SYM", hist, store);
 

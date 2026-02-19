@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "gma/nodes/INode.hpp"
@@ -41,10 +42,12 @@ private:
   std::string symbol_;
   std::string field_;
 
+  mutable std::mutex downMx_;
   std::weak_ptr<INode> downstream_;
-  gma::rt::ThreadPool* pool_;          // ✅ canonical type
+  gma::rt::ThreadPool* pool_;          // canonical type
   gma::MarketDispatcher* dispatcher_;
 
+  std::atomic<bool> started_{false};
   std::atomic<bool> stopping_{false};
 };
 

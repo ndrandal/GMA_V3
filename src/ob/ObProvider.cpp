@@ -20,6 +20,17 @@ Provider::Provider(std::shared_ptr<FunctionalSnapshotSource> src,
 double Provider::get(const std::string& symbol, const std::string& fullKey) const {
   if (!src_) return std::numeric_limits<double>::quiet_NaN();
 
+  // Guard against malformed keys — stoi() throws on non-numeric tokens,
+  // and capture() could throw on degenerate inputs.
+  try {
+    return getImpl(symbol, fullKey);
+  } catch (...) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+}
+
+double Provider::getImpl(const std::string& symbol, const std::string& fullKey) const {
+
   // Fast path
   if (fullKey == "ob.spread") {
     auto snap = src_->capture(symbol, 1, Mode::Per, std::nullopt);

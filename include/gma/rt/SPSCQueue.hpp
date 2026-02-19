@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 #include <cstddef>
+#include <stdexcept>
 #include <vector>
 #include <optional>
 
@@ -11,7 +12,10 @@ template <typename T>
 class SPSCQueue {
 public:
   explicit SPSCQueue(size_t capacity)
-  : cap_(capacity), buf_(capacity) {}
+  : cap_(capacity), buf_(capacity) {
+    if (capacity == 0)
+      throw std::invalid_argument("SPSCQueue: capacity must be > 0");
+  }
 
   // Try to push; returns false if full.
   bool try_push(const T& v) {

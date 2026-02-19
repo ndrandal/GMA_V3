@@ -17,7 +17,7 @@ static double getDouble(const AtomicStore& store, const std::string& sym, const 
 }
 
 TEST(AtomicFunctionsTest, BasicPriceMetrics) {
-    SymbolHistory hist = {{1.0,10.0}, {3.0,20.0}, {2.0,5.0}};
+    std::vector<TickEntry> hist = {{1.0,10.0}, {3.0,20.0}, {2.0,5.0}};
     AtomicStore store;
     const std::string sym = "TEST";
     computeAllAtomicValues(sym, hist, store);
@@ -31,7 +31,7 @@ TEST(AtomicFunctionsTest, BasicPriceMetrics) {
 }
 
 TEST(AtomicFunctionsTest, MeanAndMedianAndVwap) {
-    SymbolHistory hist = {{1.0,10.0}, {3.0,20.0}, {2.0,5.0}};
+    std::vector<TickEntry> hist = {{1.0,10.0}, {3.0,20.0}, {2.0,5.0}};
     AtomicStore store;
     const std::string sym = "STATS";
     computeAllAtomicValues(sym, hist, store);
@@ -52,7 +52,7 @@ static double sumRange(int start, int end) {
 
 TEST(AtomicFunctionsTest, TechnicalIndicatorsPresence) {
     // Use history >= 20 entries to ensure all indicators are generated
-    SymbolHistory hist;
+    std::vector<TickEntry> hist;
     for (int i = 1; i <= 25; ++i) hist.push_back({static_cast<double>(i), static_cast<double>(2*i)});
     AtomicStore store;
     const std::string sym = "TECH";
@@ -88,7 +88,7 @@ TEST(AtomicFunctionsTest, TechnicalIndicatorsPresence) {
 
 TEST(AtomicFunctionsTest, InsufficientHistoryTriggersPartialMetrics) {
     // Only 3 entries: no RSI, no ATR, no bollinger
-    SymbolHistory hist = {{10,1}, {12,1}, {11,1}};
+    std::vector<TickEntry> hist = {{10,1}, {12,1}, {11,1}};
     AtomicStore store;
     const std::string sym = "PARTIAL";
     computeAllAtomicValues(sym, hist, store);
@@ -105,7 +105,7 @@ TEST(AtomicFunctionsTest, InsufficientHistoryTriggersPartialMetrics) {
 }
 
 TEST(AtomicFunctionsTest, OverwriteOnSecondCall) {
-    SymbolHistory hist = {{2,1}, {4,1}};
+    std::vector<TickEntry> hist = {{2,1}, {4,1}};
     AtomicStore store;
     const std::string sym = "DUP";
     computeAllAtomicValues(sym, hist, store);
@@ -118,7 +118,7 @@ TEST(AtomicFunctionsTest, OverwriteOnSecondCall) {
 
 TEST(AtomicFunctionsTest, CustomConfigPeriods) {
     // Use enough history to cover all custom periods
-    SymbolHistory hist;
+    std::vector<TickEntry> hist;
     for (int i = 1; i <= 25; ++i) hist.push_back({static_cast<double>(i), static_cast<double>(i)});
 
     util::Config cfg;

@@ -36,10 +36,11 @@
 // ---------------------------
 // Globals
 // ---------------------------
-static gma::rt::ShutdownCoordinator* g_shutdown = nullptr;
+static std::atomic<gma::rt::ShutdownCoordinator*> g_shutdown{nullptr};
 
 static void handleSignal(int) {
-  if (g_shutdown) g_shutdown->stop();
+  auto* p = g_shutdown.load(std::memory_order_acquire);
+  if (p) p->stop();
 }
 
 static unsigned short parsePort(const char* str, unsigned short fallback) {
@@ -60,7 +61,7 @@ int main(int argc, char* argv[]) {
 
   // Shutdown coordinator — declared early so it outlives servers.
   gma::rt::ShutdownCoordinator shutdown;
-  g_shutdown = &shutdown;
+  g_shutdown.store(&shutdown, std::memory_order_release);
 
   // 0) Signals -> graceful stop
   std::signal(SIGINT,  handleSignal);
@@ -77,6 +78,17 @@ int main(int argc, char* argv[]) {
     if (!cfg.loadFromFile(argv[2])) {
       std::cerr << "[config] warning: failed to load file: " << argv[2] << "\n";
     }
+  }
+
+  // Validate config-file port values before narrowing cast (negative or >65535
+  // would silently wrap to a wrong port number).
+  if (cfg.wsPort <= 0 || cfg.wsPort > 65535) {
+    std::cerr << "[config] warning: invalid wsPort=" << cfg.wsPort << ", using default 8080\n";
+    cfg.wsPort = 8080;
+  }
+  if (cfg.feedPort <= 0 || cfg.feedPort > 65535) {
+    std::cerr << "[config] warning: invalid feedPort=" << cfg.feedPort << ", using default 9001\n";
+    cfg.feedPort = 9001;
   }
 
   // CLI args override config file values
@@ -203,7 +215,7 @@ int main(int argc, char* argv[]) {
   // Ensure shutdown steps run even on natural exit
   shutdown.stop();
 
-  g_shutdown = nullptr;
+  g_shutdown.store(nullptr, std::memory_order_release);
   logger().log(LogLevel::Info, "stopped", {});
   return EXIT_SUCCESS;
 }

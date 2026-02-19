@@ -25,7 +25,14 @@ void SymbolSplit::onValue(const SymbolValue& sv) {
     // Double-check under exclusive lock
     auto [it, inserted] = children_.emplace(sv.symbol, nullptr);
     if (inserted) {
-      it->second = makeChild_(sv.symbol);
+      try {
+        it->second = makeChild_(sv.symbol);
+      } catch (...) {
+        // If makeChild_ throws, remove the nullptr entry so the symbol
+        // can be retried on the next call rather than being permanently null.
+        children_.erase(it);
+        throw;
+      }
       if (!it->second) {
         children_.erase(it);
         return;

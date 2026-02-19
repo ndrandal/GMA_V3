@@ -105,6 +105,7 @@ void WsBridge::handleSubscribe(const std::string& connId, const rapidjson::Docum
           it->second->shutdown();
         }
         connSubs[reqId] = built.head;
+        chains_[connId][reqId] = std::move(built.keepAlive);
       }
 
       rapidjson::StringBuffer sb;
@@ -150,6 +151,12 @@ void WsBridge::handleCancel(const std::string& connId, const rapidjson::Document
           cit->second.erase(rit);
         }
       }
+      // Release keepAlive chain for this subscription
+      auto chit = chains_.find(connId);
+      if (chit != chains_.end()) {
+        chit->second.erase(reqId);
+        if (chit->second.empty()) chains_.erase(chit);
+      }
     }
     if (head) head->shutdown();
 
@@ -173,11 +180,14 @@ void WsBridge::onClose(const std::string& connId) {
       subs = std::move(it->second);
       active_.erase(it);
     }
+    chains_.erase(connId);
   }
 
   // Shutdown all active subscriptions for this connection
   for (auto& [id, node] : subs) {
-    if (node) node->shutdown();
+    if (node) {
+      try { node->shutdown(); } catch (...) {}
+    }
   }
 
   gma::util::logger().log(gma::util::LogLevel::Info,

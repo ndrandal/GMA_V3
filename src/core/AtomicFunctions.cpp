@@ -9,7 +9,7 @@
 
 namespace gma {
 
-static double computeMedian(const SymbolHistory& prices) {
+static double computeMedian(const std::vector<TickEntry>& prices) {
     if (prices.empty()) return 0.0;
     std::vector<double> vals;
     vals.reserve(prices.size());
@@ -37,12 +37,22 @@ static double emaOverSeries(const std::vector<double>& series, size_t period) {
 
 void computeAllAtomicValues(
     const std::string& symbol,
-    const SymbolHistory& hist,
+    const std::vector<TickEntry>& hist,
     AtomicStore& store,
     const util::Config& cfg
 ) {
     const size_t n = hist.size();
     if (n == 0) return;
+
+    // Validate all TA period config values — a negative value cast to size_t
+    // wraps to a huge number, causing out-of-bounds reads.  A zero period
+    // causes divide-by-zero in SMA/EMA.  Skip the entire computation for
+    // obviously broken configs rather than producing garbage.
+    if (cfg.taBBands_n <= 0 || cfg.taRSI <= 0 ||
+        cfg.taMACD_fast <= 0 || cfg.taMACD_slow <= 0 || cfg.taMACD_signal <= 0 ||
+        cfg.taMomentum <= 0 || cfg.taATR <= 0 || cfg.taVolAvg <= 0) {
+      return;
+    }
 
     // Accumulate all results locally, then write via a single setBatch call.
     std::vector<std::pair<std::string, ArgType>> results;
@@ -105,14 +115,16 @@ void computeAllAtomicValues(
     double smaBB = sma(bbandsN);
     const bool haveBB = (n >= bbandsN);
 
-    // SMA for each configured period
+    // SMA for each configured period (skip invalid entries)
     for (int period : cfg.taSMA) {
+        if (period <= 0) continue;
         double val = sma(static_cast<size_t>(period));
         results.emplace_back("sma_" + std::to_string(period), val);
     }
 
-    // EMA for each configured period
+    // EMA for each configured period (skip invalid entries)
     for (int period : cfg.taEMA) {
+        if (period <= 0) continue;
         results.emplace_back("ema_" + std::to_string(period), ema(static_cast<size_t>(period)));
     }
 
@@ -153,12 +165,18 @@ void computeAllAtomicValues(
             }
         }
 
-        double macdLine = macdSeries.back();
-        results.emplace_back("macd_line", macdLine);
+        if (!macdSeries.empty()) {
+            double macdLine = macdSeries.back();
+            results.emplace_back("macd_line", macdLine);
 
-        double signal = emaOverSeries(macdSeries, macdSig);
-        results.emplace_back("macd_signal", signal);
-        results.emplace_back("macd_histogram", macdLine - signal);
+            double signal = emaOverSeries(macdSeries, macdSig);
+            results.emplace_back("macd_signal", signal);
+            results.emplace_back("macd_histogram", macdLine - signal);
+        } else {
+            results.emplace_back("macd_line", 0.0);
+            results.emplace_back("macd_signal", 0.0);
+            results.emplace_back("macd_histogram", 0.0);
+        }
     } else {
         double macdLine = ema(macdFast) - ema(macdSlow);
         results.emplace_back("macd_line", macdLine);

@@ -20,6 +20,10 @@ Listener::Listener(std::string symbol,
 
 void Listener::start() {
   // Must be called after construction when owned by a shared_ptr.
+  bool expected = false;
+  if (!started_.compare_exchange_strong(expected, true))
+    return; // already started
+
   if (dispatcher_) {
     dispatcher_->registerListener(symbol_, field_, shared_from_this());
   }
@@ -28,7 +32,11 @@ void Listener::start() {
 void Listener::onValue(const gma::SymbolValue& sv) {
   if (stopping_.load(std::memory_order_acquire)) return;
 
-  auto down = downstream_.lock();
+  std::shared_ptr<INode> down;
+  {
+    std::lock_guard<std::mutex> lk(downMx_);
+    down = downstream_.lock();
+  }
   if (!down) return;
 
   if (pool_) {
@@ -41,8 +49,11 @@ void Listener::onValue(const gma::SymbolValue& sv) {
 }
 
 void Listener::shutdown() noexcept {
+  bool expected = false;
+  if (!stopping_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+    return; // already shutting down
+
   try {
-    stopping_.store(true, std::memory_order_release);
     if (dispatcher_) {
       dispatcher_->unregisterListener(symbol_, field_, shared_from_this());
     }
@@ -55,5 +66,8 @@ void Listener::shutdown() noexcept {
                             "Listener shutdown unknown error",
                             { {"symbol", symbol_} });
   }
-  downstream_.reset();
+  {
+    std::lock_guard<std::mutex> lk(downMx_);
+    downstream_.reset();
+  }
 }
