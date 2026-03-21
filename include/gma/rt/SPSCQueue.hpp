@@ -50,7 +50,7 @@ public:
   }
 
   bool empty() const { return head_.load(std::memory_order_acquire) == tail_.load(std::memory_order_acquire); }
-  bool full()  const { size_t n = (head_.load() + 1) % cap_; return n == tail_.load(); }
+  bool full()  const { size_t n = (head_.load(std::memory_order_relaxed) + 1) % cap_; return n == tail_.load(std::memory_order_acquire); }
   size_t cap() const { return cap_; }
 
   // Drop one (oldest); use for backpressure strategy.

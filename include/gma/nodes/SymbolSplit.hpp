@@ -18,6 +18,7 @@ public:
   void shutdown() noexcept override;
 
 private:
+  static constexpr std::size_t MAX_CHILDREN = 10000;
   mutable std::shared_mutex mx_;
   Factory makeChild_;
   std::unordered_map<std::string, std::shared_ptr<INode>> children_;

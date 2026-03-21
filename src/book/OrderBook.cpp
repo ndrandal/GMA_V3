@@ -1,4 +1,5 @@
 #include "gma/book/OrderBook.hpp"
+#include "gma/util/Logger.hpp"
 #include <algorithm>
 #include <cassert>
 #include <sstream>
@@ -316,7 +317,14 @@ bool OrderBook::updateImpl(const OrderKey& key,
     const uint64_t tgtSize  = newSize.has_value() ? *newSize  : oldSize;
 
     if (tgtSize == 0) {
-        if (lvl->totalSize >= oldSize) lvl->totalSize -= oldSize; else lvl->totalSize = 0;
+        if (lvl->totalSize >= oldSize) lvl->totalSize -= oldSize;
+        else {
+            gma::util::logger().log(gma::util::LogLevel::Error,
+                "OrderBook: totalSize underflow detected",
+                {{"oldSize", std::to_string(oldSize)},
+                 {"totalSize", std::to_string(lvl->totalSize)}});
+            lvl->totalSize = 0;
+        }
         lvl->orders.erase(loc.it);
         eraseLevelIfEmpty(loc.side, oldPrice);
         byId_.erase(it);
@@ -337,7 +345,14 @@ bool OrderBook::updateImpl(const OrderKey& key,
     moved.price = tgtPrice;
     moved.size  = tgtSize;
 
-    if (lvl->totalSize >= oldSize) lvl->totalSize -= oldSize; else lvl->totalSize = 0;
+    if (lvl->totalSize >= oldSize) lvl->totalSize -= oldSize;
+    else {
+        gma::util::logger().log(gma::util::LogLevel::Error,
+            "OrderBook: totalSize underflow detected",
+            {{"oldSize", std::to_string(oldSize)},
+             {"totalSize", std::to_string(lvl->totalSize)}});
+        lvl->totalSize = 0;
+    }
     lvl->orders.erase(loc.it);
     eraseLevelIfEmpty(loc.side, oldPrice);
 

@@ -25,6 +25,9 @@
 #include "gma/ta/AtomicNames.hpp"
 #include "gma/AtomicFunctions.hpp"
 
+// -------- WS Feed Client --------
+#include "gma/ws/WsFeedClient.hpp"
+
 // -------- OB --------
 #include "gma/atomic/AtomicProviderRegistry.hpp"
 #include "gma/ob/FunctionalSnapshotSource.hpp"
@@ -191,10 +194,38 @@ int main(int argc, char* argv[]) {
   gma::FeedServer feed(ioc, dispatcher.get(), obManager.get(), feedPort);
   feed.run();
 
+  // 8b) External WebSocket feed client (optional)
+  std::shared_ptr<gma::ws::WsFeedClient> feedClient;
+
+  // feedUrl from config, or from CLI env: GMA_FEED_URL
+  std::string feedUrl = cfg.feedUrl;
+  if (feedUrl.empty()) {
+    const char* envUrl = std::getenv("GMA_FEED_URL");
+    if (envUrl && envUrl[0]) feedUrl = envUrl;
+  }
+
+  if (!feedUrl.empty()) {
+    try {
+      feedClient = std::make_shared<gma::ws::WsFeedClient>(
+          ioc, dispatcher.get(), obManager.get(),
+          feedUrl, cfg.feedSymbols);
+      feedClient->start();
+
+      logger().log(LogLevel::Info, "feed_client.started",
+                   {{"url", feedUrl}});
+    } catch (const std::exception& ex) {
+      logger().log(LogLevel::Error, "feed_client.start_failed",
+                   {{"err", ex.what()}, {"url", feedUrl}});
+    }
+  }
+
   // 9) Shutdown sequencing — all captured objects are still alive when shutdown runs
   shutdown.registerStep("ws-stop-accept",    5,  [&ws]{ try { ws.stopAccept(); } catch (...) {} });
   shutdown.registerStep("ws-close-sessions", 40, [&ws]{ try { ws.closeAll(); } catch (...) {} });
   shutdown.registerStep("feed-stop",         55, [&feed]{ try { feed.stop(); } catch (...) {} });
+  if (feedClient) {
+    shutdown.registerStep("feed-ws-stop",    56, [feedClient]{ try { feedClient->stop(); } catch (...) {} });
+  }
   shutdown.registerStep("asio-stop",         60, [&ioc]{ try { ioc.stop(); } catch (...) {} });
 
   logger().log(

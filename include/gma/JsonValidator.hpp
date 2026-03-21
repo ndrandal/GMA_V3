@@ -26,8 +26,9 @@ public:
     static void validateTree(const rapidjson::Value& v, int depth = 0);
 
 private:
-    static constexpr int MAX_TREE_DEPTH = 32;
-    static constexpr int MAX_ARRAY_SIZE = 64;
+    static constexpr int    MAX_TREE_DEPTH  = 32;
+    static constexpr int    MAX_ARRAY_SIZE  = 64;
+    static constexpr size_t MAX_STRING_LEN  = 4096;
 };
 
 } // namespace gma

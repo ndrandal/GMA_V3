@@ -39,8 +39,9 @@ public:
     if (intervalSeconds == 0) intervalSeconds = 1;
 
     std::lock_guard<std::mutex> lk(thrMu_);
-    if (running_.load(std::memory_order_acquire)) return; // already running
-    running_.store(true, std::memory_order_release);
+    bool expected = false;
+    if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+      return; // already running
 
     thr_ = std::thread([this, intervalSeconds]() { reporterLoop(intervalSeconds); });
   }
@@ -54,8 +55,8 @@ public:
       {
         std::lock_guard<std::mutex> cvLk(cvMu_);
         running_.store(false, std::memory_order_release);
+        cv_.notify_all();
       }
-      cv_.notify_all();
       if (thr_.joinable()) {
         toJoin = std::move(thr_);
       }

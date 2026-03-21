@@ -5,6 +5,8 @@
 #include <unordered_map>
 #include <mutex>
 
+#include <rapidjson/document.h>
+
 #include "gma/MarketDispatcher.hpp"
 #include "gma/AtomicStore.hpp"
 #include "gma/rt/ThreadPool.hpp"
@@ -45,6 +47,8 @@ private:
   std::shared_ptr<gma::MarketDispatcher> dispatcher_;
   std::shared_ptr<gma::AtomicStore>      store_;
   gma::rt::ThreadPool*                    pool_ = nullptr;
+
+  static constexpr std::size_t MAX_SUBS_PER_CONN = 100;
 };
 
 } // namespace gma::ws

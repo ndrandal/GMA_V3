@@ -62,7 +62,7 @@ private:
   std::vector<Step> steps_;
   std::atomic<bool> stopping_{false};
   std::mutex mx_;
-  bool sorted_{false};
+  bool sorted_{false};  // protected by mx_, not atomic — always accessed under lock
 };
 
 } // namespace gma::rt

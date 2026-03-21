@@ -19,7 +19,11 @@ double OrderBookManager::getTickSize(const std::string& symbol) const {
     return (it == tickSize_.end()) ? kDefaultTick : it->second;
 }
 int64_t OrderBookManager::quantizeTicks(double px, double tick) {
-    double q = px / tick; return std::llround(q + 1e-12);
+    if (tick <= 0.0) return 0;
+    double q = px / tick;
+    constexpr double kMax = static_cast<double>(std::numeric_limits<int64_t>::max());
+    if (q > kMax || q < -kMax) return 0;
+    return std::llround(q + 1e-12);
 }
 Price OrderBookManager::toTicks(const std::string& symbol, double px) const {
     const double t = getTickSize(symbol);

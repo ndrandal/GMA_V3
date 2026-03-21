@@ -2,6 +2,7 @@
 
 #include <boost/asio/strand.hpp>
 #include <boost/asio/buffer.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/beast/core.hpp>
 
 #include <deque>
@@ -31,12 +32,14 @@ public:
     , dispatcher_(dispatcher)
     , obManager_(obManager)
     , owner_(owner)
+    , idleTimer_(socket_.get_executor())
   {}
 
-  void start() { doRead(); }
+  void start() { resetIdleTimer(); doRead(); }
 
   void close() {
     boost::system::error_code ec;
+    idleTimer_.cancel();
     socket_.shutdown(tcp::socket::shutdown_both, ec);
     socket_.close(ec);
     // Remove ourselves from the owner's session set.
@@ -63,6 +66,8 @@ private:
       return;
     }
 
+    resetIdleTimer();
+
     // Very simple framing: treat incoming as newline-delimited text messages
     pending_.insert(pending_.end(), buf_.data(), buf_.data() + n);
 
@@ -80,7 +85,11 @@ private:
     std::size_t start = 0;
     for (std::size_t i = 0; i < pending_.size(); ++i) {
       if (pending_[i] == '\n') {
-        const std::string line(pending_.data() + start, pending_.data() + i);
+        std::size_t lineEnd = i;
+        if (lineEnd > start && pending_[lineEnd - 1] == '\r') {
+          --lineEnd;
+        }
+        const std::string line(pending_.data() + start, pending_.data() + lineEnd);
         handleLine(line);
         start = i + 1;
       }
@@ -295,11 +304,27 @@ private:
     }
   }
 
+  static constexpr std::chrono::minutes IDLE_TIMEOUT{5};
+
+  void resetIdleTimer() {
+    auto self = shared_from_this();
+    idleTimer_.expires_after(IDLE_TIMEOUT);
+    idleTimer_.async_wait([self](boost::system::error_code ec) {
+      if (!ec) {
+        gma::util::logger().log(gma::util::LogLevel::Warn,
+                                "feed.session.idle_timeout");
+        GMA_METRIC_HIT("feed.idle_timeout");
+        self->close();
+      }
+    });
+  }
+
 private:
   tcp::socket        socket_;
   MarketDispatcher*  dispatcher_{nullptr};  // not owned
   OrderBookManager*  obManager_{nullptr};   // not owned
   FeedServer*        owner_{nullptr};       // not owned
+  boost::asio::steady_timer idleTimer_;
 
   std::array<char, 8 * 1024> buf_{};
   std::vector<char>          pending_;

@@ -1,4 +1,5 @@
 #include "gma/nodes/Interval.hpp"
+#include "gma/util/Logger.hpp"
 
 namespace gma {
 
@@ -48,13 +49,19 @@ void Interval::timerLoop() {
     if (stopping_.load(std::memory_order_acquire))
       break;
 
-    auto c = child_.lock();
-    if (!c) break; // child gone, stop ticking
+    if (!child_) break; // child gone, stop ticking
 
-    if (pool_) {
-      pool_->post([c] { c->onValue(SymbolValue{"", 0.0}); });
-    } else {
-      c->onValue(SymbolValue{"", 0.0});
+    try {
+      if (pool_) {
+        auto c = child_;
+        pool_->post([c] { c->onValue(SymbolValue{"", 0.0}); });
+      } else {
+        child_->onValue(SymbolValue{"", 0.0});
+      }
+    } catch (const std::exception& ex) {
+      gma::util::logger().log(gma::util::LogLevel::Error,
+        "Interval::timerLoop: onValue exception",
+        {{"err", ex.what()}});
     }
   }
 }

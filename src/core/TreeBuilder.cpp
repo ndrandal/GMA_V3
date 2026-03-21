@@ -376,8 +376,8 @@ std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
     const auto& stages = v["stages"];
     if (stages.Size() == 0)
       throw std::runtime_error("Chain: 'stages' must not be empty");
-    for (int i = static_cast<int>(stages.Size()) - 1; i >= 0; --i) {
-      curDown = buildOne(stages[static_cast<rapidjson::SizeType>(i)],
+    for (size_t i = stages.Size(); i > 0; --i) {
+      curDown = buildOne(stages[static_cast<rapidjson::SizeType>(i - 1)],
                          defaultSymbol,
                          deps,
                          curDown);
@@ -451,6 +451,9 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   if (field.empty())
     throw std::runtime_error("buildForRequest: 'field' must not be empty");
 
+  if (!terminal)
+    throw std::runtime_error("buildForRequest: terminal node cannot be null");
+
   // Collect every node so callers can keep them alive (all use weak_ptr downstream).
   std::vector<std::shared_ptr<gma::INode>> keepAlive;
   keepAlive.push_back(terminal);
@@ -470,8 +473,8 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
     if (rq.HasMember(k) && rq[k].IsArray()) {
       auto curDown = terminal;
       const auto& arr = rq[k];
-      for (int i = static_cast<int>(arr.Size()) - 1; i >= 0; --i) {
-        curDown = buildOne(arr[static_cast<rapidjson::SizeType>(i)],
+      for (size_t i = arr.Size(); i > 0; --i) {
+        curDown = buildOne(arr[static_cast<rapidjson::SizeType>(i - 1)],
                            symbol,
                            deps,
                            curDown);

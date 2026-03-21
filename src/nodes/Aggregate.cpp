@@ -1,4 +1,5 @@
 #include "gma/nodes/Aggregate.hpp"
+#include "gma/util/Logger.hpp"
 #include <stdexcept>
 
 namespace gma {
@@ -11,6 +12,8 @@ Aggregate::Aggregate(std::size_t arity, std::shared_ptr<INode> parent)
 }
 
 void Aggregate::onValue(const SymbolValue& sv) {
+  // Early-out on stopping_ is an optimization; correctness is guaranteed by
+  // the mutex: if shutdown() races, the lock ensures we see parent_==nullptr.
   if (stopping_.load(std::memory_order_acquire)) return;
 
   std::vector<ArgType> batch;
@@ -19,6 +22,9 @@ void Aggregate::onValue(const SymbolValue& sv) {
     std::lock_guard<std::mutex> lk(mx_);
     // Cap distinct symbol count to prevent unbounded map growth.
     if (buf_.find(sv.symbol) == buf_.end() && buf_.size() >= MAX_SYMBOLS) {
+      gma::util::logger().log(gma::util::LogLevel::Warn,
+        "Aggregate: max symbols reached, dropping",
+        {{"symbol", sv.symbol}});
       return;
     }
     auto& sb = buf_[sv.symbol];

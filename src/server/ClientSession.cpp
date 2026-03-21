@@ -9,6 +9,7 @@
 #include "gma/nodes/Responder.hpp"
 #include "gma/util/Logger.hpp"
 #include "gma/util/Metrics.hpp"
+#include "gma/util/JsonUtil.hpp"
 
 #include <boost/beast/core/buffers_to_string.hpp>
 #include <boost/beast/websocket.hpp>
@@ -40,49 +41,6 @@ namespace gma {
 namespace websocket = boost::beast::websocket;
 namespace beast     = boost::beast;
 namespace http      = boost::beast::http;
-
-// ------------------------------
-// ArgType -> JSON helper writers
-// ------------------------------
-static void writeArgTypeJson(::rapidjson::Writer<::rapidjson::StringBuffer>& w,
-                             const gma::ArgType& v);
-
-static void writeArgValueJson(::rapidjson::Writer<::rapidjson::StringBuffer>& w,
-                              const gma::ArgValue& av) {
-  writeArgTypeJson(w, av.value);
-}
-
-static void writeArgTypeJson(::rapidjson::Writer<::rapidjson::StringBuffer>& w,
-                             const gma::ArgType& v) {
-  std::visit([&](auto&& x) {
-    using T = std::decay_t<decltype(x)>;
-
-    if constexpr (std::is_same_v<T, bool>) {
-      w.Bool(x);
-    } else if constexpr (std::is_same_v<T, int>) {
-      w.Int(x);
-    } else if constexpr (std::is_same_v<T, double>) {
-      w.Double(x);
-    } else if constexpr (std::is_same_v<T, std::string>) {
-      w.String(x.c_str());
-    } else if constexpr (std::is_same_v<T, std::vector<int>>) {
-      w.StartArray();
-      for (int n : x) w.Int(n);
-      w.EndArray();
-    } else if constexpr (std::is_same_v<T, std::vector<double>>) {
-      w.StartArray();
-      for (double d : x) w.Double(d);
-      w.EndArray();
-    } else if constexpr (std::is_same_v<T, std::vector<gma::ArgValue>>) {
-      w.StartArray();
-      for (const auto& it : x) writeArgValueJson(w, it);
-      w.EndArray();
-    } else {
-      // Fallback: unknown variant alternative
-      w.Null();
-    }
-  }, v);
-}
 
 // ------------------------------
 // Construction / lifecycle
@@ -228,6 +186,7 @@ void ClientSession::close() {
 
           if (self->server_ && self->sessionId_ != 0) {
             self->server_->unregisterSession(self->sessionId_);
+            self->sessionId_ = 0;  // prevent double-unregister
           }
         }
       )
@@ -428,21 +387,26 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     //   ClientSession → chains_ → Responder → sendFn → ClientSession
     auto weak = weak_from_this();
     auto sendFn = [weak](int reqKey, const gma::SymbolValue& sv) {
-      auto self = weak.lock();
-      if (!self) return;
+      try {
+        auto self = weak.lock();
+        if (!self) return;
 
-      ::rapidjson::StringBuffer sb;
-      ::rapidjson::Writer<::rapidjson::StringBuffer> w(sb);
+        ::rapidjson::StringBuffer sb;
+        ::rapidjson::Writer<::rapidjson::StringBuffer> w(sb);
 
-      w.StartObject();
-      w.Key("type");   w.String("update");
-      w.Key("key");    w.Int(reqKey);
-      w.Key("symbol"); w.String(sv.symbol.c_str());
-      w.Key("value");  writeArgTypeJson(w, sv.value);
-      w.EndObject();
+        w.StartObject();
+        w.Key("type");   w.String("update");
+        w.Key("key");    w.Int(reqKey);
+        w.Key("symbol"); w.String(sv.symbol.c_str());
+        w.Key("value");  gma::util::writeArgTypeJson(w, sv.value);
+        w.EndObject();
 
-      GMA_METRIC_HIT("ws.msg_out");
-      self->sendText(sb.GetString());
+        GMA_METRIC_HIT("ws.msg_out");
+        self->sendText(sb.GetString());
+      } catch (const std::exception& ex) {
+        gma::util::logger().log(gma::util::LogLevel::Error,
+          "ws.sendFn exception", {{"err", ex.what()}, {"key", std::to_string(reqKey)}});
+      }
     };
 
     std::shared_ptr<gma::INode> terminal =
@@ -499,6 +463,19 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     deps.dispatcher = dispatcher_;
 
     try {
+      // Check subscription limit BEFORE building the pipeline to avoid
+      // wasting resources and leaking registered listeners.
+      {
+        std::lock_guard<std::mutex> lk(reqMu_);
+        auto it = active_.find(key);
+        if (it == active_.end() && active_.size() >= MAX_SUBSCRIPTIONS) {
+          sendError("subscribe", "max subscriptions reached");
+          continue;
+        }
+      }
+
+      // Build pipeline OUTSIDE the lock — buildForRequest may be expensive
+      // and should not block other subscribe/cancel operations.
       auto built = gma::tree::buildForRequest(rq, deps, terminal);
 
       {
@@ -507,12 +484,6 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
         auto it = active_.find(key);
         if (it != active_.end() && it->second) {
           it->second->shutdown();
-        } else if (active_.size() >= MAX_SUBSCRIPTIONS) {
-          // Shut down the already-started pipeline (Listener registered with
-          // dispatcher) to prevent a leaked subscription.
-          built.head->shutdown();
-          sendError("subscribe", "max subscriptions reached");
-          continue;
         }
         active_[key] = built.head;
         chains_[key] = std::move(built.keepAlive);

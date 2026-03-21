@@ -76,6 +76,9 @@ bool Config::loadFromFile(const std::string& path) {
     std::string key, val;
     if (!parseLineKV(s, key, val)) continue;
 
+    // NOTE: std::atoi returns 0 for non-numeric input. All period values are
+    // guarded by std::max(1, ...) and port/size values have explicit range
+    // checks, so invalid input produces safe defaults rather than UB.
     if      (key == "taMACD_fast")    taMACD_fast    = std::max(1, std::atoi(val.c_str()));
     else if (key == "taMACD_slow")    taMACD_slow    = std::max(1, std::atoi(val.c_str()));
     else if (key == "taBBands_n")     taBBands_n     = std::max(1, std::atoi(val.c_str()));
@@ -92,6 +95,17 @@ bool Config::loadFromFile(const std::string& path) {
     else if (key == "metricsEnabled") { metricsEnabled = (val == "true" || val == "1" || val == "yes"); }
     else if (key == "metricsIntervalSec") { int v = std::atoi(val.c_str()); if (v > 0) metricsIntervalSec = v; }
     else if (key == "logLevel") { logLevel = val; }
+    else if (key == "feedUrl") { feedUrl = val; }
+    else if (key == "feedSymbols") {
+      feedSymbols.clear();
+      std::istringstream ss(val);
+      std::string tok;
+      while (std::getline(ss, tok, ',')) {
+        auto t = trim(tok);
+        if (!t.empty()) feedSymbols.push_back(t);
+      }
+      if (feedSymbols.empty()) feedSymbols = {"*"};
+    }
     else if (key == "taSMA") {
       taSMA.clear();
       std::istringstream ss(val);

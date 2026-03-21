@@ -29,6 +29,14 @@ endif()
 # ---- Threads
 find_package(Threads REQUIRED)
 
+# ---- OpenSSL (optional — enables wss:// in WsFeedClient)
+find_package(OpenSSL QUIET)
+if (OpenSSL_FOUND)
+  message(STATUS "OpenSSL found: ${OPENSSL_VERSION} — wss:// feed support enabled")
+else()
+  message(STATUS "OpenSSL not found — wss:// feed support disabled (ws:// still works)")
+endif()
+
 # =======================
 # Boost (prefer normal install)
 # =======================
@@ -122,6 +130,11 @@ else()
 endif()
 
 target_link_libraries(gma PUBLIC Threads::Threads RapidJSON::rapidjson)
+
+if (OpenSSL_FOUND)
+  target_link_libraries(gma PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+  target_compile_definitions(gma PUBLIC GMA_HAS_SSL=1)
+endif()
 
 # Warnings
 if (MSVC)

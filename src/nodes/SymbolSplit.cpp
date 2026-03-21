@@ -25,6 +25,13 @@ void SymbolSplit::onValue(const SymbolValue& sv) {
     // Double-check under exclusive lock
     auto [it, inserted] = children_.emplace(sv.symbol, nullptr);
     if (inserted) {
+      if (children_.size() > MAX_CHILDREN) {
+        children_.erase(it);
+        gma::util::logger().log(gma::util::LogLevel::Warn,
+          "SymbolSplit: max children reached",
+          {{"symbol", sv.symbol}});
+        return;
+      }
       try {
         it->second = makeChild_(sv.symbol);
       } catch (...) {

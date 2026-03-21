@@ -32,7 +32,7 @@ private:
   void timerLoop();
 
   const std::chrono::milliseconds period_;
-  std::weak_ptr<INode> child_;
+  std::shared_ptr<INode> child_;
   gma::rt::ThreadPool* pool_;
 
   std::atomic<bool> stopping_{false};

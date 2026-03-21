@@ -1,5 +1,6 @@
 #include "gma/rt/ThreadPool.hpp"
 #include <cassert>
+#include "gma/util/Logger.hpp"
 
 namespace gma::rt {
 
@@ -52,9 +53,17 @@ void ThreadPool::workerLoop() {
       cv_.wait(lk, [this]{ return stopping_ || !q_.empty(); });
       if (stopping_ && q_.empty()) return;
       fn = std::move(q_.front()); q_.pop();
-      inFlight_.fetch_add(1, std::memory_order_relaxed);
+      inFlight_.fetch_add(1, std::memory_order_acq_rel);
     }
-    try { fn(); } catch (...) {}
+    try {
+      fn();
+    } catch (const std::exception& e) {
+      gma::util::logger().log(gma::util::LogLevel::Error,
+        "ThreadPool: task exception", {{"err", e.what()}});
+    } catch (...) {
+      gma::util::logger().log(gma::util::LogLevel::Error,
+        "ThreadPool: unknown task exception");
+    }
     inFlight_.fetch_sub(1, std::memory_order_release);
     idleCv_.notify_all();
   }

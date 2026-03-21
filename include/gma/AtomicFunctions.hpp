@@ -17,8 +17,10 @@ namespace gma {
  * Accepts a contiguous vector for optimal cache locality during TA computation.
  * TA periods are read from cfg. Keys written depend on configured periods,
  * e.g. "sma_5", "sma_20" for cfg.taSMA={5,20}.
+ *
+ * Returns the computed (key, value) pairs so callers can notify listeners.
  */
-void computeAllAtomicValues(
+std::vector<std::pair<std::string, ArgType>> computeAllAtomicValues(
     const std::string& symbol,
     const std::vector<TickEntry>& hist,
     AtomicStore& store,

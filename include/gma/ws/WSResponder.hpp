@@ -1,5 +1,7 @@
 #pragma once
+#include <atomic>
 #include <functional>
+#include <mutex>
 #include <string>
 #include "gma/nodes/INode.hpp"
 
@@ -14,13 +16,12 @@ public:
   : reqId_(std::move(reqId)), send_(std::move(send)) {}
 
   void onValue(const SymbolValue& v) override;
-
-  void shutdown() noexcept override {
-    // nothing to tear down; keep for symmetry
-  }
+  void shutdown() noexcept override;
 
 private:
   std::string reqId_;
+  std::atomic<bool> stopped_{false};
+  std::mutex mx_;
   SendFn send_;
 };
 

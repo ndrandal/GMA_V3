@@ -1,5 +1,6 @@
 #include "gma/ws/WsBridge.hpp"
 #include "gma/TreeBuilder.hpp"
+#include "gma/JsonValidator.hpp"
 #include "gma/ws/WSResponder.hpp"
 #include "gma/util/Logger.hpp"
 
@@ -74,10 +75,52 @@ void WsBridge::handleSubscribe(const std::string& connId, const rapidjson::Docum
     const std::string symbol = r["symbol"].GetString();
     const std::string field  = r["field"].GetString();
 
-    // WSResponder serializes SymbolValue to JSON internally; its SendFn
-    // just needs to deliver the final JSON string to the connection.
-    auto sendCb = [this, connId](const std::string& jsonText) {
-      sendTo(connId, jsonText);
+    // Validate symbol/field length to prevent absurdly large map keys.
+    static constexpr std::size_t MAX_SYMBOL_LEN = 64;
+    static constexpr std::size_t MAX_FIELD_LEN  = 128;
+    if (symbol.empty() || symbol.size() > MAX_SYMBOL_LEN) {
+      sendTo(connId, R"json({"type":"error","message":"invalid 'symbol' (empty or too long)"})json");
+      continue;
+    }
+    if (field.empty() || field.size() > MAX_FIELD_LEN) {
+      sendTo(connId, R"json({"type":"error","message":"invalid 'field' (empty or too long)"})json");
+      continue;
+    }
+
+    // Subscription limit check (before building to avoid wasting resources).
+    {
+      bool overLimit = false;
+      {
+        std::lock_guard<std::mutex> lk(mx_);
+        auto cit = active_.find(connId);
+        if (cit != active_.end() &&
+            cit->second.find(reqId) == cit->second.end() &&
+            cit->second.size() >= MAX_SUBS_PER_CONN) {
+          overLimit = true;
+        }
+      }
+      if (overLimit) {
+        sendTo(connId, R"({"type":"error","message":"max subscriptions reached"})");
+        continue;
+      }
+    }
+
+    // Get the connection's send function directly — avoids capturing raw
+    // `this` in the callback, which would be a use-after-free risk if
+    // WsBridge is destroyed while in-flight pool tasks still hold a
+    // WSResponder that references the callback.
+    SendFn connSend;
+    {
+      std::lock_guard<std::mutex> lk(mx_);
+      auto cit = connections_.find(connId);
+      if (cit == connections_.end() || !cit->second) continue;
+      connSend = cit->second;
+    }
+
+    auto sendCb = [connSend](const std::string& jsonText) {
+      try {
+        connSend(jsonText);
+      } catch (...) {}
     };
 
     auto terminal = std::make_shared<gma::ws::WSResponder>(reqId, sendCb);
@@ -88,6 +131,49 @@ void WsBridge::handleSubscribe(const std::string& connId, const rapidjson::Docum
     auto& a = rq.GetAllocator();
     rq.AddMember("symbol", rapidjson::Value(symbol.c_str(), a), a);
     rq.AddMember("field",  rapidjson::Value(field.c_str(), a), a);
+
+    // Pass through pipeline/stages/node so the full tree can be built.
+    if (r.HasMember("pipeline") && r["pipeline"].IsArray()) {
+      rapidjson::Value pipe(rapidjson::kArrayType);
+      pipe.CopyFrom(r["pipeline"], a);
+      rq.AddMember("pipeline", pipe, a);
+    }
+    if (r.HasMember("stages") && r["stages"].IsArray()) {
+      rapidjson::Value stages(rapidjson::kArrayType);
+      stages.CopyFrom(r["stages"], a);
+      rq.AddMember("stages", stages, a);
+    }
+    if (r.HasMember("node") && r["node"].IsObject()) {
+      rapidjson::Value node(rapidjson::kObjectType);
+      node.CopyFrom(r["node"], a);
+      rq.AddMember("node", node, a);
+    }
+
+    // Validate pipeline/stages/node sub-trees before building.
+    try {
+      if (r.HasMember("pipeline") && r["pipeline"].IsArray()) {
+        for (const auto& elem : r["pipeline"].GetArray()) {
+          if (elem.IsObject()) gma::JsonValidator::validateTree(elem);
+        }
+      }
+      if (r.HasMember("stages") && r["stages"].IsArray()) {
+        for (const auto& elem : r["stages"].GetArray()) {
+          if (elem.IsObject()) gma::JsonValidator::validateTree(elem);
+        }
+      }
+      if (r.HasMember("node") && r["node"].IsObject()) {
+        gma::JsonValidator::validateTree(r["node"]);
+      }
+    } catch (const std::exception& ex) {
+      rapidjson::StringBuffer sb;
+      rapidjson::Writer<rapidjson::StringBuffer> w(sb);
+      w.StartObject();
+      w.Key("type");    w.String("error");
+      w.Key("message"); w.String(ex.what());
+      w.EndObject();
+      sendTo(connId, sb.GetString());
+      continue;
+    }
 
     gma::tree::Deps deps;
     deps.store      = store_.get();
@@ -100,12 +186,22 @@ void WsBridge::handleSubscribe(const std::string& connId, const rapidjson::Docum
       {
         std::lock_guard<std::mutex> lk(mx_);
         auto& connSubs = active_[connId];
+
+        // Shut down any existing subscription with the same reqId.
         auto it = connSubs.find(reqId);
         if (it != connSubs.end() && it->second) {
           it->second->shutdown();
         }
+        auto& connChains = chains_[connId];
+        auto cit = connChains.find(reqId);
+        if (cit != connChains.end()) {
+          for (auto& node : cit->second) {
+            if (node) { try { node->shutdown(); } catch (...) {} }
+          }
+        }
+
         connSubs[reqId] = built.head;
-        chains_[connId][reqId] = std::move(built.keepAlive);
+        connChains[reqId] = std::move(built.keepAlive);
       }
 
       rapidjson::StringBuffer sb;
@@ -117,6 +213,7 @@ void WsBridge::handleSubscribe(const std::string& connId, const rapidjson::Docum
       sendTo(connId, sb.GetString());
 
     } catch (const std::exception& ex) {
+      try { terminal->shutdown(); } catch (...) {}
       rapidjson::StringBuffer sb;
       rapidjson::Writer<rapidjson::StringBuffer> w(sb);
       w.StartObject();
@@ -141,6 +238,7 @@ void WsBridge::handleCancel(const std::string& connId, const rapidjson::Document
     else continue;
 
     std::shared_ptr<gma::INode> head;
+    std::vector<std::shared_ptr<gma::INode>> chainVec;
     {
       std::lock_guard<std::mutex> lk(mx_);
       auto cit = active_.find(connId);
@@ -151,14 +249,26 @@ void WsBridge::handleCancel(const std::string& connId, const rapidjson::Document
           cit->second.erase(rit);
         }
       }
-      // Release keepAlive chain for this subscription
       auto chit = chains_.find(connId);
       if (chit != chains_.end()) {
-        chit->second.erase(reqId);
+        auto kit = chit->second.find(reqId);
+        if (kit != chit->second.end()) {
+          chainVec = std::move(kit->second);
+          chit->second.erase(kit);
+        }
         if (chit->second.empty()) chains_.erase(chit);
       }
     }
+
+    // Shutdown head (Listener) — unregisters from dispatcher.
     if (head) head->shutdown();
+
+    // Shutdown all pipeline nodes (including terminal WSResponder).
+    for (auto& node : chainVec) {
+      if (node) {
+        try { node->shutdown(); } catch (...) {}
+      }
+    }
 
     rapidjson::StringBuffer sb;
     rapidjson::Writer<rapidjson::StringBuffer> w(sb);
@@ -172,6 +282,7 @@ void WsBridge::handleCancel(const std::string& connId, const rapidjson::Document
 
 void WsBridge::onClose(const std::string& connId) {
   std::unordered_map<std::string, std::shared_ptr<gma::INode>> subs;
+  std::unordered_map<std::string, std::vector<std::shared_ptr<gma::INode>>> chainNodes;
   {
     std::lock_guard<std::mutex> lk(mx_);
     connections_.erase(connId);
@@ -180,13 +291,26 @@ void WsBridge::onClose(const std::string& connId) {
       subs = std::move(it->second);
       active_.erase(it);
     }
-    chains_.erase(connId);
+    auto chit = chains_.find(connId);
+    if (chit != chains_.end()) {
+      chainNodes = std::move(chit->second);
+      chains_.erase(chit);
+    }
   }
 
-  // Shutdown all active subscriptions for this connection
+  // Shutdown head nodes (Listeners) — unregisters from dispatcher.
   for (auto& [id, node] : subs) {
     if (node) {
       try { node->shutdown(); } catch (...) {}
+    }
+  }
+
+  // Shutdown all pipeline nodes (including terminal WSResponders).
+  for (auto& [id, chain] : chainNodes) {
+    for (auto& node : chain) {
+      if (node) {
+        try { node->shutdown(); } catch (...) {}
+      }
     }
   }
 

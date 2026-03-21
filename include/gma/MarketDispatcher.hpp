@@ -86,8 +86,12 @@ private:
   gma::rt::ThreadPool* _threadPool;          // for offloading work (not owned)
   AtomicStore* _store;                       // where atomic results are written (not owned)
   util::Config _cfg;                         // TA configuration
+  // Maximum tick entries retained per (symbol, field) pair.
   static constexpr size_t MAX_HISTORY = 1000;
+  // Maximum distinct symbols tracked before rejecting new ones.
   static constexpr size_t MAX_SYMBOLS = 10000;
+  // Maximum distinct fields per symbol in _histories to prevent unbounded growth.
+  static constexpr size_t MAX_FIELDS_PER_SYMBOL = 200;
 };
 
 } // namespace gma

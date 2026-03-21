@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <shared_mutex>
+#include <unordered_set>
 #include <deque>
 
 using namespace gma;
@@ -93,7 +94,11 @@ void MarketDispatcher::onTick(const SymbolTick& tick) {
           _histories.size() >= MAX_SYMBOLS) {
         continue;
       }
-      auto& hist = _histories[tick.symbol][field];
+      auto& symFields = _histories[tick.symbol];
+      if (symFields.find(field) == symFields.end() && symFields.size() >= MAX_FIELDS_PER_SYMBOL) {
+        continue;
+      }
+      auto& hist = symFields[field];
       hist.push_back(raw);
       if (hist.size() > MAX_HISTORY) hist.pop_front();
       histVec.assign(hist.begin(), hist.end());
@@ -161,7 +166,62 @@ void MarketDispatcher::updateSymbolHistory(const std::string& symbol,
   }
 
   // Run the full TA suite — writes results to AtomicStore via setBatch
-  computeAllAtomicValues(symbol, histVec, *_store, _cfg);
+  auto taResults = computeAllAtomicValues(symbol, histVec, *_store, _cfg);
+
+  // Notify listeners registered on computed TA field names (e.g. "sma_5",
+  // "rsi_14"). Skip fields already notified by onTick (raw tick fields) or
+  // by computeAndStoreAtomics (FunctionMap builtins like "mean", "sum").
+  if (taResults.empty()) return;
+
+  // Fields already covered by raw-tick notification or FunctionMap builtins.
+  static const std::unordered_set<std::string> skipFields = {
+    // Raw price/volume fields (notified by onTick's raw-field path)
+    "lastPrice", "openPrice", "highPrice", "lowPrice",
+    "mean", "median", "prevClose", "vwap", "volume", "obv", "volatility_rank",
+    // FunctionMap builtins (notified by computeAndStoreAtomics)
+    "sum", "min", "max", "first", "last", "count", "stddev",
+  };
+
+  std::vector<std::pair<std::string, std::shared_ptr<INode>>> taNotify;
+  {
+    std::shared_lock<std::shared_mutex> lock(_listenerMutex);
+    auto sit = _listeners.find(symbol);
+    if (sit != _listeners.end()) {
+      for (const auto& [key, val] : taResults) {
+        if (skipFields.count(key)) continue;
+        auto fit = sit->second.find(key);
+        if (fit != sit->second.end()) {
+          for (auto& sp : fit->second) {
+            taNotify.emplace_back(key, sp);
+          }
+        }
+      }
+    }
+  }
+
+  for (auto& [key, node] : taNotify) {
+    // Find the value for this key in taResults
+    double v = 0.0;
+    for (const auto& [k, val] : taResults) {
+      if (k == key) {
+        v = std::visit([](auto&& x) -> double {
+          using T = std::decay_t<decltype(x)>;
+          if constexpr (std::is_same_v<T, double>) return x;
+          else if constexpr (std::is_same_v<T, int>) return static_cast<double>(x);
+          else return 0.0;
+        }, val);
+        break;
+      }
+    }
+    SymbolValue out{ symbol, v };
+    if (_threadPool) {
+      _threadPool->post([node, out]() {
+        if (node) node->onValue(out);
+      });
+    } else {
+      if (node) node->onValue(out);
+    }
+  }
 }
 
 void MarketDispatcher::computeAndStoreAtomics(const std::string& symbol,

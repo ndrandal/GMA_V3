@@ -1,6 +1,7 @@
 #include "gma/JsonValidator.hpp"
 #include "gma/util/Logger.hpp"
 
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -24,6 +25,9 @@ void JsonValidator::validateRequest(const rapidjson::Document& doc) {
   const std::string id = doc["id"].GetString();
   if (id.empty()) {
     throw std::runtime_error("Request 'id' must not be empty");
+  }
+  if (id.size() > MAX_STRING_LEN) {
+    throw std::runtime_error("field 'id' exceeds maximum length");
   }
 
   if (!doc.HasMember("tree") || !doc["tree"].IsObject()) {
@@ -53,6 +57,9 @@ void JsonValidator::validateNode(const rapidjson::Value& v) {
   if (type.empty()) {
     throw std::runtime_error("Node 'type' must not be empty");
   }
+  if (type.size() > MAX_STRING_LEN) {
+    throw std::runtime_error("field 'type' exceeds maximum length");
+  }
 
   if (KNOWN_NODE_TYPES.find(type) == KNOWN_NODE_TYPES.end()) {
     throw std::runtime_error("Unknown node type: '" + type + "'");
@@ -67,6 +74,17 @@ void JsonValidator::validateTree(const rapidjson::Value& v, int depth) {
 
   if (!v.IsObject()) {
     throw std::runtime_error("Tree node must be an object");
+  }
+
+  // Check string field lengths
+  const char* stringFields[] = {"type", "symbol", "field", "node", "function", "fn"};
+  for (const char* sf : stringFields) {
+    if (v.HasMember(sf) && v[sf].IsString()) {
+      if (std::strlen(v[sf].GetString()) > MAX_STRING_LEN) {
+        throw std::runtime_error(
+            std::string("field '") + sf + "' exceeds maximum length");
+      }
+    }
   }
 
   // If this node has a "type" field, validate it as a node

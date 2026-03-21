@@ -61,6 +61,13 @@ public:
   // Logging
   std::string logLevel = "info";
 
+  // External WebSocket feed URL (empty = disabled)
+  // e.g. "wss://feed-sim.v3m.xyz/feed" or "ws://localhost:8100/feed"
+  std::string feedUrl;
+
+  // Symbols to subscribe to on the feed (empty or ["*"] = all)
+  std::vector<std::string> feedSymbols = {"*"};
+
 private:
   static bool parseLineKV(const std::string& line, std::string& k, std::string& v);
   static std::string trim(const std::string& s);

@@ -10,6 +10,8 @@ Responder::Responder(std::function<void(int,const SymbolValue&)> send,
 {}
 
 void Responder::onValue(const SymbolValue& sv) {
+    // Early-out on stopped_ is an optimization; correctness is guaranteed by
+    // the mutex: if shutdown() races, the lock ensures we see send_==nullptr.
     if (stopped_.load(std::memory_order_acquire)) return;
 
     // Copy send_ under lock to avoid TOCTOU race with shutdown().

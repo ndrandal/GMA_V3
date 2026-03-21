@@ -7,6 +7,8 @@ Worker::Worker(Fn fn, std::shared_ptr<INode> downstream)
   : fn_(std::move(fn)), downstream_(std::move(downstream)) {}
 
 void Worker::onValue(const SymbolValue& sv) {
+  // Early-out on stopping_ is an optimization; correctness is guaranteed by
+  // the mutex: if shutdown() races, the lock ensures we see downstream_==nullptr.
   if (stopping_.load(std::memory_order_acquire)) return;
 
   ArgType out;
@@ -16,6 +18,9 @@ void Worker::onValue(const SymbolValue& sv) {
     // Cap distinct symbol count to prevent unbounded map growth from
     // pathological inputs (e.g. millions of unique symbol strings).
     if (acc_.find(sv.symbol) == acc_.end() && acc_.size() >= MAX_SYMBOLS) {
+      gma::util::logger().log(gma::util::LogLevel::Warn,
+        "Worker: max symbols reached, dropping",
+        {{"symbol", sv.symbol}});
       return;
     }
     auto& vec = acc_[sv.symbol];

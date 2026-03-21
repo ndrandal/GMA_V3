@@ -14,6 +14,8 @@ AtomicAccessor::AtomicAccessor(std::string symbol,
 {}
 
 void AtomicAccessor::onValue(const SymbolValue&) {
+  // Early-out on stopping_ is an optimization; correctness is guaranteed by
+  // the mutex: if shutdown() races, the lock ensures we see downstream_==nullptr.
   if (stopping_.load(std::memory_order_acquire)) return;
   if (!store_) return;
 
