@@ -1,0 +1,38 @@
+{
+  "type": "subscribe",
+  "requests": [
+    {
+      "key": 1,
+      "symbol": "TSLA",
+      "field": "lastPrice",
+      "node": {
+        "type": "Aggregate",
+        "arity": 2,
+        "inputs": [
+          {"type": "Listener", "symbol": "TSLA", "field": "ask"},
+          {"type": "Listener", "symbol": "TSLA", "field": "bid"}
+        ]
+      },
+      "pipeline": [
+        {"type": "Worker", "fn": "spread"},
+        {"type": "Worker", "fn": "mean"}
+      ]
+    },
+    {
+      "key": 2,
+      "symbol": "TSLA",
+      "field": "lastPrice",
+      "node": {
+        "type": "Aggregate",
+        "arity": 2,
+        "inputs": [
+          {"type": "AtomicAccessor", "symbol": "TSLA", "field": "bollinger_upper"},
+          {"type": "AtomicAccessor", "symbol": "TSLA", "field": "bollinger_lower"}
+        ]
+      },
+      "pipeline": [
+        {"type": "Worker", "fn": "diff"}
+      ]
+    }
+  ]
+}

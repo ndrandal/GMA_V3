@@ -8,7 +8,7 @@
 
 // Project headers (adjust paths if your tree differs)
 #include "gma/server/ClientSession.hpp"
-#include "gma/MarketDispatcher.hpp"
+#include "gma/Dispatcher.hpp"
 #include "gma/ExecutionContext.hpp"
 #include "gma/util/Metrics.hpp"
 
@@ -18,7 +18,7 @@ using tcp = boost::asio::ip::tcp;
 
 WebSocketServer::WebSocketServer(boost::asio::io_context& ioc,
                                  ExecutionContext* exec,
-                                 MarketDispatcher* dispatcher,
+                                 Dispatcher* dispatcher,
                                  unsigned short port)
   : ioc_(ioc),
     acceptor_(ioc),

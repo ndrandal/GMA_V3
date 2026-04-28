@@ -1,6 +1,6 @@
 // include/gma/AtomicStore.hpp
 #pragma once
-#include "SymbolValue.hpp"
+#include "StreamValue.hpp"
 
 #include <string>
 #include <unordered_map>

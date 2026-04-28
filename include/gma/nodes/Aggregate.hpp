@@ -16,7 +16,7 @@ class Aggregate final : public INode {
 public:
   Aggregate(std::size_t arity, std::shared_ptr<INode> parent);
 
-  void onValue(const SymbolValue& sv) override;
+  void onValue(const StreamValue& sv) override;
   void shutdown() noexcept override;
 
 private:

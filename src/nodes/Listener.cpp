@@ -1,5 +1,5 @@
 #include "gma/nodes/Listener.hpp"
-#include "gma/MarketDispatcher.hpp"
+#include "gma/Dispatcher.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include "gma/util/Logger.hpp"
 
@@ -9,7 +9,7 @@ Listener::Listener(std::string symbol,
                    std::string field,
                    std::shared_ptr<INode> downstream,
                    gma::rt::ThreadPool* pool,
-                   gma::MarketDispatcher* dispatcher)
+                   gma::Dispatcher* dispatcher)
   : symbol_(std::move(symbol))
   , field_(std::move(field))
   , downstream_(std::move(downstream))
@@ -29,7 +29,7 @@ void Listener::start() {
   }
 }
 
-void Listener::onValue(const gma::SymbolValue& sv) {
+void Listener::onValue(const gma::StreamValue& sv) {
   if (stopping_.load(std::memory_order_acquire)) return;
 
   std::shared_ptr<INode> down;
@@ -41,7 +41,7 @@ void Listener::onValue(const gma::SymbolValue& sv) {
 
   if (pool_) {
     pool_->post([d = std::move(down), sym = sv.symbol, val = sv.value]() mutable {
-      d->onValue(gma::SymbolValue{std::move(sym), std::move(val)});
+      d->onValue(gma::StreamValue{std::move(sym), std::move(val)});
     });
   } else {
     down->onValue(sv);

@@ -1,7 +1,7 @@
 #include "gma/ws/ClientConnection.hpp"
 #include "gma/RequestRegistry.hpp"
 #include "gma/nodes/INode.hpp"
-#include "gma/SymbolValue.hpp"
+#include "gma/StreamValue.hpp"
 #include <gtest/gtest.h>
 #include <memory>
 
@@ -15,7 +15,7 @@ namespace {
 class StubNode : public INode {
 public:
     bool shutdownCalled = false;
-    void onValue(const SymbolValue&) override {}
+    void onValue(const StreamValue&) override {}
     void shutdown() noexcept override { shutdownCalled = true; }
 };
 

@@ -1,6 +1,6 @@
 #include "gma/TreeBuilder.hpp"
 #include "gma/ExecutionContext.hpp"
-#include "gma/MarketDispatcher.hpp"
+#include "gma/Dispatcher.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include "gma/AtomicStore.hpp"
 #include "gma/nodes/INode.hpp"
@@ -15,8 +15,8 @@ using namespace gma;
 // Stub terminal node to capture output
 class TerminalStub : public INode {
 public:
-    std::vector<SymbolValue> received;
-    void onValue(const SymbolValue& sv) override { received.push_back(sv); }
+    std::vector<StreamValue> received;
+    void onValue(const StreamValue& sv) override { received.push_back(sv); }
     void shutdown() noexcept override {}
 };
 
@@ -33,11 +33,11 @@ protected:
     }
 
     AtomicStore store;
-    std::unique_ptr<MarketDispatcher> dispatcher;
+    std::unique_ptr<Dispatcher> dispatcher;
     tree::Deps deps;
 
     void initDeps() {
-        dispatcher = std::make_unique<MarketDispatcher>(gThreadPool.get(), &store);
+        dispatcher = std::make_unique<Dispatcher>(gThreadPool.get(), &store);
         deps.store = &store;
         deps.pool = gThreadPool.get();
         deps.dispatcher = dispatcher.get();

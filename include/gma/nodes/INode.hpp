@@ -1,6 +1,6 @@
 // include/gma/nodes/INode.hpp
 #pragma once
-#include "gma/SymbolValue.hpp"
+#include "gma/StreamValue.hpp"
 #include "gma/AtomicStore.hpp"
 
 namespace gma {
@@ -13,7 +13,7 @@ public:
   INode(const INode&) = delete;
   INode& operator=(const INode&) = delete;
 
-  virtual void onValue(const SymbolValue& sv) = 0;
+  virtual void onValue(const StreamValue& sv) = 0;
   virtual void shutdown() noexcept = 0;
 };
 

@@ -1,8 +1,8 @@
 #include "gma/nodes/Listener.hpp"
-#include "gma/MarketDispatcher.hpp"
+#include "gma/Dispatcher.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include "gma/AtomicStore.hpp"
-#include "gma/SymbolValue.hpp"
+#include "gma/StreamValue.hpp"
 #include "gma/nodes/INode.hpp"
 #include <gtest/gtest.h>
 #include <memory>
@@ -18,9 +18,9 @@ namespace {
 class DownstreamStub : public INode {
 public:
     std::mutex mx;
-    std::vector<SymbolValue> received;
+    std::vector<StreamValue> received;
     std::atomic<int> count{0};
-    void onValue(const SymbolValue& sv) override {
+    void onValue(const StreamValue& sv) override {
         {
             std::lock_guard<std::mutex> lk(mx);
             received.push_back(sv);
@@ -39,15 +39,15 @@ public:
 TEST(ListenerTest, ForwardsValueToDownstreamViaPool) {
     rt::ThreadPool pool(1);
     AtomicStore store;
-    MarketDispatcher dispatcher(&pool, &store);
+    Dispatcher dispatcher(&pool, &store);
 
     auto stub = std::make_shared<DownstreamStub>();
     auto listener = std::make_shared<Listener>("SYM", "field", stub, &pool, &dispatcher);
     listener->start();
 
-    listener->onValue(SymbolValue{"SYM", 1.0});
-    listener->onValue(SymbolValue{"SYM", 2.0});
-    listener->onValue(SymbolValue{"SYM", 3.0});
+    listener->onValue(StreamValue{"SYM", 1.0});
+    listener->onValue(StreamValue{"SYM", 2.0});
+    listener->onValue(StreamValue{"SYM", 3.0});
 
     pool.shutdown();
 
@@ -60,13 +60,13 @@ TEST(ListenerTest, ForwardsValueToDownstreamViaPool) {
 TEST(ListenerTest, ShutdownStopsPropagation) {
     rt::ThreadPool pool(1);
     AtomicStore store;
-    MarketDispatcher dispatcher(&pool, &store);
+    Dispatcher dispatcher(&pool, &store);
 
     auto stub = std::make_shared<DownstreamStub>();
     auto listener = std::make_shared<Listener>("X", "field", stub, &pool, &dispatcher);
     listener->start();
 
-    listener->onValue(SymbolValue{"X", 10.0});
+    listener->onValue(StreamValue{"X", 10.0});
     pool.drain();
     EXPECT_EQ(stub->count.load(), 1);
 
@@ -74,7 +74,7 @@ TEST(ListenerTest, ShutdownStopsPropagation) {
     stub->received.clear();
     stub->count = 0;
 
-    listener->onValue(SymbolValue{"X", 20.0});
+    listener->onValue(StreamValue{"X", 20.0});
     pool.shutdown();
     EXPECT_EQ(stub->count.load(), 0);
 }
@@ -82,7 +82,7 @@ TEST(ListenerTest, ShutdownStopsPropagation) {
 TEST(ListenerTest, SymbolAndFieldAccessors) {
     rt::ThreadPool pool(1);
     AtomicStore store;
-    MarketDispatcher dispatcher(&pool, &store);
+    Dispatcher dispatcher(&pool, &store);
 
     auto stub = std::make_shared<DownstreamStub>();
     auto listener = std::make_shared<Listener>("AAPL", "price", stub, &pool, &dispatcher);
@@ -95,7 +95,7 @@ TEST(ListenerTest, SymbolAndFieldAccessors) {
 TEST(ListenerTest, HandlesRapidDispatch) {
     rt::ThreadPool pool(2);
     AtomicStore store;
-    MarketDispatcher dispatcher(&pool, &store);
+    Dispatcher dispatcher(&pool, &store);
 
     auto stub = std::make_shared<DownstreamStub>();
     auto listener = std::make_shared<Listener>("R", "field", stub, &pool, &dispatcher);
@@ -103,7 +103,7 @@ TEST(ListenerTest, HandlesRapidDispatch) {
 
     const int sends = 50;
     for (int i = 0; i < sends; ++i) {
-        listener->onValue(SymbolValue{"R", static_cast<double>(i)});
+        listener->onValue(StreamValue{"R", static_cast<double>(i)});
     }
 
     pool.shutdown();
@@ -114,7 +114,7 @@ TEST(ListenerTest, NoCrashOnDestructionWithoutStart) {
     {
         rt::ThreadPool pool(1);
         AtomicStore store;
-        MarketDispatcher dispatcher(&pool, &store);
+        Dispatcher dispatcher(&pool, &store);
         auto stub = std::make_shared<DownstreamStub>();
         auto listener = std::make_shared<Listener>("E", "field", stub, &pool, &dispatcher);
         // Deliberately not calling start()

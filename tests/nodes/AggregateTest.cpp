@@ -1,5 +1,5 @@
 #include "gma/nodes/Aggregate.hpp"
-#include "gma/SymbolValue.hpp"
+#include "gma/StreamValue.hpp"
 #include "gma/nodes/INode.hpp"
 #include <gtest/gtest.h>
 #include <memory>
@@ -14,9 +14,9 @@ using namespace gma;
 class TestParent : public INode {
 public:
     std::mutex mx;
-    std::vector<SymbolValue> received;
+    std::vector<StreamValue> received;
     std::atomic<int> count{0};
-    void onValue(const SymbolValue& sv) override {
+    void onValue(const StreamValue& sv) override {
         std::lock_guard<std::mutex> lk(mx);
         received.push_back(sv);
         ++count;
@@ -35,7 +35,7 @@ TEST(AggregateTest, TriggersAfterThreshold) {
 
     std::vector<double> inputs{1.1, 2.2, 3.3};
     for (double v : inputs) {
-        agg.onValue(SymbolValue{"SYM", v});
+        agg.onValue(StreamValue{"SYM", v});
     }
     EXPECT_EQ(parent->count.load(), static_cast<int>(N));
     for (std::size_t i = 0; i < N; ++i) {
@@ -49,13 +49,13 @@ TEST(AggregateTest, ResetsAfterTrigger) {
     std::size_t N = 2;
     Aggregate agg(N, parent);
 
-    agg.onValue(SymbolValue{"A", 10.0});
-    agg.onValue(SymbolValue{"A", 20.0});
+    agg.onValue(StreamValue{"A", 10.0});
+    agg.onValue(StreamValue{"A", 20.0});
     EXPECT_EQ(parent->count.load(), 2);
     parent->received.clear(); parent->count = 0;
 
-    agg.onValue(SymbolValue{"A", 30.0});
-    agg.onValue(SymbolValue{"A", 40.0});
+    agg.onValue(StreamValue{"A", 30.0});
+    agg.onValue(StreamValue{"A", 40.0});
     EXPECT_EQ(parent->count.load(), 2);
     EXPECT_DOUBLE_EQ(extractDouble(parent->received[0].value), 30.0);
     EXPECT_DOUBLE_EQ(extractDouble(parent->received[1].value), 40.0);
@@ -66,10 +66,10 @@ TEST(AggregateTest, SeparateSymbolsIndependent) {
     std::size_t N = 2;
     Aggregate agg(N, parent);
 
-    agg.onValue(SymbolValue{"X", 1.0});
-    agg.onValue(SymbolValue{"X", 2.0});
-    agg.onValue(SymbolValue{"Y", 3.0});
-    agg.onValue(SymbolValue{"Y", 4.0});
+    agg.onValue(StreamValue{"X", 1.0});
+    agg.onValue(StreamValue{"X", 2.0});
+    agg.onValue(StreamValue{"Y", 3.0});
+    agg.onValue(StreamValue{"Y", 4.0});
 
     EXPECT_EQ(parent->count.load(), 4);
     EXPECT_EQ(parent->received[0].symbol, "X");
@@ -82,12 +82,12 @@ TEST(AggregateTest, ShutdownPreventsFurtherCallbacks) {
     auto parent = std::make_shared<TestParent>();
     Aggregate agg(1, parent);
 
-    agg.onValue(SymbolValue{"Z", 5.0});
+    agg.onValue(StreamValue{"Z", 5.0});
     EXPECT_EQ(parent->count.load(), 1);
 
     agg.shutdown();
     parent->received.clear(); parent->count = 0;
-    agg.onValue(SymbolValue{"Z", 6.0});
+    agg.onValue(StreamValue{"Z", 6.0});
     // After shutdown parent_ is reset, so no more callbacks
     EXPECT_EQ(parent->count.load(), 0);
 }
@@ -96,8 +96,8 @@ TEST(AggregateTest, DoesNotTriggerBelowArity) {
     auto parent = std::make_shared<TestParent>();
     Aggregate agg(3, parent);
 
-    agg.onValue(SymbolValue{"S", 1.0});
-    agg.onValue(SymbolValue{"S", 2.0});
+    agg.onValue(StreamValue{"S", 1.0});
+    agg.onValue(StreamValue{"S", 2.0});
     // Only 2 of 3 received — should not trigger
     EXPECT_EQ(parent->count.load(), 0);
 }
@@ -113,7 +113,7 @@ TEST(AggregateTest, ConcurrentOnValueIsSafe) {
     for (int t = 0; t < numThreads; ++t) {
         threads.emplace_back([&agg, t, perThread]() {
             for (int i = 0; i < perThread; ++i) {
-                agg.onValue(SymbolValue{"SYM_" + std::to_string(t),
+                agg.onValue(StreamValue{"SYM_" + std::to_string(t),
                                         static_cast<double>(i)});
             }
         });

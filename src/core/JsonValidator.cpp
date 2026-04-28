@@ -1,17 +1,12 @@
 #include "gma/JsonValidator.hpp"
+#include "gma/engine/NodeTypeRegistry.hpp"
 #include "gma/util/Logger.hpp"
 
 #include <cstring>
 #include <stdexcept>
 #include <string>
-#include <unordered_set>
 
 namespace gma {
-
-static const std::unordered_set<std::string> KNOWN_NODE_TYPES = {
-    "Listener", "Worker", "Aggregate", "Interval",
-    "AtomicAccessor", "SymbolSplit", "Chain"
-};
 
 void JsonValidator::validateRequest(const rapidjson::Document& doc) {
   if (!doc.IsObject()) {
@@ -61,7 +56,7 @@ void JsonValidator::validateNode(const rapidjson::Value& v) {
     throw std::runtime_error("field 'type' exceeds maximum length");
   }
 
-  if (KNOWN_NODE_TYPES.find(type) == KNOWN_NODE_TYPES.end()) {
+  if (!engine::NodeTypeRegistry::contains(type)) {
     throw std::runtime_error("Unknown node type: '" + type + "'");
   }
 }

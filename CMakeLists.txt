@@ -99,28 +99,43 @@ message(STATUS "RapidJSON include dir: ${RAPIDJSON_INCLUDE_DIR}")
 # =======================
 # Sources / targets
 # =======================
-# Build the library from all sources EXCEPT main.cpp
+# Engine / connector split:
+#   gma_engine             — domain-agnostic core (all src/**/*.cpp, minus main)
+#   gma_connector_market   — market-specific code (connectors/market/**)
+#   gma                    — INTERFACE alias linking both (legacy consumer target)
+#   gma_server             — composition root, picks up main.cpp + both libs
+# The split is enforced by include-directory scoping: gma_engine's PUBLIC
+# include paths contain *only* the engine headers, so engine code that
+# accidentally references a connector header fails to compile.
+
 set(MAIN_SRC "${CMAKE_SOURCE_DIR}/src/main.cpp")
 
-file(GLOB_RECURSE GMA_SOURCES "${CMAKE_SOURCE_DIR}/src/*.cpp")
+file(GLOB_RECURSE GMA_ENGINE_SOURCES "${CMAKE_SOURCE_DIR}/src/*.cpp")
 if (EXISTS "${MAIN_SRC}")
-  list(REMOVE_ITEM GMA_SOURCES "${MAIN_SRC}")
+  list(REMOVE_ITEM GMA_ENGINE_SOURCES "${MAIN_SRC}")
 endif()
 
-file(GLOB_RECURSE GMA_PUBLIC_HEADERS
+file(GLOB_RECURSE GMA_ENGINE_HEADERS
   "${CMAKE_SOURCE_DIR}/include/**/*.hpp"
   "${CMAKE_SOURCE_DIR}/include/*.hpp"
 )
 
-add_library(gma STATIC ${GMA_SOURCES} ${GMA_PUBLIC_HEADERS})
-target_include_directories(gma PUBLIC "${CMAKE_SOURCE_DIR}/include")
+file(GLOB_RECURSE GMA_MARKET_SOURCES "${CMAKE_SOURCE_DIR}/connectors/market/src/*.cpp")
+file(GLOB_RECURSE GMA_MARKET_HEADERS
+  "${CMAKE_SOURCE_DIR}/connectors/market/include/**/*.hpp"
+  "${CMAKE_SOURCE_DIR}/connectors/market/include/*.hpp"
+)
+
+# ---- Engine library ----
+add_library(gma_engine STATIC ${GMA_ENGINE_SOURCES} ${GMA_ENGINE_HEADERS})
+target_include_directories(gma_engine PUBLIC "${CMAKE_SOURCE_DIR}/include")
 
 if (Boost_FOUND)
-  target_include_directories(gma PUBLIC ${Boost_INCLUDE_DIRS})
-  target_link_libraries(gma PUBLIC Boost::system)
+  target_include_directories(gma_engine PUBLIC ${Boost_INCLUDE_DIRS})
+  target_link_libraries(gma_engine PUBLIC Boost::system)
 else()
-  target_link_libraries(gma PUBLIC Boost::system) # our header-only alias
-  target_compile_definitions(gma PUBLIC
+  target_link_libraries(gma_engine PUBLIC Boost::system)
+  target_compile_definitions(gma_engine PUBLIC
     BOOST_ALL_NO_LIB
     BOOST_ERROR_CODE_HEADER_ONLY
     BOOST_SYSTEM_NO_DEPRECATED
@@ -129,23 +144,53 @@ else()
   )
 endif()
 
-target_link_libraries(gma PUBLIC Threads::Threads RapidJSON::rapidjson)
+target_link_libraries(gma_engine PUBLIC Threads::Threads RapidJSON::rapidjson)
 
 if (OpenSSL_FOUND)
-  target_link_libraries(gma PUBLIC OpenSSL::SSL OpenSSL::Crypto)
-  target_compile_definitions(gma PUBLIC GMA_HAS_SSL=1)
+  target_link_libraries(gma_engine PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+  target_compile_definitions(gma_engine PUBLIC GMA_HAS_SSL=1)
 endif()
 
-# Warnings
+# ---- Market connector library ----
+add_library(gma_connector_market STATIC ${GMA_MARKET_SOURCES} ${GMA_MARKET_HEADERS})
+target_include_directories(gma_connector_market PUBLIC
+  "${CMAKE_SOURCE_DIR}/connectors/market/include"
+)
+target_link_libraries(gma_connector_market PUBLIC gma_engine)
+
+# ---- Legacy umbrella alias so existing rules that link `gma` keep working ----
+add_library(gma INTERFACE)
+target_link_libraries(gma INTERFACE gma_engine gma_connector_market)
+
+# ---- Synthetic connector (demo): proves the zero-core-changes invariant ----
+# Not linked into `gma` — kept as an opt-in target that test code and demos
+# pull in explicitly. Adding a connector requires (a) this library target and
+# (b) one `registerWith` call at the composition root; no engine edits.
+file(GLOB_RECURSE GMA_SYNTHETIC_SOURCES
+  "${CMAKE_SOURCE_DIR}/connectors/synthetic/src/*.cpp")
+file(GLOB_RECURSE GMA_SYNTHETIC_HEADERS
+  "${CMAKE_SOURCE_DIR}/connectors/synthetic/include/**/*.hpp"
+  "${CMAKE_SOURCE_DIR}/connectors/synthetic/include/*.hpp")
+add_library(gma_connector_synthetic STATIC
+  ${GMA_SYNTHETIC_SOURCES} ${GMA_SYNTHETIC_HEADERS})
+target_include_directories(gma_connector_synthetic PUBLIC
+  "${CMAKE_SOURCE_DIR}/connectors/synthetic/include")
+target_link_libraries(gma_connector_synthetic PUBLIC gma_engine)
+
+# Warnings — apply to both libs
 if (MSVC)
-  target_compile_options(gma PRIVATE /W4)
+  target_compile_options(gma_engine           PRIVATE /W4)
+  target_compile_options(gma_connector_market PRIVATE /W4)
   if (GMA_WARNINGS_AS_ERRORS)
-    target_compile_options(gma PRIVATE /WX)
+    target_compile_options(gma_engine           PRIVATE /WX)
+    target_compile_options(gma_connector_market PRIVATE /WX)
   endif()
 else()
-  target_compile_options(gma PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(gma_engine           PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(gma_connector_market PRIVATE -Wall -Wextra -Wpedantic)
   if (GMA_WARNINGS_AS_ERRORS)
-    target_compile_options(gma PRIVATE -Werror)
+    target_compile_options(gma_engine           PRIVATE -Werror)
+    target_compile_options(gma_connector_market PRIVATE -Werror)
   endif()
 endif()
 
@@ -158,20 +203,24 @@ endif()
 # =======================
 if (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
   if (MSVC)
-    target_compile_options(gma PRIVATE /O2 /Ob2 /GL)
-    target_link_options(gma PUBLIC /LTCG)
+    target_compile_options(gma_engine           PRIVATE /O2 /Ob2 /GL)
+    target_compile_options(gma_connector_market PRIVATE /O2 /Ob2 /GL)
+    target_link_options(gma_engine           PUBLIC /LTCG)
+    target_link_options(gma_connector_market PUBLIC /LTCG)
   else()
-    target_compile_options(gma PRIVATE -O3 -march=native)
+    target_compile_options(gma_engine           PRIVATE -O3 -march=native)
+    target_compile_options(gma_connector_market PRIVATE -O3 -march=native)
   endif()
 
   include(CheckIPOSupported)
   check_ipo_supported(RESULT ipo_supported OUTPUT ipo_output)
   if (ipo_supported)
-    set_property(TARGET gma PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set_property(TARGET gma_engine           PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set_property(TARGET gma_connector_market PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
     if (TARGET gma_server)
       set_property(TARGET gma_server PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
     endif()
-    message(STATUS "LTO enabled for gma and gma_server")
+    message(STATUS "LTO enabled for gma_engine + gma_connector_market + gma_server")
   else()
     message(STATUS "LTO not supported: ${ipo_output}")
   endif()
@@ -230,6 +279,7 @@ if (GMA_BUILD_TESTS)
     Threads::Threads
     RapidJSON::rapidjson
     GTest::gtest_main
+    gma_connector_synthetic
   )
   add_test(NAME gma_tests COMMAND gma_tests)
 endif()

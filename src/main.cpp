@@ -1,40 +1,26 @@
 // File: src/main.cpp
 #include <csignal>
 #include <cstdlib>
-#include <limits>
+#include <iostream>
 #include <memory>
 #include <string>
-#include <chrono>
-#include <iostream>
 
-// -------- Core (your repo) --------
+// -------- Engine --------
 #include "gma/AtomicStore.hpp"
-#include "gma/MarketDispatcher.hpp"
+#include "gma/ExecutionContext.hpp"
+#include "gma/FunctionRegistry.hpp"
+#include "gma/Dispatcher.hpp"
+#include "gma/NodeRegistry.hpp"
+#include "gma/engine/EngineRegistries.hpp"
+#include "gma/rt/ThreadPool.hpp"
+#include "gma/runtime/ShutdownCoordinator.hpp"
 #include "gma/server/WebSocketServer.hpp"
-#include "gma/server/FeedServer.hpp"
-
-// -------- Utilities --------
 #include "gma/util/Config.hpp"
 #include "gma/util/Logger.hpp"
 #include "gma/util/Metrics.hpp"
-#include "gma/rt/ThreadPool.hpp"
-#include "gma/runtime/ShutdownCoordinator.hpp"
-#include "gma/ExecutionContext.hpp"
 
-// -------- TA --------
-#include "gma/ta/AtomicNames.hpp"
-#include "gma/AtomicFunctions.hpp"
-
-// -------- WS Feed Client --------
-#include "gma/ws/WsFeedClient.hpp"
-
-// -------- OB --------
-#include "gma/atomic/AtomicProviderRegistry.hpp"
-#include "gma/ob/FunctionalSnapshotSource.hpp"
-#include "gma/ob/ObProvider.hpp"
-#include "gma/ob/ObMaterializer.hpp"
-#include "gma/ob/ObKeysCatalog.hpp"
-#include "gma/book/OrderBookManager.hpp"
+// -------- Connectors --------
+#include "gma/market/MarketConnector.hpp"
 
 // ---------------------------
 // Globals
@@ -76,15 +62,12 @@ int main(int argc, char* argv[]) {
   //    argv[3] = feedPort (optional)
   Config cfg;
 
-  // Load config file first (if provided) so its port values are available as defaults
   if (argc > 2) {
     if (!cfg.loadFromFile(argv[2])) {
       std::cerr << "[config] warning: failed to load file: " << argv[2] << "\n";
     }
   }
 
-  // Validate config-file port values before narrowing cast (negative or >65535
-  // would silently wrap to a wrong port number).
   if (cfg.wsPort <= 0 || cfg.wsPort > 65535) {
     std::cerr << "[config] warning: invalid wsPort=" << cfg.wsPort << ", using default 8080\n";
     cfg.wsPort = 8080;
@@ -94,16 +77,15 @@ int main(int argc, char* argv[]) {
     cfg.feedPort = 9001;
   }
 
-  // CLI args override config file values
   unsigned short wsPort   = static_cast<unsigned short>(cfg.wsPort);
   unsigned short feedPort = static_cast<unsigned short>(cfg.feedPort);
 
-  if (argc > 1) {
-    wsPort = parsePort(argv[1], wsPort);
-  }
-  if (argc > 3) {
-    feedPort = parsePort(argv[3], feedPort);
-  }
+  if (argc > 1) wsPort   = parsePort(argv[1], wsPort);
+  if (argc > 3) feedPort = parsePort(argv[3], feedPort);
+
+  // Make CLI overrides authoritative — MarketConnector reads cfg.feedPort.
+  cfg.wsPort   = wsPort;
+  cfg.feedPort = feedPort;
 
   // 2) Logger
   logger().log(
@@ -112,10 +94,14 @@ int main(int argc, char* argv[]) {
     {{"wsPort", std::to_string(wsPort)}, {"feedPort", std::to_string(feedPort)}}
   );
 
-  // 3) Register built-in atomic functions (mean, sum, min, max, etc.)
+  // 3) Engine bootstrap: register generic worker functions and node types, and
+  //    install the market-side default-computer-factory hook BEFORE the
+  //    dispatcher is constructed so it picks up a fresh MarketTickComputer.
   gma::registerBuiltinFunctions();
+  gma::registerBuiltinNodeTypes();
+  gma::market::MarketConnector::installDefaults();
 
-  // 4) Thread pool (global) — use config threadPoolSize if set
+  // 4) Thread pool (global)
   unsigned poolSize = cfg.threadPoolSize > 0
       ? static_cast<unsigned>(cfg.threadPoolSize)
       : std::thread::hardware_concurrency();
@@ -126,7 +112,7 @@ int main(int argc, char* argv[]) {
 
   // 5) Core components
   auto store      = std::make_shared<gma::AtomicStore>();
-  auto dispatcher = std::make_shared<gma::MarketDispatcher>(gma::gThreadPool.get(), store.get(), cfg);
+  auto dispatcher = std::make_shared<gma::Dispatcher>(gma::gThreadPool.get(), store.get(), cfg);
 
   // 6) Metrics reporter
   if (cfg.metricsEnabled) {
@@ -137,96 +123,23 @@ int main(int argc, char* argv[]) {
     });
   }
 
-  // 7) Order Book system
-  auto obManager = std::make_shared<gma::OrderBookManager>();
-
-  auto snapSource = std::make_shared<gma::ob::FunctionalSnapshotSource>(
-    // Capture function: produce a Snapshot from the OrderBookManager
-    [obManager](const std::string& symbol,
-                size_t maxLevels,
-                gma::ob::Mode /*mode*/,
-                std::optional<std::pair<double,double>> /*priceBand*/) -> gma::ob::Snapshot {
-      gma::ob::Snapshot snap;
-      auto ds = obManager->buildSnapshot(symbol, maxLevels);
-      double tick = obManager->getTickSize(symbol);
-      // Build bid ladder (Price is integer ticks — convert to double)
-      for (const auto& [px, sz] : ds.bids) {
-        double dpx = static_cast<double>(px.ticks) * tick;
-        snap.bids.levels.push_back({dpx, static_cast<double>(sz),
-            std::numeric_limits<double>::quiet_NaN(), dpx * static_cast<double>(sz)});
-      }
-      // Build ask ladder
-      for (const auto& [px, sz] : ds.asks) {
-        double dpx = static_cast<double>(px.ticks) * tick;
-        snap.asks.levels.push_back({dpx, static_cast<double>(sz),
-            std::numeric_limits<double>::quiet_NaN(), dpx * static_cast<double>(sz)});
-      }
-      snap.meta.seq = ds.seq;
-      snap.meta.epoch = ds.epoch;
-      snap.meta.bidLevels = snap.bids.levels.size();
-      snap.meta.askLevels = snap.asks.levels.size();
-      return snap;
-    },
-    // Tick size function
-    [obManager](const std::string& symbol) -> double {
-      return obManager->getTickSize(symbol);
-    }
-  );
-
-  auto obProvider = std::make_shared<gma::ob::Provider>(snapSource, 10, 10);
-
-  // Register OB provider for "ob.*" keys
-  gma::AtomicProviderRegistry::registerNamespace("ob",
-    [obProvider](const std::string& symbol, const std::string& fullKey) -> double {
-      return obProvider->get(symbol, fullKey);
-    });
-
-  shutdown.registerStep("ob-provider-clear", 50, []{ gma::AtomicProviderRegistry::clear(); });
-
-  // 8) ASIO + servers
+  // 7) ASIO + engine WebSocket server
   boost::asio::io_context ioc;
-
   gma::ExecutionContext exec(store.get(), gma::gThreadPool.get());
 
   gma::WebSocketServer ws(ioc, &exec, dispatcher.get(), wsPort);
   ws.run();
-
-  gma::FeedServer feed(ioc, dispatcher.get(), obManager.get(), feedPort);
-  feed.run();
-
-  // 8b) External WebSocket feed client (optional)
-  std::shared_ptr<gma::ws::WsFeedClient> feedClient;
-
-  // feedUrl from config, or from CLI env: GMA_FEED_URL
-  std::string feedUrl = cfg.feedUrl;
-  if (feedUrl.empty()) {
-    const char* envUrl = std::getenv("GMA_FEED_URL");
-    if (envUrl && envUrl[0]) feedUrl = envUrl;
-  }
-
-  if (!feedUrl.empty()) {
-    try {
-      feedClient = std::make_shared<gma::ws::WsFeedClient>(
-          ioc, dispatcher.get(), obManager.get(),
-          feedUrl, cfg.feedSymbols);
-      feedClient->start();
-
-      logger().log(LogLevel::Info, "feed_client.started",
-                   {{"url", feedUrl}});
-    } catch (const std::exception& ex) {
-      logger().log(LogLevel::Error, "feed_client.start_failed",
-                   {{"err", ex.what()}, {"url", feedUrl}});
-    }
-  }
-
-  // 9) Shutdown sequencing — all captured objects are still alive when shutdown runs
   shutdown.registerStep("ws-stop-accept",    5,  [&ws]{ try { ws.stopAccept(); } catch (...) {} });
   shutdown.registerStep("ws-close-sessions", 40, [&ws]{ try { ws.closeAll(); } catch (...) {} });
-  shutdown.registerStep("feed-stop",         55, [&feed]{ try { feed.stop(); } catch (...) {} });
-  if (feedClient) {
-    shutdown.registerStep("feed-ws-stop",    56, [feedClient]{ try { feedClient->stop(); } catch (...) {} });
-  }
   shutdown.registerStep("asio-stop",         60, [&ioc]{ try { ioc.stop(); } catch (...) {} });
+
+  // 8) Connector registration — a single line per connector.
+  gma::engine::EngineRegistries regs{
+    &cfg, gma::gThreadPool.get(), store.get(), dispatcher.get(), &shutdown, &ioc
+  };
+  gma::market::MarketConnector marketConnector;
+  marketConnector.registerWith(regs);
+  // (future) gma::crypto::CoinbaseConnector{}.registerWith(regs);
 
   logger().log(
     LogLevel::Info,
@@ -234,7 +147,7 @@ int main(int argc, char* argv[]) {
     {{"wsPort", std::to_string(wsPort)}, {"feedPort", std::to_string(feedPort)}}
   );
 
-  // 10) Run
+  // 9) Run
   try {
     ioc.run();
   } catch (const std::exception& ex) {
@@ -243,9 +156,7 @@ int main(int argc, char* argv[]) {
     logger().log(LogLevel::Error, "io_context exception: unknown", {});
   }
 
-  // Ensure shutdown steps run even on natural exit
   shutdown.stop();
-
   g_shutdown.store(nullptr, std::memory_order_release);
   logger().log(LogLevel::Info, "stopped", {});
   return EXIT_SUCCESS;

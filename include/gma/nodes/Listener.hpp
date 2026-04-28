@@ -10,7 +10,7 @@
 
 namespace gma {
 
-class MarketDispatcher;
+class Dispatcher;
 
 namespace nodes {
 
@@ -23,16 +23,16 @@ public:
            std::string field,
            std::shared_ptr<INode> downstream,
            gma::rt::ThreadPool* pool,
-           gma::MarketDispatcher* dispatcher);
+           gma::Dispatcher* dispatcher);
 
   // IMPORTANT:
-  // Do NOT register with MarketDispatcher from the constructor.
+  // Do NOT register with Dispatcher from the constructor.
   // shared_from_this() is not valid until the object is owned by a shared_ptr.
   // Call start() immediately after construction.
   void start();
 
   // INode
-  void onValue(const SymbolValue& sv) override;
+  void onValue(const StreamValue& sv) override;
   void shutdown() noexcept override;
 
   const std::string& symbol() const noexcept { return symbol_; }
@@ -45,7 +45,7 @@ private:
   mutable std::mutex downMx_;
   std::weak_ptr<INode> downstream_;
   gma::rt::ThreadPool* pool_;          // canonical type
-  gma::MarketDispatcher* dispatcher_;
+  gma::Dispatcher* dispatcher_;
 
   std::atomic<bool> started_{false};
   std::atomic<bool> stopping_{false};

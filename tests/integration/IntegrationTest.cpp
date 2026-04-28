@@ -1,13 +1,13 @@
 #include "gma/AtomicStore.hpp"
 #include "gma/AtomicFunctions.hpp"
-#include "gma/MarketDispatcher.hpp"
+#include "gma/Dispatcher.hpp"
 #include "gma/nodes/Aggregate.hpp"
 #include "gma/nodes/Worker.hpp"
 #include "gma/nodes/Listener.hpp"
 #include "gma/nodes/AtomicAccessor.hpp"
 #include "gma/rt/ThreadPool.hpp"
-#include "gma/SymbolValue.hpp"
-#include "gma/SymbolTick.hpp"
+#include "gma/StreamValue.hpp"
+#include "gma/Event.hpp"
 #include "gma/SymbolHistory.hpp"
 #include "gma/util/Config.hpp"
 #include <gtest/gtest.h>
@@ -26,9 +26,9 @@ namespace {
 class PipelineTerminal : public INode {
 public:
     std::mutex mx;
-    std::vector<SymbolValue> received;
+    std::vector<StreamValue> received;
     std::atomic<int> count{0};
-    void onValue(const SymbolValue& sv) override {
+    void onValue(const StreamValue& sv) override {
         {
             std::lock_guard<std::mutex> lk(mx);
             received.push_back(sv);
@@ -42,8 +42,8 @@ public:
     void shutdown() noexcept override {}
 };
 
-// Helper: create a SymbolTick with a JSON payload
-SymbolTick makeTick(const std::string& symbol, const std::string& field, double value) {
+// Helper: create a Event with a JSON payload
+Event makeTick(const std::string& symbol, const std::string& field, double value) {
     auto doc = std::make_shared<rapidjson::Document>();
     doc->SetObject();
     doc->AddMember(
@@ -51,7 +51,7 @@ SymbolTick makeTick(const std::string& symbol, const std::string& field, double 
         rapidjson::Value(value),
         doc->GetAllocator()
     );
-    return SymbolTick{symbol, doc};
+    return Event{symbol, doc};
 }
 
 } // anonymous namespace
@@ -73,8 +73,8 @@ TEST(IntegrationTest, AggregateToWorkerPipeline) {
     auto worker = std::make_shared<Worker>(sumFn, terminal);
     Aggregate agg(2, worker);
 
-    agg.onValue(SymbolValue{"SYM", 10.0});
-    agg.onValue(SymbolValue{"SYM", 20.0});
+    agg.onValue(StreamValue{"SYM", 10.0});
+    agg.onValue(StreamValue{"SYM", 20.0});
 
     ASSERT_EQ(terminal->received.size(), 2u);
     EXPECT_DOUBLE_EQ(std::get<double>(terminal->received[0].value), 10.0);
@@ -194,10 +194,10 @@ TEST(IntegrationTest, ConfigRoundTrip) {
 // ============================================================
 
 TEST(IntegrationTest, TickToListenerToTerminal) {
-    // Full pipeline: inject tick via MarketDispatcher → Listener forwards → terminal receives
+    // Full pipeline: inject tick via Dispatcher → Listener forwards → terminal receives
     rt::ThreadPool pool(2);
     AtomicStore store;
-    MarketDispatcher dispatcher(&pool, &store);
+    Dispatcher dispatcher(&pool, &store);
 
     auto terminal = std::make_shared<PipelineTerminal>();
     auto listener = std::make_shared<nodes::Listener>("AAPL", "price", terminal, &pool, &dispatcher);
@@ -225,7 +225,7 @@ TEST(IntegrationTest, TickToListenerToWorkerToTerminal) {
     // Worker accumulates values; function doubles the latest (last) value.
     rt::ThreadPool pool(2);
     AtomicStore store;
-    MarketDispatcher dispatcher(&pool, &store);
+    Dispatcher dispatcher(&pool, &store);
 
     auto terminal = std::make_shared<PipelineTerminal>();
     Worker::Fn doubleFn = [](Span<const ArgType> inputs) -> ArgType {
@@ -251,7 +251,7 @@ TEST(IntegrationTest, MultipleListenersSameSymbol) {
     // Two listeners on same (symbol, field) — both should receive ticks
     rt::ThreadPool pool(2);
     AtomicStore store;
-    MarketDispatcher dispatcher(&pool, &store);
+    Dispatcher dispatcher(&pool, &store);
 
     auto terminal1 = std::make_shared<PipelineTerminal>();
     auto terminal2 = std::make_shared<PipelineTerminal>();
@@ -272,7 +272,7 @@ TEST(IntegrationTest, MultipleListenersSameSymbol) {
 TEST(IntegrationTest, ListenerIgnoresUnrelatedSymbols) {
     rt::ThreadPool pool(2);
     AtomicStore store;
-    MarketDispatcher dispatcher(&pool, &store);
+    Dispatcher dispatcher(&pool, &store);
 
     auto terminal = std::make_shared<PipelineTerminal>();
     auto listener = std::make_shared<nodes::Listener>("AAPL", "price", terminal, &pool, &dispatcher);
@@ -289,7 +289,7 @@ TEST(IntegrationTest, ListenerIgnoresUnrelatedSymbols) {
 TEST(IntegrationTest, ListenerIgnoresUnrelatedFields) {
     rt::ThreadPool pool(2);
     AtomicStore store;
-    MarketDispatcher dispatcher(&pool, &store);
+    Dispatcher dispatcher(&pool, &store);
 
     auto terminal = std::make_shared<PipelineTerminal>();
     auto listener = std::make_shared<nodes::Listener>("AAPL", "price", terminal, &pool, &dispatcher);
@@ -314,7 +314,7 @@ TEST(IntegrationTest, AtomicAccessorReadsComputedValues) {
     AtomicAccessor accessor("SYM", "lastPrice", &store, terminal);
 
     // Trigger the accessor
-    accessor.onValue(SymbolValue{"SYM", 0.0});
+    accessor.onValue(StreamValue{"SYM", 0.0});
 
     ASSERT_EQ(terminal->received.size(), 1u);
     EXPECT_EQ(terminal->received[0].symbol, "SYM");
@@ -324,7 +324,7 @@ TEST(IntegrationTest, AtomicAccessorReadsComputedValues) {
 TEST(IntegrationTest, ShutdownStopsEntirePipeline) {
     rt::ThreadPool pool(2);
     AtomicStore store;
-    MarketDispatcher dispatcher(&pool, &store);
+    Dispatcher dispatcher(&pool, &store);
 
     auto terminal = std::make_shared<PipelineTerminal>();
     auto listener = std::make_shared<nodes::Listener>("S", "f", terminal, &pool, &dispatcher);

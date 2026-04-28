@@ -1,0 +1,59 @@
+{
+  "type": "subscribe",
+  "requests": [
+    {
+      "key": 1,
+      "symbol": "NVDA",
+      "field": "lastPrice",
+      "node": {
+        "type": "Aggregate",
+        "arity": 2,
+        "inputs": [
+          {"type": "Listener", "symbol": "NVDA", "field": "lastPrice"},
+          {"type": "Listener", "symbol": "AMD", "field": "lastPrice"}
+        ]
+      },
+      "pipeline": [
+        {"type": "Worker", "fn": "diff"},
+        {"type": "Worker", "fn": "mean"}
+      ]
+    },
+    {
+      "key": 2,
+      "symbol": "NVDA",
+      "field": "lastPrice",
+      "node": {
+        "type": "Aggregate",
+        "arity": 2,
+        "inputs": [
+          {"type": "Listener", "symbol": "NVDA", "field": "lastPrice"},
+          {"type": "Listener", "symbol": "AMD", "field": "lastPrice"}
+        ]
+      },
+      "pipeline": [
+        {"type": "Worker", "fn": "diff"},
+        {"type": "Worker", "fn": "stddev"}
+      ]
+    },
+    {
+      "key": 3,
+      "symbol": "NVDA",
+      "field": "lastPrice",
+      "node": {
+        "type": "Interval",
+        "ms": 3000,
+        "child": {"type": "AtomicAccessor", "symbol": "NVDA", "field": "rsi_14"}
+      }
+    },
+    {
+      "key": 4,
+      "symbol": "AMD",
+      "field": "lastPrice",
+      "node": {
+        "type": "Interval",
+        "ms": 3000,
+        "child": {"type": "AtomicAccessor", "symbol": "AMD", "field": "rsi_14"}
+      }
+    }
+  ]
+}

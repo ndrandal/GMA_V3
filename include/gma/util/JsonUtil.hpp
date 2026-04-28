@@ -8,7 +8,7 @@
 #include <variant>
 #include <vector>
 
-#include "gma/SymbolValue.hpp"
+#include "gma/StreamValue.hpp"
 
 namespace gma::util {
 

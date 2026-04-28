@@ -7,7 +7,7 @@
 
 #include <rapidjson/document.h>
 
-#include "gma/MarketDispatcher.hpp"
+#include "gma/Dispatcher.hpp"
 #include "gma/AtomicStore.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include "gma/nodes/INode.hpp"
@@ -18,7 +18,7 @@ class WsBridge {
 public:
   using SendFn = std::function<void(const std::string&)>; // implement with your socket's send-text
 
-  WsBridge(std::shared_ptr<gma::MarketDispatcher> dispatcher,
+  WsBridge(std::shared_ptr<gma::Dispatcher> dispatcher,
            std::shared_ptr<gma::AtomicStore>      store,
            gma::rt::ThreadPool*                    pool = nullptr)
     : dispatcher_(std::move(dispatcher)), store_(std::move(store)), pool_(pool) {}
@@ -44,7 +44,7 @@ private:
   std::unordered_map<std::string,
     std::unordered_map<std::string, std::vector<std::shared_ptr<gma::INode>>>> chains_;
 
-  std::shared_ptr<gma::MarketDispatcher> dispatcher_;
+  std::shared_ptr<gma::Dispatcher> dispatcher_;
   std::shared_ptr<gma::AtomicStore>      store_;
   gma::rt::ThreadPool*                    pool_ = nullptr;
 

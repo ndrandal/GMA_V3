@@ -10,7 +10,7 @@
 
 namespace gma::ws {
 
-void WSResponder::onValue(const SymbolValue& sv) {
+void WSResponder::onValue(const StreamValue& sv) {
   if (stopped_.load(std::memory_order_acquire)) return;
 
   // Copy send_ under lock to avoid TOCTOU race with shutdown().

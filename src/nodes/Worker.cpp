@@ -6,7 +6,7 @@ namespace gma {
 Worker::Worker(Fn fn, std::shared_ptr<INode> downstream)
   : fn_(std::move(fn)), downstream_(std::move(downstream)) {}
 
-void Worker::onValue(const SymbolValue& sv) {
+void Worker::onValue(const StreamValue& sv) {
   // Early-out on stopping_ is an optimization; correctness is guaranteed by
   // the mutex: if shutdown() races, the lock ensures we see downstream_==nullptr.
   if (stopping_.load(std::memory_order_acquire)) return;
@@ -43,7 +43,7 @@ void Worker::onValue(const SymbolValue& sv) {
   }
 
   if (ds) {
-    ds->onValue(SymbolValue{ sv.symbol, out });
+    ds->onValue(StreamValue{ sv.symbol, out });
   }
 }
 

@@ -8,7 +8,7 @@ using namespace gma;
 using namespace gma::ws;
 
 // Helper: capture the JSON string sent by WSResponder
-static std::string captureOnValue(const SymbolValue& sv) {
+static std::string captureOnValue(const StreamValue& sv) {
     std::string captured;
     WSResponder resp("req-1", [&](const std::string& json) { captured = json; });
     resp.onValue(sv);
@@ -22,7 +22,7 @@ static rapidjson::Document parseJson(const std::string& s) {
 }
 
 TEST(WSResponderTest, OnValueDouble) {
-    auto json = captureOnValue(SymbolValue{"AAPL", 150.5});
+    auto json = captureOnValue(StreamValue{"AAPL", 150.5});
     auto d = parseJson(json);
     ASSERT_FALSE(d.HasParseError());
     EXPECT_STREQ(d["type"].GetString(), "update");
@@ -32,21 +32,21 @@ TEST(WSResponderTest, OnValueDouble) {
 }
 
 TEST(WSResponderTest, OnValueInt) {
-    auto json = captureOnValue(SymbolValue{"SYM", ArgType(42)});
+    auto json = captureOnValue(StreamValue{"SYM", ArgType(42)});
     auto d = parseJson(json);
     ASSERT_FALSE(d.HasParseError());
     EXPECT_EQ(d["value"].GetInt(), 42);
 }
 
 TEST(WSResponderTest, OnValueBool) {
-    auto json = captureOnValue(SymbolValue{"SYM", ArgType(true)});
+    auto json = captureOnValue(StreamValue{"SYM", ArgType(true)});
     auto d = parseJson(json);
     ASSERT_FALSE(d.HasParseError());
     EXPECT_TRUE(d["value"].GetBool());
 }
 
 TEST(WSResponderTest, OnValueString) {
-    auto json = captureOnValue(SymbolValue{"SYM", ArgType(std::string("hello"))});
+    auto json = captureOnValue(StreamValue{"SYM", ArgType(std::string("hello"))});
     auto d = parseJson(json);
     ASSERT_FALSE(d.HasParseError());
     EXPECT_STREQ(d["value"].GetString(), "hello");
@@ -54,7 +54,7 @@ TEST(WSResponderTest, OnValueString) {
 
 TEST(WSResponderTest, OnValueVectorInt) {
     std::vector<int> v = {1, 2, 3};
-    auto json = captureOnValue(SymbolValue{"SYM", ArgType(v)});
+    auto json = captureOnValue(StreamValue{"SYM", ArgType(v)});
     auto d = parseJson(json);
     ASSERT_FALSE(d.HasParseError());
     ASSERT_TRUE(d["value"].IsArray());
@@ -67,7 +67,7 @@ TEST(WSResponderTest, OnValueVectorInt) {
 
 TEST(WSResponderTest, OnValueVectorDouble) {
     std::vector<double> v = {1.5, 2.5};
-    auto json = captureOnValue(SymbolValue{"SYM", ArgType(v)});
+    auto json = captureOnValue(StreamValue{"SYM", ArgType(v)});
     auto d = parseJson(json);
     ASSERT_FALSE(d.HasParseError());
     ASSERT_TRUE(d["value"].IsArray());
@@ -79,7 +79,7 @@ TEST(WSResponderTest, OnValueVectorDouble) {
 
 TEST(WSResponderTest, NullSendNoCrash) {
     WSResponder resp("req-x", nullptr);
-    EXPECT_NO_THROW(resp.onValue(SymbolValue{"SYM", 1.0}));
+    EXPECT_NO_THROW(resp.onValue(StreamValue{"SYM", 1.0}));
 }
 
 TEST(WSResponderTest, ShutdownIsNoOp) {

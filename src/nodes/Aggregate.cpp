@@ -11,7 +11,7 @@ Aggregate::Aggregate(std::size_t arity, std::shared_ptr<INode> parent)
     throw std::invalid_argument("Aggregate: arity must be > 0");
 }
 
-void Aggregate::onValue(const SymbolValue& sv) {
+void Aggregate::onValue(const StreamValue& sv) {
   // Early-out on stopping_ is an optimization; correctness is guaranteed by
   // the mutex: if shutdown() races, the lock ensures we see parent_==nullptr.
   if (stopping_.load(std::memory_order_acquire)) return;
@@ -38,7 +38,7 @@ void Aggregate::onValue(const SymbolValue& sv) {
   // Forward outside the lock to avoid holding it during downstream calls
   if (p) {
     for (const auto& v : batch) {
-      p->onValue(SymbolValue{ sv.symbol, v });
+      p->onValue(StreamValue{ sv.symbol, v });
     }
   }
 }

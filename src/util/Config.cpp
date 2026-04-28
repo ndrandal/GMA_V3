@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <sstream>
 #include <algorithm>
@@ -46,6 +47,9 @@ bool Config::loadFromFile(const std::string& path) {
   f = std::fopen(path.c_str(), "rb");
   if (!f) return false;
 #endif
+
+  auto closeFile = [](FILE* fp) { if (fp) std::fclose(fp); };
+  std::unique_ptr<FILE, decltype(closeFile)> fileGuard(f, closeFile);
 
   std::string line;
   line.reserve(1024);
@@ -92,6 +96,62 @@ bool Config::loadFromFile(const std::string& path) {
     else if (key == "feedPort")      { int p = std::atoi(val.c_str()); if (p > 0 && p <= 65535) feedPort = p; }
     else if (key == "threadPoolSize") { int v = std::atoi(val.c_str()); if (v >= 0) threadPoolSize = v; }
     else if (key == "taHistoryMax") { int v = std::atoi(val.c_str()); if (v > 0) taHistoryMax = v; }
+    else if (key == "maxSymbols") { int v = std::atoi(val.c_str()); if (v > 0) maxSymbols = v; }
+    else if (key == "maxFieldsPerSymbol") { int v = std::atoi(val.c_str()); if (v > 0) maxFieldsPerSymbol = v; }
+    else if (key == "allowNegativePrices") { allowNegativePrices = (val == "true" || val == "1" || val == "yes"); }
+    // Source profile fields
+    else if (key == "source.name") { sourceProfile.name = val; }
+    else if (key == "source.priceFields") {
+      sourceProfile.priceFields.clear();
+      std::istringstream ss(val); std::string tok;
+      while (std::getline(ss, tok, ',')) { auto t = trim(tok); if (!t.empty()) sourceProfile.priceFields.push_back(t); }
+      if (sourceProfile.priceFields.empty()) sourceProfile.priceFields = {"lastPrice", "price", "last", "px"};
+    }
+    else if (key == "source.volumeFields") {
+      sourceProfile.volumeFields.clear();
+      std::istringstream ss(val); std::string tok;
+      while (std::getline(ss, tok, ',')) { auto t = trim(tok); if (!t.empty()) sourceProfile.volumeFields.push_back(t); }
+      if (sourceProfile.volumeFields.empty()) sourceProfile.volumeFields = {"volume", "vol", "qty", "size"};
+    }
+    else if (key == "source.bidFields") {
+      sourceProfile.bidFields.clear();
+      std::istringstream ss(val); std::string tok;
+      while (std::getline(ss, tok, ',')) { auto t = trim(tok); if (!t.empty()) sourceProfile.bidFields.push_back(t); }
+    }
+    else if (key == "source.askFields") {
+      sourceProfile.askFields.clear();
+      std::istringstream ss(val); std::string tok;
+      while (std::getline(ss, tok, ',')) { auto t = trim(tok); if (!t.empty()) sourceProfile.askFields.push_back(t); }
+    }
+    else if (key == "source.timestampField") { sourceProfile.timestampField = val; }
+    else if (key == "source.taEnabled") { sourceProfile.taEnabled = (val == "true" || val == "1" || val == "yes"); }
+    // Multi-feed config: feed.0.url, feed.0.adapter, feed.0.symbols, etc.
+    else if (key.substr(0, 5) == "feed." && key.size() > 5) {
+      // Parse "feed.N.field"
+      auto dot2 = key.find('.', 5);
+      if (dot2 != std::string::npos) {
+        std::string idxStr = key.substr(5, dot2 - 5);
+        if (idxStr.empty() || !std::isdigit(static_cast<unsigned char>(idxStr[0]))) continue;
+        int idx = std::atoi(idxStr.c_str());
+        std::string field = key.substr(dot2 + 1);
+        if (idx >= 0 && idx < 64) {
+          while (static_cast<int>(feeds.size()) <= idx) feeds.emplace_back();
+          auto& fc = feeds[static_cast<size_t>(idx)];
+          if (field == "url") fc.url = val;
+          else if (field == "adapter") fc.adapter = val;
+          else if (field == "symbols") {
+            fc.symbols.clear();
+            std::istringstream ss(val);
+            std::string tok;
+            while (std::getline(ss, tok, ',')) {
+              auto t = trim(tok);
+              if (!t.empty()) fc.symbols.push_back(t);
+            }
+            if (fc.symbols.empty()) fc.symbols = {"*"};
+          }
+        }
+      }
+    }
     else if (key == "metricsEnabled") { metricsEnabled = (val == "true" || val == "1" || val == "yes"); }
     else if (key == "metricsIntervalSec") { int v = std::atoi(val.c_str()); if (v > 0) metricsIntervalSec = v; }
     else if (key == "logLevel") { logLevel = val; }
@@ -131,7 +191,7 @@ bool Config::loadFromFile(const std::string& path) {
     }
   }
 
-  std::fclose(f);
+  // fileGuard closes f automatically via RAII.
 
   // Basic sanity: slow >= fast for MACD; stdK positive.
   if (taMACD_slow < taMACD_fast) std::swap(taMACD_slow, taMACD_fast);

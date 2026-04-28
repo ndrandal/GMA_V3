@@ -3,19 +3,19 @@
 
 using namespace gma::nodes;
 
-Responder::Responder(std::function<void(int,const SymbolValue&)> send,
+Responder::Responder(std::function<void(int,const StreamValue&)> send,
                      int key)
   : send_(std::move(send))
   , key_(key)
 {}
 
-void Responder::onValue(const SymbolValue& sv) {
+void Responder::onValue(const StreamValue& sv) {
     // Early-out on stopped_ is an optimization; correctness is guaranteed by
     // the mutex: if shutdown() races, the lock ensures we see send_==nullptr.
     if (stopped_.load(std::memory_order_acquire)) return;
 
     // Copy send_ under lock to avoid TOCTOU race with shutdown().
-    std::function<void(int,const SymbolValue&)> fn;
+    std::function<void(int,const StreamValue&)> fn;
     {
         std::lock_guard<std::mutex> lk(mx_);
         fn = send_;

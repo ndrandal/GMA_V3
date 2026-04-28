@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "gma/Span.hpp"
-#include "gma/SymbolValue.hpp"
+#include "gma/StreamValue.hpp"
 #include "gma/nodes/INode.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include <rapidjson/document.h>
@@ -15,7 +15,7 @@ namespace gma {
 
 // Forward declarations of runtime dependencies
 class AtomicStore;
-class MarketDispatcher;
+class Dispatcher;
 
 namespace tree {
 
@@ -23,7 +23,7 @@ namespace tree {
   struct Deps {
     AtomicStore*      store      { nullptr };   // for AtomicAccessor
     rt::ThreadPool*       pool       { nullptr };   // for Listener queues
-    MarketDispatcher* dispatcher { nullptr };   // for Listener wiring
+    Dispatcher* dispatcher { nullptr };   // for Listener wiring
   };
 
   // Result of buildForRequest – head plus the downstream chain.

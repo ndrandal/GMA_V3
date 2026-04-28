@@ -4,6 +4,8 @@
 #include <vector>
 #include <cstdint>
 
+#include "gma/SourceProfile.hpp"
+
 namespace gma {
 namespace util {
 
@@ -51,8 +53,14 @@ public:
   // Thread pool size (0 = use hardware_concurrency)
   int threadPoolSize = 0;
 
-  // History cap for MarketDispatcher
+  // History cap for Dispatcher (per symbol+field pair)
   int taHistoryMax = 1000;
+
+  // Maximum distinct symbols tracked before rejecting new ones.
+  int maxSymbols = 10000;
+
+  // Maximum distinct fields per symbol in per-field histories.
+  int maxFieldsPerSymbol = 200;
 
   // Metrics reporter
   bool metricsEnabled = false;
@@ -67,6 +75,22 @@ public:
 
   // Symbols to subscribe to on the feed (empty or ["*"] = all)
   std::vector<std::string> feedSymbols = {"*"};
+
+  // Allow negative prices in order book (for bonds with negative yields, spreads, etc.)
+  bool allowNegativePrices = false;
+
+  // Source profile: configurable field-name mapping for the data feed.
+  // Defaults match the legacy NASDAQ-style field names.
+  // Used by Dispatcher for the TCP FeedServer path.
+  gma::SourceProfile sourceProfile;
+
+  // Per-feed configuration for external WebSocket feeds.
+  struct FeedConfig {
+      std::string url;
+      std::string adapter = "itch";       // "itch" or "generic"
+      std::vector<std::string> symbols = {"*"};
+  };
+  std::vector<FeedConfig> feeds;
 
 private:
   static bool parseLineKV(const std::string& line, std::string& k, std::string& v);

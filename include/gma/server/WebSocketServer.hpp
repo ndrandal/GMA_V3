@@ -11,7 +11,7 @@ namespace gma {
 
 // Forward declarations to keep this header stable
 class ExecutionContext;
-class MarketDispatcher;
+class Dispatcher;
 
 class ClientSession; // forward-declared; defined in gma/server/ClientSession.hpp
 
@@ -27,7 +27,7 @@ public:
   /// - dispatcher: optional pointer passed to sessions (can be nullptr)
   WebSocketServer(boost::asio::io_context& ioc,
                   ExecutionContext* exec,
-                  MarketDispatcher* dispatcher,
+                  Dispatcher* dispatcher,
                   unsigned short port);
 
   WebSocketServer(const WebSocketServer&) = delete;
@@ -60,7 +60,7 @@ private:
   std::atomic<bool>        accepting_{false};
 
   ExecutionContext*        exec_;        // not owned
-  MarketDispatcher*        dispatcher_;  // not owned
+  Dispatcher*        dispatcher_;  // not owned
 
   std::mutex                                                   sessions_mu_;
   std::unordered_map<std::size_t, std::weak_ptr<ClientSession>> sessions_;

@@ -25,7 +25,7 @@ public:
   // Must be called after construction when owned by a shared_ptr.
   void start();
 
-  void onValue(const SymbolValue&) override; // no-op (source node)
+  void onValue(const StreamValue&) override; // no-op (source node)
   void shutdown() noexcept override;
 
 private:

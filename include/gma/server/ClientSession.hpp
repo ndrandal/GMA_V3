@@ -21,7 +21,7 @@ namespace gma {
 
 class WebSocketServer;
 class ExecutionContext;
-class MarketDispatcher;
+class Dispatcher;
 class INode;
 
 class ClientSession : public std::enable_shared_from_this<ClientSession> {
@@ -32,7 +32,7 @@ public:
   ClientSession(tcp::socket socket,
                 WebSocketServer* server,
                 ExecutionContext* exec,
-                MarketDispatcher* dispatcher);
+                Dispatcher* dispatcher);
 
   // Start the WebSocket handshake and begin reading messages.
   void run();
@@ -58,7 +58,7 @@ private:
 private:
   WebSocketServer*  server_{nullptr};
   ExecutionContext* exec_{nullptr};
-  MarketDispatcher* dispatcher_{nullptr};
+  Dispatcher* dispatcher_{nullptr};
 
   Ws ws_;
   boost::asio::strand<boost::asio::io_context::executor_type> strand_;

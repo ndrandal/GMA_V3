@@ -15,7 +15,7 @@ namespace {
 class StubNode : public INode {
 public:
     std::atomic<bool> shutdownCalled{false};
-    void onValue(const SymbolValue&) override {}  // Not used in registry
+    void onValue(const StreamValue&) override {}  // Not used in registry
     void shutdown() noexcept override { shutdownCalled = true; }
 };
 

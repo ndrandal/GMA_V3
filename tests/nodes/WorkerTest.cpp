@@ -1,5 +1,5 @@
 #include "gma/nodes/Worker.hpp"
-#include "gma/SymbolValue.hpp"
+#include "gma/StreamValue.hpp"
 #include "gma/nodes/INode.hpp"
 #include <gtest/gtest.h>
 #include <memory>
@@ -16,8 +16,8 @@ namespace {
 class WStubNode : public INode {
 public:
     std::mutex mx;
-    std::vector<SymbolValue> received;
-    void onValue(const SymbolValue& sv) override {
+    std::vector<StreamValue> received;
+    void onValue(const StreamValue& sv) override {
         std::lock_guard<std::mutex> lk(mx);
         received.push_back(sv);
     }

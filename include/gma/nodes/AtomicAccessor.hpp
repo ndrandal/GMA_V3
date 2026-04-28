@@ -15,7 +15,7 @@ public:
                  AtomicStore* store,
                  std::shared_ptr<INode> downstream);
 
-  void onValue(const SymbolValue& sv) override;
+  void onValue(const StreamValue& sv) override;
   void shutdown() noexcept override;
 
 private:

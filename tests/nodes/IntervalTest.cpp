@@ -13,7 +13,7 @@ using namespace std::chrono_literals;
 class IStubNode : public INode {
 public:
     std::atomic<int> count{0};
-    void onValue(const SymbolValue&) override { ++count; }
+    void onValue(const StreamValue&) override { ++count; }
     void shutdown() noexcept override {}
 };
 

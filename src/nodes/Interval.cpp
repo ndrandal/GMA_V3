@@ -54,9 +54,9 @@ void Interval::timerLoop() {
     try {
       if (pool_) {
         auto c = child_;
-        pool_->post([c] { c->onValue(SymbolValue{"", 0.0}); });
+        pool_->post([c] { c->onValue(StreamValue{"", 0.0}); });
       } else {
-        child_->onValue(SymbolValue{"", 0.0});
+        child_->onValue(StreamValue{"", 0.0});
       }
     } catch (const std::exception& ex) {
       gma::util::logger().log(gma::util::LogLevel::Error,
@@ -66,7 +66,7 @@ void Interval::timerLoop() {
   }
 }
 
-void Interval::onValue(const SymbolValue&) {
+void Interval::onValue(const StreamValue&) {
   // source node: no upstream input
 }
 

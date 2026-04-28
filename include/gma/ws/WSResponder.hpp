@@ -15,7 +15,7 @@ public:
   WSResponder(std::string reqId, SendFn send)
   : reqId_(std::move(reqId)), send_(std::move(send)) {}
 
-  void onValue(const SymbolValue& v) override;
+  void onValue(const StreamValue& v) override;
   void shutdown() noexcept override;
 
 private:

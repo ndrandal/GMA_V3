@@ -3,7 +3,7 @@
 #include "gma/server/ClientSession.hpp"
 #include "gma/server/WebSocketServer.hpp"
 #include "gma/ExecutionContext.hpp"
-#include "gma/MarketDispatcher.hpp"
+#include "gma/Dispatcher.hpp"
 #include "gma/TreeBuilder.hpp"
 #include "gma/JsonValidator.hpp"
 #include "gma/nodes/Responder.hpp"
@@ -48,7 +48,7 @@ namespace http      = boost::beast::http;
 ClientSession::ClientSession(tcp::socket socket,
                              WebSocketServer* server,
                              ExecutionContext* exec,
-                             MarketDispatcher* dispatcher)
+                             Dispatcher* dispatcher)
   : server_(server)
   , exec_(exec)
   , dispatcher_(dispatcher)
@@ -386,7 +386,7 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     // Capture weak_ptr to avoid reference cycle:
     //   ClientSession → chains_ → Responder → sendFn → ClientSession
     auto weak = weak_from_this();
-    auto sendFn = [weak](int reqKey, const gma::SymbolValue& sv) {
+    auto sendFn = [weak](int reqKey, const gma::StreamValue& sv) {
       try {
         auto self = weak.lock();
         if (!self) return;

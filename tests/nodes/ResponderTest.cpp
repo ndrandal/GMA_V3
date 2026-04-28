@@ -1,5 +1,5 @@
 #include "gma/nodes/Responder.hpp"
-#include "gma/SymbolValue.hpp"
+#include "gma/StreamValue.hpp"
 #include <gtest/gtest.h>
 #include <stdexcept>
 #include <variant>
@@ -9,13 +9,13 @@ using namespace gma::nodes;
 
 TEST(ResponderTest, CallsCallbackWithCorrectKeyAndValue) {
     int capturedKey = 0;
-    SymbolValue capturedSv;
-    auto callback = [&](int key, const SymbolValue& sv) {
+    StreamValue capturedSv;
+    auto callback = [&](int key, const StreamValue& sv) {
         capturedKey = key;
         capturedSv = sv;
     };
     Responder responder(callback, 42);
-    SymbolValue sv{"ABC", 3.14};
+    StreamValue sv{"ABC", 3.14};
     responder.onValue(sv);
     EXPECT_EQ(capturedKey, 42);
     EXPECT_EQ(capturedSv.symbol, "ABC");
@@ -24,7 +24,7 @@ TEST(ResponderTest, CallsCallbackWithCorrectKeyAndValue) {
 
 TEST(ResponderTest, MultipleInvocations) {
     int count = 0;
-    auto callback = [&](int key, const SymbolValue& sv) {
+    auto callback = [&](int key, const StreamValue& sv) {
         EXPECT_EQ(key, 7);
         EXPECT_EQ(sv.symbol, "X");
         ++count;
@@ -37,7 +37,7 @@ TEST(ResponderTest, MultipleInvocations) {
 }
 
 TEST(ResponderTest, ExceptionInCallbackIsCaught) {
-    auto callback = [&](int, const SymbolValue&) {
+    auto callback = [&](int, const StreamValue&) {
         throw std::runtime_error("callback error");
     };
     Responder responder(callback, 1);
@@ -47,7 +47,7 @@ TEST(ResponderTest, ExceptionInCallbackIsCaught) {
 
 TEST(ResponderTest, ShutdownStopsSending) {
     int count = 0;
-    auto callback = [&](int, const SymbolValue&) { ++count; };
+    auto callback = [&](int, const StreamValue&) { ++count; };
     Responder responder(callback, 100);
     responder.onValue({"S", 5});
     EXPECT_EQ(count, 1);

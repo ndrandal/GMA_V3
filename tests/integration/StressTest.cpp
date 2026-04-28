@@ -1,6 +1,6 @@
 #include "gma/AtomicStore.hpp"
 #include "gma/rt/ThreadPool.hpp"
-#include "gma/SymbolValue.hpp"
+#include "gma/StreamValue.hpp"
 #include <gtest/gtest.h>
 #include <thread>
 #include <vector>

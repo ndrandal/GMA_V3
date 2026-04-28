@@ -1,6 +1,6 @@
 #include "gma/nodes/AtomicAccessor.hpp"
 #include "gma/AtomicStore.hpp"
-#include "gma/SymbolValue.hpp"
+#include "gma/StreamValue.hpp"
 #include <gtest/gtest.h>
 #include <memory>
 #include <vector>
@@ -12,8 +12,8 @@ namespace {
 // Downstream stub that records received values
 class DownstreamStub : public INode {
 public:
-    std::vector<SymbolValue> received;
-    void onValue(const SymbolValue& sv) override {
+    std::vector<StreamValue> received;
+    void onValue(const StreamValue& sv) override {
         received.push_back(sv);
     }
     void shutdown() noexcept override {}
@@ -45,7 +45,7 @@ TEST(AtomicAccessorTest, UsesConfiguredSymbolNotInputSymbol) {
     store.set("A", "f", 42);
     auto downstream = std::make_shared<DownstreamStub>();
     AtomicAccessor accessor("A", "f", &store, downstream);
-    // Call with different SymbolValue symbol
+    // Call with different StreamValue symbol
     accessor.onValue({"B", 100});
     ASSERT_EQ(downstream->received.size(), 1);
     EXPECT_EQ(downstream->received[0].symbol, "A");
