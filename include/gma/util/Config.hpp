@@ -14,9 +14,20 @@ public:
   // Construct with sensible defaults.
   Config() = default;
 
-  // Load from a simple "key=value" file (unknown keys ignored).
-  // Returns true if file read successfully (even if some keys are unknown).
+  // Load from a simple "key=value" file. Engine-known keys are parsed
+  // directly; everything else is parked in a pending list and forwarded
+  // to ConfigNamespaceRegistry on dispatchPendingKeys() (called after
+  // connectors register their readers in registerWith).
+  // Returns true if the file was read successfully (even if some keys
+  // are unknown to both the engine and any registered namespace).
   bool loadFromFile(const std::string& path);
+
+  // Replay every key parked during loadFromFile through
+  // ConfigNamespaceRegistry::dispatch(). Called by the composition root
+  // after each IConnector::registerWith() has had a chance to register
+  // its namespaces. Returns the number of keys that found a reader; the
+  // remainder are silently dropped (forward-compat for stray keys).
+  std::size_t dispatchPendingKeys();
 
   // --- Public fields (referenced elsewhere in your code) ---
   // TA params (now actually members so those C2039 errors go away)
@@ -95,6 +106,9 @@ public:
 private:
   static bool parseLineKV(const std::string& line, std::string& k, std::string& v);
   static std::string trim(const std::string& s);
+
+  // Parked unknown-to-engine keys awaiting dispatchPendingKeys().
+  std::vector<std::pair<std::string, std::string>> _pendingKeys;
 };
 
 } // namespace util

@@ -157,6 +157,11 @@ int main(int argc, char* argv[]) {
   connectors.push_back(&marketConnector);
   // (future) gma::crypto::CoinbaseConnector{}.registerWith(regs);
 
+  // Replay any config keys parked during cfg.loadFromFile() through
+  // ConfigNamespaceRegistry now that connectors have registered their
+  // namespaces. Ordering: load → registerWith → dispatchPendingKeys → start.
+  cfg.dispatchPendingKeys();
+
   for (auto* c : connectors) c->start();
   shutdown.registerStep("connectors-stop", 30, [&connectors] {
     for (auto it = connectors.rbegin(); it != connectors.rend(); ++it) {
