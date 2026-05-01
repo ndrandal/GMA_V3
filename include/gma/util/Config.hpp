@@ -4,8 +4,6 @@
 #include <vector>
 #include <cstdint>
 
-#include "gma/SourceProfile.hpp"
-
 namespace gma {
 namespace util {
 
@@ -89,11 +87,6 @@ public:
 
   // Allow negative prices in order book (for bonds with negative yields, spreads, etc.)
   bool allowNegativePrices = false;
-
-  // Source profile: configurable field-name mapping for the data feed.
-  // Defaults match the legacy NASDAQ-style field names.
-  // Used by Dispatcher for the TCP FeedServer path.
-  gma::SourceProfile sourceProfile;
 
   // Per-feed configuration for external WebSocket feeds.
   struct FeedConfig {

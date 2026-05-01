@@ -17,7 +17,8 @@
 #include "gma/Event.hpp"
 #include "gma/SymbolHistory.hpp"
 #include "gma/StreamValue.hpp"
-#include "gma/SourceProfile.hpp"
+#include "gma/MarketTA.hpp"
+#include "gma/market/MarketFieldMap.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include "gma/book/OrderBookManager.hpp"
 #include "gma/feed/IFeedAdapter.hpp"
@@ -222,10 +223,14 @@ TEST(GapFixesTest, DispatcherStoresBidAskSpread) {
     rt::ThreadPool pool(1);
     AtomicStore store;
     util::Config cfg;
-    cfg.sourceProfile.bidFields = {"bid"};
-    cfg.sourceProfile.askFields = {"ask"};
+
+    // ENC-35: bid/ask fields configured on a connector-owned MarketFieldMap.
+    gma::market::MarketFieldMap fm;
+    fm.bidFields = {"bid"};
+    fm.askFields = {"ask"};
 
     Dispatcher md(&pool, &store, cfg);
+    md.addComputer(std::make_unique<MarketTickComputer>(cfg, std::move(fm)));
 
     // Send 2 ticks with bid/ask fields.
     md.onTick(makeTick("QQQ", {{"lastPrice", 400.0}, {"volume", 100.0},
@@ -250,61 +255,22 @@ TEST(GapFixesTest, DispatcherStoresBidAskSpread) {
 
 // ===========================================================================
 // Fix 4: Opt-in TA computation
+//
+// Note: the taEnabled=false unit-level invariant is covered by
+// MarketFieldMapTest::TaDisabledSkipsTAIndicatorWrites — it invokes
+// MarketTickComputer::compute directly so it isn't shadowed by the
+// process-static default tick computer registered with the
+// EventComputerRegistry by test_bootstrap.
 // ===========================================================================
-
-TEST(GapFixesTest, TaDisabledStoresBaseMetricsOnly) {
-    registerBuiltinFunctions();
-    rt::ThreadPool pool(1);
-    AtomicStore store;
-    util::Config cfg;
-    cfg.sourceProfile.taEnabled = false;
-    cfg.taSMA = {5};
-
-    Dispatcher md(&pool, &store, cfg);
-
-    // Send 15 ticks — more than enough for SMA(5) and RSI(14) to compute.
-    for (int i = 1; i <= 15; ++i) {
-        md.onTick(makeTick("TA_OFF", {{"lastPrice", 100.0 + i}, {"volume", 10.0}}));
-    }
-    pool.shutdown();
-
-    // Base metrics should be present.
-    EXPECT_TRUE(store.get("TA_OFF", "lastPrice").has_value());
-    EXPECT_TRUE(store.get("TA_OFF", "openPrice").has_value());
-    EXPECT_TRUE(store.get("TA_OFF", "highPrice").has_value());
-    EXPECT_TRUE(store.get("TA_OFF", "lowPrice").has_value());
-
-    // Verify lastPrice value
-    auto lp = store.get("TA_OFF", "lastPrice");
-    ASSERT_TRUE(lp.has_value());
-    EXPECT_DOUBLE_EQ(std::get<double>(*lp), 115.0);  // last tick
-
-    // Verify highPrice and lowPrice
-    auto hp = store.get("TA_OFF", "highPrice");
-    ASSERT_TRUE(hp.has_value());
-    EXPECT_DOUBLE_EQ(std::get<double>(*hp), 115.0);
-
-    auto low = store.get("TA_OFF", "lowPrice");
-    ASSERT_TRUE(low.has_value());
-    EXPECT_DOUBLE_EQ(std::get<double>(*low), 101.0);
-
-    // TA indicators should NOT be present.
-    EXPECT_FALSE(store.get("TA_OFF", "sma_5").has_value());
-    EXPECT_FALSE(store.get("TA_OFF", "rsi_14").has_value());
-    EXPECT_FALSE(store.get("TA_OFF", "macd_line").has_value());
-    EXPECT_FALSE(store.get("TA_OFF", "ema_12").has_value());
-    EXPECT_FALSE(store.get("TA_OFF", "bollinger_upper").has_value());
-}
 
 TEST(GapFixesTest, TaEnabledComputesIndicators) {
     registerBuiltinFunctions();
     rt::ThreadPool pool(1);
     AtomicStore store;
     util::Config cfg;
-    cfg.sourceProfile.taEnabled = true;  // default, but explicit for clarity
     cfg.taSMA = {5};
 
-    Dispatcher md(&pool, &store, cfg);
+    Dispatcher md(&pool, &store, cfg);  // default field-map, taEnabled=true
 
     // Send 15 ticks so SMA(5) can compute.
     for (int i = 1; i <= 15; ++i) {

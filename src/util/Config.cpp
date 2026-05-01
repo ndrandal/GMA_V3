@@ -101,32 +101,6 @@ bool Config::loadFromFile(const std::string& path) {
     else if (key == "maxSymbols") { int v = std::atoi(val.c_str()); if (v > 0) maxSymbols = v; }
     else if (key == "maxFieldsPerSymbol") { int v = std::atoi(val.c_str()); if (v > 0) maxFieldsPerSymbol = v; }
     else if (key == "allowNegativePrices") { allowNegativePrices = (val == "true" || val == "1" || val == "yes"); }
-    // Source profile fields
-    else if (key == "source.name") { sourceProfile.name = val; }
-    else if (key == "source.priceFields") {
-      sourceProfile.priceFields.clear();
-      std::istringstream ss(val); std::string tok;
-      while (std::getline(ss, tok, ',')) { auto t = trim(tok); if (!t.empty()) sourceProfile.priceFields.push_back(t); }
-      if (sourceProfile.priceFields.empty()) sourceProfile.priceFields = {"lastPrice", "price", "last", "px"};
-    }
-    else if (key == "source.volumeFields") {
-      sourceProfile.volumeFields.clear();
-      std::istringstream ss(val); std::string tok;
-      while (std::getline(ss, tok, ',')) { auto t = trim(tok); if (!t.empty()) sourceProfile.volumeFields.push_back(t); }
-      if (sourceProfile.volumeFields.empty()) sourceProfile.volumeFields = {"volume", "vol", "qty", "size"};
-    }
-    else if (key == "source.bidFields") {
-      sourceProfile.bidFields.clear();
-      std::istringstream ss(val); std::string tok;
-      while (std::getline(ss, tok, ',')) { auto t = trim(tok); if (!t.empty()) sourceProfile.bidFields.push_back(t); }
-    }
-    else if (key == "source.askFields") {
-      sourceProfile.askFields.clear();
-      std::istringstream ss(val); std::string tok;
-      while (std::getline(ss, tok, ',')) { auto t = trim(tok); if (!t.empty()) sourceProfile.askFields.push_back(t); }
-    }
-    else if (key == "source.timestampField") { sourceProfile.timestampField = val; }
-    else if (key == "source.taEnabled") { sourceProfile.taEnabled = (val == "true" || val == "1" || val == "yes"); }
     // Multi-feed config: feed.0.url, feed.0.adapter, feed.0.symbols, etc.
     else if (key.substr(0, 5) == "feed." && key.size() > 5) {
       // Parse "feed.N.field"

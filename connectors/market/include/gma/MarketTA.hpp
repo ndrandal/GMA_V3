@@ -12,9 +12,9 @@
 #include <unordered_set>
 
 #include "gma/AtomicStore.hpp"
-#include "gma/SourceProfile.hpp"
 #include "gma/SymbolHistory.hpp"
 #include "gma/engine/IEventComputer.hpp"
+#include "gma/market/MarketFieldMap.hpp"
 #include "gma/util/Config.hpp"
 
 namespace gma {
@@ -35,20 +35,26 @@ std::vector<std::pair<std::string, ArgType>> computeAllAtomicValues(
     const util::Config& cfg = util::Config{}
 );
 
-// Per-symbol TA event computer. Lifted out of Dispatcher so the engine's
-// routing layer has zero knowledge of market concepts. Owns per-symbol price/
-// volume history; one instance per dispatcher (state is not shared across
-// dispatchers). Moves into the market connector in Step 7 of the refactor.
+// Per-symbol TA event computer. Owned by the market connector; one instance
+// per dispatcher (state is not shared across dispatchers). The field-map
+// argument tells the computer which JSON keys to read for trade price /
+// volume / bid / ask / timestamp on each tick payload.
 class MarketTickComputer final : public engine::IEventComputer {
 public:
+  // Default field-map (NASDAQ-style names) for callers that don't have a
+  // configured one — primarily test code.
   explicit MarketTickComputer(const util::Config& cfg);
+
+  // Explicit field-map. Used by MarketConnector when it threads the
+  // connector-owned MarketFieldMap into the EventComputerRegistry factory.
+  MarketTickComputer(const util::Config& cfg, market::MarketFieldMap fieldMap);
 
   std::string_view eventType() const override { return "tick"; }
   void compute(const Event& e, engine::ComputeContext& ctx) override;
 
 private:
   util::Config                                       _cfg;
-  SourceProfile                                      _profile;
+  market::MarketFieldMap                             _fieldMap;
   std::unordered_map<std::string, SymbolHistory>     _symbolHistories;
   std::unordered_set<std::string>                    _skipFields;
   mutable std::shared_mutex                          _histMutex;

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "gma/engine/IConnector.hpp"
+#include "gma/market/MarketFieldMap.hpp"
 
 namespace gma {
 class OrderBookManager;
@@ -52,6 +53,11 @@ private:
   std::shared_ptr<ob::Provider>                      _obProvider;
   std::unique_ptr<FeedServer>                        _feedServer;
   std::vector<std::shared_ptr<ws::WsFeedClient>>     _feedClients;
+
+  // Populated by ConfigNamespaceRegistry callbacks during
+  // Config::dispatchPendingKeys(); shared with MarketTickComputer
+  // instances via the EventComputerRegistry factory closure.
+  std::shared_ptr<MarketFieldMap>                    _fieldMap;
 };
 
 } // namespace gma::market

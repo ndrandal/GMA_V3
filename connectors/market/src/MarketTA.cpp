@@ -266,25 +266,38 @@ std::vector<std::pair<std::string, ArgType>> computeAllAtomicValues(
 
 // ---------- MarketTickComputer ----------
 
-MarketTickComputer::MarketTickComputer(const util::Config& cfg)
-  : _cfg(cfg)
-  , _profile(cfg.sourceProfile)
-  , _maxHistory(static_cast<std::size_t>(std::max(1, cfg.taHistoryMax)))
-  , _maxSymbols(static_cast<std::size_t>(std::max(1, cfg.maxSymbols)))
-{
-  // Raw price/volume fields already notified on the raw-tick path in
-  // Dispatcher::onTick, or by computeAndStoreAtomics for FunctionMap
-  // builtins. Skip re-notifying them from the TA path to avoid duplicate
-  // listener fires. TA indicators (sma_5, rsi_14, …) are NOT in this set —
-  // they are only notified from here.
+namespace {
+// Skip fields shared between both ctors. Defined once so both paths
+// initialize identical state.
+void initSkipFields(std::unordered_set<std::string>& dst) {
   for (const auto& f : {"lastPrice", "openPrice", "highPrice", "lowPrice",
                         "mean", "median", "prevClose", "vwap",
                         "volume", "obv", "volatility_rank"}) {
-    _skipFields.insert(f);
+    dst.insert(f);
   }
-  FunctionMap::instance().forEach([this](const std::string& name, const auto&) {
-    _skipFields.insert(name);
+  FunctionMap::instance().forEach([&dst](const std::string& name, const auto&) {
+    dst.insert(name);
   });
+}
+} // namespace
+
+MarketTickComputer::MarketTickComputer(const util::Config& cfg)
+  : _cfg(cfg)
+  , _fieldMap()  // default field-map (NASDAQ-style names)
+  , _maxHistory(static_cast<std::size_t>(std::max(1, cfg.taHistoryMax)))
+  , _maxSymbols(static_cast<std::size_t>(std::max(1, cfg.maxSymbols)))
+{
+  initSkipFields(_skipFields);
+}
+
+MarketTickComputer::MarketTickComputer(const util::Config& cfg,
+                                       market::MarketFieldMap fieldMap)
+  : _cfg(cfg)
+  , _fieldMap(std::move(fieldMap))
+  , _maxHistory(static_cast<std::size_t>(std::max(1, cfg.taHistoryMax)))
+  , _maxSymbols(static_cast<std::size_t>(std::max(1, cfg.maxSymbols)))
+{
+  initSkipFields(_skipFields);
 }
 
 void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx) {
@@ -295,7 +308,7 @@ void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx)
   // Extract price via configured field aliases.
   double price = 0.0;
   bool hasPrice = false;
-  for (const auto& pf : _profile.priceFields) {
+  for (const auto& pf : _fieldMap.priceFields) {
     if (doc.HasMember(pf.c_str()) && doc[pf.c_str()].IsNumber()) {
       price = doc[pf.c_str()].GetDouble();
       hasPrice = true;
@@ -306,7 +319,7 @@ void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx)
 
   // Extract optional volume / bid / ask / timestamp.
   double volume = 0.0;
-  for (const auto& vf : _profile.volumeFields) {
+  for (const auto& vf : _fieldMap.volumeFields) {
     if (doc.HasMember(vf.c_str()) && doc[vf.c_str()].IsNumber()) {
       volume = doc[vf.c_str()].GetDouble();
       break;
@@ -314,22 +327,22 @@ void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx)
   }
   double bid = 0.0, ask = 0.0;
   std::uint64_t tsNs = 0;
-  for (const auto& bf : _profile.bidFields) {
+  for (const auto& bf : _fieldMap.bidFields) {
     if (doc.HasMember(bf.c_str()) && doc[bf.c_str()].IsNumber()) {
       bid = doc[bf.c_str()].GetDouble();
       break;
     }
   }
-  for (const auto& af : _profile.askFields) {
+  for (const auto& af : _fieldMap.askFields) {
     if (doc.HasMember(af.c_str()) && doc[af.c_str()].IsNumber()) {
       ask = doc[af.c_str()].GetDouble();
       break;
     }
   }
-  if (!_profile.timestampField.empty() &&
-      doc.HasMember(_profile.timestampField.c_str()) &&
-      doc[_profile.timestampField.c_str()].IsUint64()) {
-    tsNs = doc[_profile.timestampField.c_str()].GetUint64();
+  if (!_fieldMap.timestampField.empty() &&
+      doc.HasMember(_fieldMap.timestampField.c_str()) &&
+      doc[_fieldMap.timestampField.c_str()].IsUint64()) {
+    tsNs = doc[_fieldMap.timestampField.c_str()].GetUint64();
   }
 
   if (bid > 0.0) ctx.store->set(tick.symbol, "bid", bid);
@@ -353,7 +366,7 @@ void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx)
 
   // Run TA suite or fall back to lightweight base metrics.
   std::vector<std::pair<std::string, ArgType>> taResults;
-  if (_profile.taEnabled) {
+  if (_fieldMap.taEnabled) {
     taResults = computeAllAtomicValues(tick.symbol, histVec, *ctx.store, _cfg);
   } else {
     taResults.emplace_back("lastPrice", price);
@@ -377,7 +390,7 @@ void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx)
   // When TA is enabled we skip raw/FunctionMap names to avoid double-notify;
   // when disabled the lightweight path IS the only source, so notify those.
   for (const auto& [key, val] : taResults) {
-    if (_profile.taEnabled && _skipFields.count(key)) continue;
+    if (_fieldMap.taEnabled && _skipFields.count(key)) continue;
     double v = std::visit([](auto&& x) -> double {
       using T = std::decay_t<decltype(x)>;
       if constexpr (std::is_same_v<T, double>) return x;
