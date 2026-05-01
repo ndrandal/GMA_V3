@@ -18,8 +18,11 @@
 #include "gma/atomic/AtomicProviderRegistry.hpp"
 #include "gma/book/OrderBookManager.hpp"
 #include "gma/engine/ConfigNamespaceRegistry.hpp"
+#include "gma/engine/EngineRegistries.hpp"
 #include "gma/engine/EventComputerRegistry.hpp"
 #include "gma/engine/IEventComputer.hpp"
+#include "gma/engine/IngressRegistry.hpp"
+#include "gma/market/MarketIngress.hpp"
 #include "gma/feed/IFeedAdapter.hpp"
 #include "gma/feed/ItchAdapter.hpp"
 #include "gma/ob/FunctionalSnapshotSource.hpp"
@@ -153,6 +156,54 @@ void MarketConnector::registerWith(engine::EngineRegistries& reg) {
   AtomicProviderRegistry::registerNamespace("ob",
     [obProvider](const std::string& symbol, const std::string& fullKey) -> double {
       return obProvider->get(symbol, fullKey);
+    });
+
+  // Register the two market ingress factories. Engine driver instantiates
+  // each entry of cfg.ingress[] whose kind matches; factories close over
+  // the connector-owned OrderBookManager so feed handlers can write into
+  // it directly. Per-entry params (port, url, adapter, symbols) come from
+  // the parsed ingress.N.* sub-keys.
+  reg.ingress->registerIngress("market.feedserver",
+    [obManager](engine::EngineRegistries& r,
+                const engine::IngressParams& params) -> std::unique_ptr<engine::IIngressSource> {
+      unsigned short port = 9001;
+      auto pit = params.find("port");
+      if (pit != params.end()) {
+        try { port = static_cast<unsigned short>(std::stoi(pit->second)); }
+        catch (...) {}
+      }
+      auto fs = std::make_unique<FeedServer>(*r.io, r.dispatcher, obManager.get(), port);
+      return std::make_unique<FeedServerIngress>(std::move(fs));
+    });
+
+  reg.ingress->registerIngress("market.wsclient",
+    [obManager](engine::EngineRegistries& r,
+                const engine::IngressParams& params) -> std::unique_ptr<engine::IIngressSource> {
+      std::string url;
+      std::string adapter = "itch";
+      auto uit = params.find("url");      if (uit != params.end()) url = uit->second;
+      auto ait = params.find("adapter");  if (ait != params.end()) adapter = ait->second;
+      std::vector<std::string> symbols;
+      auto sit = params.find("symbols");
+      if (sit != params.end()) {
+        std::stringstream ss(sit->second);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+          auto b = tok.find_first_not_of(" \t");
+          auto e = tok.find_last_not_of(" \t");
+          if (b != std::string::npos) symbols.emplace_back(tok.substr(b, e - b + 1));
+        }
+      }
+      if (symbols.empty()) symbols = {"*"};
+
+      std::unique_ptr<feed::IFeedAdapter> ad;
+      if (adapter == "itch") ad = std::make_unique<feed::ItchAdapter>();
+      else                   ad = std::make_unique<feed::ItchAdapter>();  // default ITCH
+
+      auto client = std::make_shared<ws::WsFeedClient>(
+          *r.io, r.dispatcher, obManager.get(),
+          url, std::move(ad), symbols);
+      return std::make_unique<WsFeedClientIngress>(std::move(client));
     });
 
   // Register the "tick" computer factory through the engine registry. Each
