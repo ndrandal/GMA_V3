@@ -27,11 +27,11 @@ namespace gma {
  * per-field raw-value history so FunctionMap builtins (mean, sum, stddev, …)
  * can be recomputed on each update.
  *
- * Domain-specific computations (market TA, order-book derivations, …) live in
- * IEventComputer implementations sourced from EventComputerRegistry. The
- * dispatcher caches per-type computer instances lazily on first event of
- * each type, so late-registered factories are picked up automatically.
- * Computers may call notifyListeners() to deliver values to subscribers.
+ * Domain-specific computations live in IEventComputer implementations sourced
+ * from EventComputerRegistry. The dispatcher caches per-type computer
+ * instances lazily on first event of each type, so late-registered factories
+ * are picked up automatically. Computers may call notifyListeners() to
+ * deliver values to subscribers.
  */
 class Dispatcher {
 public:

@@ -22,7 +22,7 @@ void AtomicAccessor::onValue(const StreamValue&) {
   // First check AtomicStore for the field
   auto opt = store_->get(symbol_, field_);
 
-  // If not found in the store, try namespace providers (e.g. "ob.spread")
+  // If not found in the store, try connector-registered namespace providers
   if (!opt.has_value()) {
     auto resolved = AtomicProviderRegistry::tryResolve(symbol_, field_);
     if (resolved.has_value()) {

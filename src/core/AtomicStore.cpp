@@ -4,27 +4,27 @@
 
 namespace gma {
 
-void AtomicStore::set(const std::string& symbol, const std::string& field, ArgType value) {
+void AtomicStore::set(const std::string& streamKey, const std::string& field, ArgType value) {
   std::unique_lock lock(_mutex);
-  _data[symbol][field] = std::move(value);
+  _data[streamKey][field] = std::move(value);
 }
 
-void AtomicStore::setBatch(const std::string& symbol,
+void AtomicStore::setBatch(const std::string& streamKey,
                            const std::vector<std::pair<std::string, ArgType>>& fields) {
   std::unique_lock lock(_mutex);
-  auto& fm = _data[symbol];
+  auto& fm = _data[streamKey];
   for (const auto& [key, val] : fields) {
     fm[key] = val;
   }
 }
 
-std::optional<ArgType> AtomicStore::get(const std::string& symbol, const std::string& field) const {
+std::optional<ArgType> AtomicStore::get(const std::string& streamKey, const std::string& field) const {
   std::shared_lock lock(_mutex);
 
-  auto symIt = _data.find(symbol);
-  if (symIt == _data.end()) return std::nullopt;
+  auto skIt = _data.find(streamKey);
+  if (skIt == _data.end()) return std::nullopt;
 
-  const auto& fieldMap = symIt->second;
+  const auto& fieldMap = skIt->second;
   auto fieldIt = fieldMap.find(field);
   if (fieldIt == fieldMap.end()) return std::nullopt;
 

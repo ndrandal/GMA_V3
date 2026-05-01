@@ -158,19 +158,19 @@ gma::Worker::Fn fnFromName(const rapidjson::Value& spec) {
 namespace gma::tree {
 
 std::shared_ptr<gma::INode> buildOne(const rapidjson::Value& spec,
-                                     const std::string&      defaultSymbol,
+                                     const std::string&      defaultStreamKey,
                                      const Deps&             deps,
                                      std::shared_ptr<gma::INode> downstream);
 
 std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
-                                     const std::string&           defaultSymbol,
+                                     const std::string&           defaultStreamKey,
                                      const Deps&                 deps,
                                      std::shared_ptr<gma::INode> downstream) {
   const auto& v    = expectObj(spec, "node");
   const std::string type = expectType(v);
 
   if (const auto* builder = gma::engine::NodeTypeRegistry::find(type)) {
-    return (*builder)(v, defaultSymbol, deps, downstream);
+    return (*builder)(v, defaultStreamKey, deps, downstream);
   }
   throw std::runtime_error("TreeBuilder: unknown node type '" + type + "'");
 }
@@ -181,17 +181,17 @@ std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
 
 std::shared_ptr<gma::INode> buildTree(const rapidjson::Value& rootSpec,
                                       const Deps&             deps) {
-  return buildOne(rootSpec, /*defaultSymbol=*/"", deps, /*downstream=*/nullptr);
+  return buildOne(rootSpec, /*defaultStreamKey=*/"", deps, /*downstream=*/nullptr);
 }
 
 std::shared_ptr<gma::INode> buildNode(const rapidjson::Value&      spec,
-                                      const std::string&           defaultSymbol,
+                                      const std::string&           defaultStreamKey,
                                       const Deps&                  deps,
                                       std::shared_ptr<gma::INode>  terminal) {
-  return buildOne(spec, defaultSymbol, deps, std::move(terminal));
+  return buildOne(spec, defaultStreamKey, deps, std::move(terminal));
 }
 
-std::shared_ptr<gma::INode> buildSimple(const std::string&      symbol,
+std::shared_ptr<gma::INode> buildSimple(const std::string&      streamKey,
                                         const std::string&      field,
                                         int                     pollMs,
                                         const Deps&             deps,
@@ -202,7 +202,7 @@ std::shared_ptr<gma::INode> buildSimple(const std::string&      symbol,
     throw std::runtime_error("buildSimple: missing store");
 
   auto accessor =
-    std::make_shared<gma::AtomicAccessor>(symbol, field, deps.store, terminal);
+    std::make_shared<gma::AtomicAccessor>(streamKey, field, deps.store, terminal);
 
   if (pollMs > 0) {
     gma::rt::ThreadPool* pool = deps.pool;
@@ -304,13 +304,13 @@ void registerBuiltinNodeTypes() {
   using gma::engine::NodeBuilderFn;
 
   NodeTypeRegistry::registerNodeType("Listener",
-    [](const rapidjson::Value& v, const std::string& defaultSymbol,
+    [](const rapidjson::Value& v, const std::string& defaultStreamKey,
        const tree::Deps& deps, std::shared_ptr<INode> downstream)
         -> std::shared_ptr<INode> {
       if (!deps.dispatcher || !deps.pool)
         throw std::runtime_error("Listener: missing dispatcher/pool");
 
-      const std::string symbol = strOr(v, "symbol", defaultSymbol);
+      const std::string symbol = strOr(v, "symbol", defaultStreamKey);
       const std::string field  = strOr(v, "field",  "");
       if (symbol.empty())
         throw std::runtime_error("Listener: missing 'symbol'");
@@ -325,7 +325,7 @@ void registerBuiltinNodeTypes() {
     });
 
   NodeTypeRegistry::registerNodeType("Interval",
-    [](const rapidjson::Value& v, const std::string& defaultSymbol,
+    [](const rapidjson::Value& v, const std::string& defaultStreamKey,
        const tree::Deps& deps, std::shared_ptr<INode> downstream)
         -> std::shared_ptr<INode> {
       rt::ThreadPool* pool = deps.pool;
@@ -342,7 +342,7 @@ void registerBuiltinNodeTypes() {
 
       auto child = downstream;
       if (v.HasMember("child"))
-        child = tree::buildOne(v["child"], defaultSymbol, deps, downstream);
+        child = tree::buildOne(v["child"], defaultStreamKey, deps, downstream);
 
       auto interval = std::make_shared<Interval>(
           std::chrono::milliseconds(ms), child, pool);
@@ -351,13 +351,13 @@ void registerBuiltinNodeTypes() {
     });
 
   NodeTypeRegistry::registerNodeType("AtomicAccessor",
-    [](const rapidjson::Value& v, const std::string& defaultSymbol,
+    [](const rapidjson::Value& v, const std::string& defaultStreamKey,
        const tree::Deps& deps, std::shared_ptr<INode> downstream)
         -> std::shared_ptr<INode> {
       if (!deps.store)
         throw std::runtime_error("AtomicAccessor: missing store");
 
-      const std::string symbol = strOr(v, "symbol", defaultSymbol);
+      const std::string symbol = strOr(v, "symbol", defaultStreamKey);
       const std::string field  = strOr(v, "field",  "");
       if (field.empty())
         throw std::runtime_error("AtomicAccessor: missing 'field'");
@@ -374,7 +374,7 @@ void registerBuiltinNodeTypes() {
     });
 
   NodeTypeRegistry::registerNodeType("Aggregate",
-    [](const rapidjson::Value& v, const std::string& defaultSymbol,
+    [](const rapidjson::Value& v, const std::string& defaultStreamKey,
        const tree::Deps& deps, std::shared_ptr<INode> downstream)
         -> std::shared_ptr<INode> {
       std::size_t arity = sizeOr(v, "arity", 0);
@@ -390,7 +390,7 @@ void registerBuiltinNodeTypes() {
       std::vector<std::shared_ptr<INode>> roots;
       roots.reserve(inputArr.Size() + 1);
       for (auto& it : inputArr.GetArray())
-        roots.push_back(tree::buildOne(it, defaultSymbol, deps, agg));
+        roots.push_back(tree::buildOne(it, defaultStreamKey, deps, agg));
       if (roots.empty())
         throw std::runtime_error("Aggregate: empty 'inputs' array");
 
@@ -403,12 +403,16 @@ void registerBuiltinNodeTypes() {
       return std::make_shared<CompositeRoot>(std::move(roots));
     });
 
-  NodeTypeRegistry::registerNodeType("SymbolSplit",
-    [](const rapidjson::Value& v, const std::string& defaultSymbol,
+  // Canonical name "GroupSplit"; "SymbolSplit" registered as a legacy alias
+  // for back-compat with pre-rename request payloads (Q5 of the engine /
+  // connector split decision matrix). Drop the alias when the deprecation
+  // window closes.
+  auto groupSplitBuilder =
+    [](const rapidjson::Value& v, const std::string& defaultStreamKey,
        const tree::Deps& deps, std::shared_ptr<INode> downstream)
         -> std::shared_ptr<INode> {
       if (!v.HasMember("child"))
-        throw std::runtime_error("SymbolSplit: missing 'child'");
+        throw std::runtime_error("GroupSplit: missing 'child'");
 
       // Deep-copy so the factory lambda owns the JSON independently of the
       // caller's stack-local Document.
@@ -416,16 +420,18 @@ void registerBuiltinNodeTypes() {
       childDoc->CopyFrom(v["child"], childDoc->GetAllocator());
 
       GroupSplit::Factory f =
-        [childDoc, defaultSymbol, deps, downstream](const std::string& sym) {
+        [childDoc, defaultStreamKey, deps, downstream](const std::string& sym) {
           return tree::buildOne(*childDoc,
-                                sym.empty() ? defaultSymbol : sym,
+                                sym.empty() ? defaultStreamKey : sym,
                                 deps, downstream);
         };
       return std::make_shared<GroupSplit>(std::move(f));
-    });
+    };
+  NodeTypeRegistry::registerNodeType("GroupSplit", groupSplitBuilder);
+  NodeTypeRegistry::registerNodeType("SymbolSplit", groupSplitBuilder);
 
   NodeTypeRegistry::registerNodeType("Chain",
-    [](const rapidjson::Value& v, const std::string& defaultSymbol,
+    [](const rapidjson::Value& v, const std::string& defaultStreamKey,
        const tree::Deps& deps, std::shared_ptr<INode> downstream)
         -> std::shared_ptr<INode> {
       if (!v.HasMember("stages") || !v["stages"].IsArray())
@@ -438,7 +444,7 @@ void registerBuiltinNodeTypes() {
       auto curDown = downstream;
       for (size_t i = stages.Size(); i > 0; --i) {
         curDown = tree::buildOne(stages[static_cast<rapidjson::SizeType>(i - 1)],
-                                 defaultSymbol, deps, curDown);
+                                 defaultStreamKey, deps, curDown);
       }
       return curDown;
     });
