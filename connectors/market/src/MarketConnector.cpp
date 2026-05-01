@@ -7,11 +7,17 @@
 #include <stdexcept>
 #include <utility>
 
+#include <atomic>
+#include <sstream>
+#include <string>
+#include <string_view>
+
 #include "gma/AtomicStore.hpp"
 #include "gma/Dispatcher.hpp"
 #include "gma/MarketTA.hpp"
 #include "gma/atomic/AtomicProviderRegistry.hpp"
 #include "gma/book/OrderBookManager.hpp"
+#include "gma/engine/ConfigNamespaceRegistry.hpp"
 #include "gma/engine/EventComputerRegistry.hpp"
 #include "gma/engine/IEventComputer.hpp"
 #include "gma/feed/IFeedAdapter.hpp"
@@ -26,14 +32,85 @@
 
 namespace gma::market {
 
+namespace {
+
+// Parse a comma-separated list into a vector<string>, trimming whitespace and
+// dropping empty tokens.
+std::vector<std::string> splitCSV(std::string_view value) {
+  std::vector<std::string> out;
+  std::string s(value);
+  std::istringstream ss(s);
+  std::string tok;
+  while (std::getline(ss, tok, ',')) {
+    auto b = tok.find_first_not_of(" \t");
+    auto e = tok.find_last_not_of(" \t");
+    if (b == std::string::npos) continue;
+    out.emplace_back(tok.substr(b, e - b + 1));
+  }
+  return out;
+}
+
+// Apply a single key=value observation to a MarketFieldMap, where `tail` is
+// the part of the config key after the namespace prefix (e.g. "priceFields"
+// or "name"). Returns true if the key was recognized.
+bool applyMarketSourceKey(MarketFieldMap& fm,
+                          std::string_view tail,
+                          std::string_view value) {
+  if (tail == "name")              { fm.name = std::string(value); return true; }
+  if (tail == "priceFields")       { fm.priceFields  = splitCSV(value);
+                                     if (fm.priceFields.empty())
+                                       fm.priceFields = {"lastPrice", "price", "last", "px"};
+                                     return true; }
+  if (tail == "volumeFields")      { fm.volumeFields = splitCSV(value);
+                                     if (fm.volumeFields.empty())
+                                       fm.volumeFields = {"volume", "vol", "qty", "size"};
+                                     return true; }
+  if (tail == "bidFields")         { fm.bidFields    = splitCSV(value); return true; }
+  if (tail == "askFields")         { fm.askFields    = splitCSV(value); return true; }
+  if (tail == "timestampField")    { fm.timestampField = std::string(value); return true; }
+  if (tail == "taEnabled")         { fm.taEnabled = (value == "true" || value == "1" || value == "yes");
+                                     return true; }
+  return false;
+}
+
+} // namespace
+
 MarketConnector::MarketConnector()  = default;
 MarketConnector::~MarketConnector() = default;
 
 void MarketConnector::registerWith(engine::EngineRegistries& reg) {
-  if (!reg.cfg || !reg.io || !reg.dispatcher || !reg.computers) {
+  if (!reg.cfg || !reg.io || !reg.dispatcher || !reg.computers || !reg.configNs) {
     throw std::runtime_error("MarketConnector: incomplete EngineRegistries");
   }
   const util::Config& cfg = *reg.cfg;
+
+  // ---- MarketFieldMap (populated by the configNs reader during dispatchPendingKeys) ----
+  _fieldMap = std::make_shared<MarketFieldMap>();
+
+  // Canonical namespace: keys live under "market.source.*". The reader
+  // receives the tail (everything after "market.") and routes the
+  // "source.<x>" subset into the field map.
+  auto fieldMap = _fieldMap;
+  reg.configNs->registerNamespace("market",
+    [fieldMap](std::string_view tail, std::string_view value) -> bool {
+      if (tail.rfind("source.", 0) != 0) return false;
+      return applyMarketSourceKey(*fieldMap, tail.substr(7), value);
+    });
+
+  // Legacy "source.*" namespace: one-release deprecation alias. Logged once
+  // per process; the warning surfaces in tests via Logger.
+  static std::atomic<bool> deprecationWarned{false};
+  reg.configNs->registerNamespace("source",
+    [fieldMap](std::string_view tail, std::string_view value) -> bool {
+      bool expected = false;
+      if (deprecationWarned.compare_exchange_strong(expected, true)) {
+        util::logger().log(util::LogLevel::Warn,
+          "config.deprecated_prefix",
+          {{"prefix", "source"}, {"replacement", "market.source"},
+           {"window", "one release"}});
+      }
+      return applyMarketSourceKey(*fieldMap, tail, value);
+    });
 
   // ---- Order book engine ----
   _obManager = std::make_shared<OrderBookManager>();
@@ -80,10 +157,14 @@ void MarketConnector::registerWith(engine::EngineRegistries& reg) {
 
   // Register the "tick" computer factory through the engine registry. Each
   // Dispatcher's onTick lazily instantiates one MarketTickComputer per type
-  // using the dispatcher's own cfg, so per-Dispatcher tuning is honored.
+  // using the dispatcher's own cfg + this connector's configured field map.
+  // The factory captures _fieldMap by shared_ptr so updates from the
+  // configNs reader (which run during dispatchPendingKeys, AFTER
+  // registerWith) reach future computer instances.
+  auto fieldMapShared = _fieldMap;
   reg.computers->registerFactory("tick",
-    [](const util::Config& dispatcherCfg) {
-      return std::make_unique<MarketTickComputer>(dispatcherCfg);
+    [fieldMapShared](const util::Config& dispatcherCfg) {
+      return std::make_unique<MarketTickComputer>(dispatcherCfg, *fieldMapShared);
     });
 
   // ---- TCP FeedServer (constructed, not started) ----
