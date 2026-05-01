@@ -14,6 +14,21 @@ static constexpr double EPSILON = 1e-6;
 void registerBuiltinFunctions() {
     auto& fm = FunctionMap::instance();
 
+    // ──── Parametric reducers (per-call params from the JSON spec) ────
+
+    // "scale" multiplies the latest input by a per-call `factor` (default 1.0).
+    // Lives here as a ParamFunc rather than getting a hardcoded TreeBuilder
+    // branch — exemplifies how connectors can register their own parametric
+    // reducers without engine edits.
+    fm.registerParamFunction("scale",
+        [](const std::vector<double>& xs,
+           const std::map<std::string, double>& params) -> double {
+            if (xs.empty()) return 0.0;
+            auto it = params.find("factor");
+            double factor = (it == params.end()) ? 1.0 : it->second;
+            return xs.back() * factor;
+        });
+
     // ──── Aggregation (full-vector reductions) ────
 
     fm.registerFunction("mean", [](const std::vector<double>& v) -> double {

@@ -18,6 +18,40 @@ TEST(FunctionMapTest, RegisterAndRetrieve) {
     EXPECT_DOUBLE_EQ(sumFn(data), 6.0);
 }
 
+// ENC-42: FunctionMap supports parametric reducers — `scale` lives here as
+// a ParamFunc and the engine no longer carries a hardcoded TreeBuilder
+// branch for it.
+TEST(FunctionMapTest, ParametricFunctionRegisterAndRetrieve) {
+    auto& fm = FunctionMap::instance();
+    fm.registerParamFunction("biased_sum",
+        [](const std::vector<double>& xs,
+           const std::map<std::string, double>& params) -> double {
+            double bias = 0.0;
+            auto it = params.find("bias");
+            if (it != params.end()) bias = it->second;
+            double s = 0.0;
+            for (double x : xs) s += x;
+            return s + bias;
+        });
+
+    EXPECT_TRUE(fm.isParametric("biased_sum"));
+    EXPECT_FALSE(fm.isParametric("sumTest"));
+
+    auto pfn = fm.getParamFunction("biased_sum");
+    std::vector<double> xs{1.0, 2.0, 3.0};
+    EXPECT_DOUBLE_EQ(pfn(xs, {{"bias", 10.0}}), 16.0);
+    EXPECT_DOUBLE_EQ(pfn(xs, {}), 6.0);  // missing param → default 0.
+}
+
+TEST(FunctionMapTest, ScaleIsParametricBuiltin) {
+    auto& fm = FunctionMap::instance();
+    ASSERT_TRUE(fm.isParametric("scale"));
+    auto pfn = fm.getParamFunction("scale");
+    EXPECT_DOUBLE_EQ(pfn({2.0, 4.0}, {{"factor", 3.0}}), 12.0);   // 4 * 3
+    EXPECT_DOUBLE_EQ(pfn({5.0}, {}), 5.0);                        // default 1.0
+    EXPECT_DOUBLE_EQ(pfn({}, {{"factor", 7.0}}), 0.0);            // empty input
+}
+
 TEST(FunctionMapTest, OverwriteFunction) {
     auto& fm = FunctionMap::instance();
     // Initial registration returns 1.0
