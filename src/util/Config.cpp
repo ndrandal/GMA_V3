@@ -8,6 +8,8 @@
 #include <sstream>
 #include <algorithm>
 
+#include "gma/engine/ConfigNamespaceRegistry.hpp"
+
 #ifdef _WIN32
   #define NOMINMAX
   #include <windows.h>
@@ -187,7 +189,10 @@ bool Config::loadFromFile(const std::string& path) {
       if (taEMA.empty()) taEMA = {12, 26};
     }
     else {
-      // Unknown key; ignore to stay forward-compatible
+      // Unknown to the engine — park for later replay through
+      // ConfigNamespaceRegistry once connectors have registered their
+      // readers. See dispatchPendingKeys().
+      _pendingKeys.emplace_back(std::move(key), std::move(val));
     }
   }
 
@@ -198,6 +203,17 @@ bool Config::loadFromFile(const std::string& path) {
   if (taBBands_stdK <= 0.0) taBBands_stdK = 2.0;
 
   return true;
+}
+
+std::size_t Config::dispatchPendingKeys() {
+  std::size_t consumed = 0;
+  for (const auto& [k, v] : _pendingKeys) {
+    if (gma::engine::ConfigNamespaceRegistry::dispatch(k, v)) {
+      ++consumed;
+    }
+  }
+  _pendingKeys.clear();
+  return consumed;
 }
 
 } // namespace util
