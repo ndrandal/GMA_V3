@@ -159,6 +159,10 @@ int main(int argc, char* argv[]) {
   connectors.push_back(&marketConnector);
   // (future) gma::crypto::CoinbaseConnector{}.registerWith(regs);
 
+  // ENC-31: ensure cfg.ingress[] is populated even when the user provided
+  // no INI (loadFromFile not called). Idempotent.
+  cfg.synthesizeIngressFromLegacy();
+
   // Replay any config keys parked during cfg.loadFromFile() through
   // ConfigNamespaceRegistry now that connectors have registered their
   // namespaces. Ordering: load → registerWith → dispatchPendingKeys

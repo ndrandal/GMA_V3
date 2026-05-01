@@ -28,6 +28,13 @@ public:
   // remainder are silently dropped (forward-compat for stray keys).
   std::size_t dispatchPendingKeys();
 
+  // ENC-31: when no `ingress.*` entries were parsed, synthesize equivalent
+  // ones from the legacy keys (feedPort default + feedUrl + feeds.N.*).
+  // Idempotent — once `ingress` is non-empty, this is a no-op. Called by
+  // the composition root and by loadFromFile so behavior is preserved
+  // whether the user has an INI or not.
+  void synthesizeIngressFromLegacy();
+
   // --- Public fields (referenced elsewhere in your code) ---
   // TA params (now actually members so those C2039 errors go away)
   int    taMACD_fast  = 12;   // fast EMA period
