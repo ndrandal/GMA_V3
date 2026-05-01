@@ -41,7 +41,7 @@ TEST(WsBridgeTest, OnOpenAndSubscribeError) {
     Capture cap;
     bridge->onOpen("c1", cap.makeSend());
     bridge->onMessage("c1",
-        R"({"type":"subscribe","requests":[{"id":"1","symbol":"AAPL","field":"lastPrice"}]})");
+        R"({"type":"subscribe","requests":[{"id":"1","streamKey":"AAPL","field":"lastPrice"}]})");
     ASSERT_GE(cap.size(), 1u);
     EXPECT_NE(cap.last().find("error"), std::string::npos);
 }
@@ -125,7 +125,7 @@ TEST(WsBridgeTest, MultipleConnectionsIndependent) {
     bridge->onOpen("c2", cap2.makeSend());
 
     bridge->onMessage("c1",
-        R"({"type":"subscribe","requests":[{"id":"1","symbol":"X","field":"f"}]})");
+        R"({"type":"subscribe","requests":[{"id":"1","streamKey":"X","field":"f"}]})");
     bridge->onMessage("c2",
         R"({"type":"cancel","ids":["req1"]})");
 

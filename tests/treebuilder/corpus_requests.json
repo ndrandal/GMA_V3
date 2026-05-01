@@ -4,7 +4,7 @@
     "nl": "Stream Apple's stock price",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice"
     }
   },
@@ -13,7 +13,7 @@
     "nl": "I want to see MSFT volume ticks",
     "request": {
       "key": 1,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "volume"
     }
   },
@@ -22,7 +22,7 @@
     "nl": "subscribe to nvidia bid",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "bid"
     }
   },
@@ -31,7 +31,7 @@
     "nl": "Show me the ask price for Amazon",
     "request": {
       "key": 1,
-      "symbol": "AMZN",
+      "streamKey": "AMZN",
       "field": "ask"
     }
   },
@@ -40,7 +40,7 @@
     "nl": "What's Tesla trading at right now?",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice"
     }
   },
@@ -49,7 +49,7 @@
     "nl": "Give me Google's opening price",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "openPrice"
     }
   },
@@ -58,7 +58,7 @@
     "nl": "What was the high for META today?",
     "request": {
       "key": 1,
-      "symbol": "META",
+      "streamKey": "META",
       "field": "highPrice"
     }
   },
@@ -67,7 +67,7 @@
     "nl": "Show me the low price on SPY",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lowPrice"
     }
   },
@@ -76,7 +76,7 @@
     "nl": "Stream previous close for QQQ",
     "request": {
       "key": 1,
-      "symbol": "QQQ",
+      "streamKey": "QQQ",
       "field": "prevClose"
     }
   },
@@ -85,7 +85,7 @@
     "nl": "I need a live feed of AMD's price",
     "request": {
       "key": 1,
-      "symbol": "AMD",
+      "streamKey": "AMD",
       "field": "lastPrice"
     }
   },
@@ -94,7 +94,7 @@
     "nl": "Monitor the bid on JPMorgan",
     "request": {
       "key": 1,
-      "symbol": "JPM",
+      "streamKey": "JPM",
       "field": "bid"
     }
   },
@@ -103,7 +103,7 @@
     "nl": "Watch BA volume for me",
     "request": {
       "key": 1,
-      "symbol": "BA",
+      "streamKey": "BA",
       "field": "volume"
     }
   },
@@ -112,7 +112,7 @@
     "nl": "Get me real-time ask quotes on Disney",
     "request": {
       "key": 1,
-      "symbol": "DIS",
+      "streamKey": "DIS",
       "field": "ask"
     }
   },
@@ -121,7 +121,7 @@
     "nl": "Track Netflix price live",
     "request": {
       "key": 1,
-      "symbol": "NFLX",
+      "streamKey": "NFLX",
       "field": "lastPrice"
     }
   },
@@ -130,7 +130,7 @@
     "nl": "Show the daily high for COIN",
     "request": {
       "key": 1,
-      "symbol": "COIN",
+      "streamKey": "COIN",
       "field": "highPrice"
     }
   },
@@ -139,7 +139,7 @@
     "nl": "What is the last traded price of PLTR?",
     "request": {
       "key": 1,
-      "symbol": "PLTR",
+      "streamKey": "PLTR",
       "field": "lastPrice"
     }
   },
@@ -148,7 +148,7 @@
     "nl": "Subscribe to bid and ask for AAPL",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "bid"
     }
   },
@@ -157,7 +157,7 @@
     "nl": "Subscribe to bid and ask for AAPL",
     "request": {
       "key": 2,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "ask"
     }
   },
@@ -166,7 +166,7 @@
     "nl": "Give me price and volume for TSLA simultaneously",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice"
     }
   },
@@ -175,7 +175,7 @@
     "nl": "Give me price and volume for TSLA simultaneously",
     "request": {
       "key": 2,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "volume"
     }
   },
@@ -184,7 +184,7 @@
     "nl": "I want to watch the open, high, and low for SPY",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "openPrice"
     }
   },
@@ -193,7 +193,7 @@
     "nl": "I want to watch the open, high, and low for SPY",
     "request": {
       "key": 2,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "highPrice"
     }
   },
@@ -202,7 +202,7 @@
     "nl": "I want to watch the open, high, and low for SPY",
     "request": {
       "key": 3,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lowPrice"
     }
   },
@@ -211,7 +211,7 @@
     "nl": "Stream INTC and AMD prices side by side",
     "request": {
       "key": 1,
-      "symbol": "INTC",
+      "streamKey": "INTC",
       "field": "lastPrice"
     }
   },
@@ -220,7 +220,7 @@
     "nl": "Stream INTC and AMD prices side by side",
     "request": {
       "key": 2,
-      "symbol": "AMD",
+      "streamKey": "AMD",
       "field": "lastPrice"
     }
   },
@@ -229,7 +229,7 @@
     "nl": "Running average of AAPL price",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -242,7 +242,7 @@
     "nl": "Cumulative volume for Tesla",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "volume",
       "node": {
         "type": "Worker",
@@ -255,7 +255,7 @@
     "nl": "What's the highest price NVDA has reached?",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -268,7 +268,7 @@
     "nl": "Track the lowest bid on AAPL",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "bid",
       "node": {
         "type": "Worker",
@@ -281,7 +281,7 @@
     "nl": "Show me GOOG's price range today",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -294,7 +294,7 @@
     "nl": "What's the latest price for META?",
     "request": {
       "key": 1,
-      "symbol": "META",
+      "streamKey": "META",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -307,7 +307,7 @@
     "nl": "Show me AAPL's first traded price",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -320,7 +320,7 @@
     "nl": "How much has TSLA moved since the first tick?",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -333,7 +333,7 @@
     "nl": "Scale MSFT price to cents",
     "request": {
       "key": 1,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -347,7 +347,7 @@
     "nl": "How many price ticks has AAPL had?",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -360,7 +360,7 @@
     "nl": "Standard deviation of Google's price",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -373,7 +373,7 @@
     "nl": "Average volume for AMD",
     "request": {
       "key": 1,
-      "symbol": "AMD",
+      "streamKey": "AMD",
       "field": "volume",
       "node": {
         "type": "Worker",
@@ -386,7 +386,7 @@
     "nl": "Multiply AAPL's volume by 0.001 to get it in thousands",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "volume",
       "node": {
         "type": "Worker",
@@ -400,7 +400,7 @@
     "nl": "Total number of volume updates for SPY",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "volume",
       "node": {
         "type": "Worker",
@@ -413,7 +413,7 @@
     "nl": "What's the net change in NVDA's bid price?",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "bid",
       "node": {
         "type": "Worker",
@@ -426,7 +426,7 @@
     "nl": "How volatile is MSFT? Show me the standard deviation of its price",
     "request": {
       "key": 1,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -439,7 +439,7 @@
     "nl": "Running mean of bid prices for JPM",
     "request": {
       "key": 1,
-      "symbol": "JPM",
+      "streamKey": "JPM",
       "field": "bid",
       "node": {
         "type": "Worker",
@@ -452,7 +452,7 @@
     "nl": "Aggregate total volume traded on COIN",
     "request": {
       "key": 1,
-      "symbol": "COIN",
+      "streamKey": "COIN",
       "field": "volume",
       "node": {
         "type": "Worker",
@@ -465,7 +465,7 @@
     "nl": "Peak ask price for TSLA today",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "ask",
       "node": {
         "type": "Worker",
@@ -478,7 +478,7 @@
     "nl": "Floor price \u2014 the minimum last price for QQQ",
     "request": {
       "key": 1,
-      "symbol": "QQQ",
+      "streamKey": "QQQ",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -491,7 +491,7 @@
     "nl": "Convert AAPL's price to basis points relative to 100, factor 100",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -505,7 +505,7 @@
     "nl": "Show me how the ask spread has widened for GOOG \u2014 the range of ask values",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "ask",
       "node": {
         "type": "Worker",
@@ -518,7 +518,7 @@
     "nl": "What was the opening tick for BA?",
     "request": {
       "key": 1,
-      "symbol": "BA",
+      "streamKey": "BA",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -531,7 +531,7 @@
     "nl": "Most recent volume reading for DIS",
     "request": {
       "key": 1,
-      "symbol": "DIS",
+      "streamKey": "DIS",
       "field": "volume",
       "node": {
         "type": "Worker",
@@ -544,7 +544,7 @@
     "nl": "Count the number of bid updates on PLTR",
     "request": {
       "key": 1,
-      "symbol": "PLTR",
+      "streamKey": "PLTR",
       "field": "bid",
       "node": {
         "type": "Worker",
@@ -557,7 +557,7 @@
     "nl": "Average ask price for NFLX over all ticks",
     "request": {
       "key": 1,
-      "symbol": "NFLX",
+      "streamKey": "NFLX",
       "field": "ask",
       "node": {
         "type": "Worker",
@@ -570,7 +570,7 @@
     "nl": "How much volume has AMZN accumulated?",
     "request": {
       "key": 1,
-      "symbol": "AMZN",
+      "streamKey": "AMZN",
       "field": "volume",
       "node": {
         "type": "Worker",
@@ -583,7 +583,7 @@
     "nl": "Show the stddev of INTC's bid",
     "request": {
       "key": 1,
-      "symbol": "INTC",
+      "streamKey": "INTC",
       "field": "bid",
       "node": {
         "type": "Worker",
@@ -596,7 +596,7 @@
     "nl": "Scale NVDA volume by a factor of 10",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "volume",
       "node": {
         "type": "Worker",
@@ -610,7 +610,7 @@
     "nl": "Price swing on META \u2014 difference between first and last tick",
     "request": {
       "key": 1,
-      "symbol": "META",
+      "streamKey": "META",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -623,11 +623,11 @@
     "nl": "Show me AAPL's 5-period simple moving average",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "sma_5"
       }
     }
@@ -637,11 +637,11 @@
     "nl": "10-day SMA for Tesla",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "TSLA",
+        "streamKey": "TSLA",
         "field": "sma_10"
       }
     }
@@ -651,11 +651,11 @@
     "nl": "MSFT's 20-period moving average",
     "request": {
       "key": 1,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "MSFT",
+        "streamKey": "MSFT",
         "field": "sma_20"
       }
     }
@@ -665,11 +665,11 @@
     "nl": "Long-term SMA for GOOG \u2014 the 50-period one",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "GOOG",
+        "streamKey": "GOOG",
         "field": "sma_50"
       }
     }
@@ -679,11 +679,11 @@
     "nl": "9-period EMA on NVDA",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "NVDA",
+        "streamKey": "NVDA",
         "field": "ema_9"
       }
     }
@@ -693,11 +693,11 @@
     "nl": "Show the 21 EMA for AMD",
     "request": {
       "key": 1,
-      "symbol": "AMD",
+      "streamKey": "AMD",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AMD",
+        "streamKey": "AMD",
         "field": "ema_21"
       }
     }
@@ -707,11 +707,11 @@
     "nl": "50-period exponential moving average for SPY",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "SPY",
+        "streamKey": "SPY",
         "field": "ema_50"
       }
     }
@@ -721,11 +721,11 @@
     "nl": "What's the RSI on Apple?",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "rsi_14"
       }
     }
@@ -735,11 +735,11 @@
     "nl": "Is TSLA overbought? Show RSI",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "TSLA",
+        "streamKey": "TSLA",
         "field": "rsi_14"
       }
     }
@@ -749,11 +749,11 @@
     "nl": "MACD line for AAPL",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "macd_line"
       }
     }
@@ -763,11 +763,11 @@
     "nl": "MACD signal line for Google",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "GOOG",
+        "streamKey": "GOOG",
         "field": "macd_signal"
       }
     }
@@ -777,11 +777,11 @@
     "nl": "Show me the MACD histogram for NVDA",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "NVDA",
+        "streamKey": "NVDA",
         "field": "macd_histogram"
       }
     }
@@ -791,11 +791,11 @@
     "nl": "Upper Bollinger Band for MSFT",
     "request": {
       "key": 1,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "MSFT",
+        "streamKey": "MSFT",
         "field": "bollinger_upper"
       }
     }
@@ -805,11 +805,11 @@
     "nl": "Lower Bollinger Band for Tesla",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "TSLA",
+        "streamKey": "TSLA",
         "field": "bollinger_lower"
       }
     }
@@ -819,11 +819,11 @@
     "nl": "What's AAPL's momentum reading?",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "momentum_10"
       }
     }
@@ -833,11 +833,11 @@
     "nl": "Rate of change for GOOG",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "GOOG",
+        "streamKey": "GOOG",
         "field": "roc_10"
       }
     }
@@ -847,11 +847,11 @@
     "nl": "Average true range for SPY",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "SPY",
+        "streamKey": "SPY",
         "field": "atr_14"
       }
     }
@@ -861,11 +861,11 @@
     "nl": "20-period average volume for TSLA",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "TSLA",
+        "streamKey": "TSLA",
         "field": "volume_avg_20"
       }
     }
@@ -875,11 +875,11 @@
     "nl": "Show me VWAP for AAPL",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "vwap"
       }
     }
@@ -889,11 +889,11 @@
     "nl": "On-balance volume for MSFT",
     "request": {
       "key": 1,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "MSFT",
+        "streamKey": "MSFT",
         "field": "obv"
       }
     }
@@ -903,11 +903,11 @@
     "nl": "Volatility rank for NVDA",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "NVDA",
+        "streamKey": "NVDA",
         "field": "volatility_rank"
       }
     }
@@ -917,11 +917,11 @@
     "nl": "AAPL's median price",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "median"
       }
     }
@@ -931,11 +931,11 @@
     "nl": "Stream the volume-weighted average price for Amazon",
     "request": {
       "key": 1,
-      "symbol": "AMZN",
+      "streamKey": "AMZN",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AMZN",
+        "streamKey": "AMZN",
         "field": "vwap"
       }
     }
@@ -945,11 +945,11 @@
     "nl": "What's the ATR telling us about META's volatility?",
     "request": {
       "key": 1,
-      "symbol": "META",
+      "streamKey": "META",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "META",
+        "streamKey": "META",
         "field": "atr_14"
       }
     }
@@ -959,11 +959,11 @@
     "nl": "Give me the exponential moving average (9-period) for QQQ",
     "request": {
       "key": 1,
-      "symbol": "QQQ",
+      "streamKey": "QQQ",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "QQQ",
+        "streamKey": "QQQ",
         "field": "ema_9"
       }
     }
@@ -973,11 +973,11 @@
     "nl": "Relative strength index for JPMorgan",
     "request": {
       "key": 1,
-      "symbol": "JPM",
+      "streamKey": "JPM",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "JPM",
+        "streamKey": "JPM",
         "field": "rsi_14"
       }
     }
@@ -987,11 +987,11 @@
     "nl": "Is COIN showing momentum? Stream the momentum indicator",
     "request": {
       "key": 1,
-      "symbol": "COIN",
+      "streamKey": "COIN",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "COIN",
+        "streamKey": "COIN",
         "field": "momentum_10"
       }
     }
@@ -1001,11 +1001,11 @@
     "nl": "ROC for Boeing",
     "request": {
       "key": 1,
-      "symbol": "BA",
+      "streamKey": "BA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "BA",
+        "streamKey": "BA",
         "field": "roc_10"
       }
     }
@@ -1015,11 +1015,11 @@
     "nl": "Average volume over 20 periods for PLTR",
     "request": {
       "key": 1,
-      "symbol": "PLTR",
+      "streamKey": "PLTR",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "PLTR",
+        "streamKey": "PLTR",
         "field": "volume_avg_20"
       }
     }
@@ -1029,11 +1029,11 @@
     "nl": "OBV reading for Netflix",
     "request": {
       "key": 1,
-      "symbol": "NFLX",
+      "streamKey": "NFLX",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "NFLX",
+        "streamKey": "NFLX",
         "field": "obv"
       }
     }
@@ -1043,11 +1043,11 @@
     "nl": "Show me the mean price computed for DIS",
     "request": {
       "key": 1,
-      "symbol": "DIS",
+      "streamKey": "DIS",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "DIS",
+        "streamKey": "DIS",
         "field": "mean"
       }
     }
@@ -1057,11 +1057,11 @@
     "nl": "The MACD for AMD \u2014 just the main line",
     "request": {
       "key": 1,
-      "symbol": "AMD",
+      "streamKey": "AMD",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AMD",
+        "streamKey": "AMD",
         "field": "macd_line"
       }
     }
@@ -1071,11 +1071,11 @@
     "nl": "How's the volatility looking on INTC?",
     "request": {
       "key": 1,
-      "symbol": "INTC",
+      "streamKey": "INTC",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "INTC",
+        "streamKey": "INTC",
         "field": "volatility_rank"
       }
     }
@@ -1085,11 +1085,11 @@
     "nl": "Bollinger upper for the QQQ ETF",
     "request": {
       "key": 1,
-      "symbol": "QQQ",
+      "streamKey": "QQQ",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "QQQ",
+        "streamKey": "QQQ",
         "field": "bollinger_upper"
       }
     }
@@ -1099,11 +1099,11 @@
     "nl": "EMA 21 for Coinbase",
     "request": {
       "key": 1,
-      "symbol": "COIN",
+      "streamKey": "COIN",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "COIN",
+        "streamKey": "COIN",
         "field": "ema_21"
       }
     }
@@ -1113,7 +1113,7 @@
     "nl": "Bid-ask spread for AAPL",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1121,12 +1121,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "ask"
           },
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "bid"
           }
         ]
@@ -1144,7 +1144,7 @@
     "nl": "Price difference between AAPL and MSFT",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1152,12 +1152,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "MSFT",
+            "streamKey": "MSFT",
             "field": "lastPrice"
           }
         ]
@@ -1175,7 +1175,7 @@
     "nl": "Spread between NVDA and AMD stock prices",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1183,12 +1183,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "NVDA",
+            "streamKey": "NVDA",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "AMD",
+            "streamKey": "AMD",
             "field": "lastPrice"
           }
         ]
@@ -1206,7 +1206,7 @@
     "nl": "Show me the max of bid and ask for TSLA",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1214,12 +1214,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "bid"
           },
           {
             "type": "Listener",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "ask"
           }
         ]
@@ -1237,7 +1237,7 @@
     "nl": "Average of high and low prices for SPY",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1245,12 +1245,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "SPY",
+            "streamKey": "SPY",
             "field": "highPrice"
           },
           {
             "type": "Listener",
-            "symbol": "SPY",
+            "streamKey": "SPY",
             "field": "lowPrice"
           }
         ]
@@ -1268,7 +1268,7 @@
     "nl": "Sum of volume from AAPL and MSFT",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1276,12 +1276,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "volume"
           },
           {
             "type": "Listener",
-            "symbol": "MSFT",
+            "streamKey": "MSFT",
             "field": "volume"
           }
         ]
@@ -1299,7 +1299,7 @@
     "nl": "Compare bid prices: GOOG versus META",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1307,12 +1307,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "GOOG",
+            "streamKey": "GOOG",
             "field": "bid"
           },
           {
             "type": "Listener",
-            "symbol": "META",
+            "streamKey": "META",
             "field": "bid"
           }
         ]
@@ -1330,7 +1330,7 @@
     "nl": "Mid price for NVDA (average of bid and ask)",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1338,12 +1338,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "NVDA",
+            "streamKey": "NVDA",
             "field": "bid"
           },
           {
             "type": "Listener",
-            "symbol": "NVDA",
+            "streamKey": "NVDA",
             "field": "ask"
           }
         ]
@@ -1361,7 +1361,7 @@
     "nl": "Show me the spread between TSLA's high and low",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1369,12 +1369,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "highPrice"
           },
           {
             "type": "Listener",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "lowPrice"
           }
         ]
@@ -1392,7 +1392,7 @@
     "nl": "Minimum across AAPL bid and AAPL ask",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1400,12 +1400,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "bid"
           },
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "ask"
           }
         ]
@@ -1423,7 +1423,7 @@
     "nl": "Track the difference between SPY and QQQ prices",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1431,12 +1431,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "SPY",
+            "streamKey": "SPY",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "QQQ",
+            "streamKey": "QQQ",
             "field": "lastPrice"
           }
         ]
@@ -1454,7 +1454,7 @@
     "nl": "Combined volume of FAANG \u2014 AAPL, GOOG, META",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1462,17 +1462,17 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "volume"
           },
           {
             "type": "Listener",
-            "symbol": "GOOG",
+            "streamKey": "GOOG",
             "field": "volume"
           },
           {
             "type": "Listener",
-            "symbol": "META",
+            "streamKey": "META",
             "field": "volume"
           }
         ]
@@ -1490,7 +1490,7 @@
     "nl": "Spread between open and last price for AMD",
     "request": {
       "key": 1,
-      "symbol": "AMD",
+      "streamKey": "AMD",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1498,12 +1498,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AMD",
+            "streamKey": "AMD",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "AMD",
+            "streamKey": "AMD",
             "field": "openPrice"
           }
         ]
@@ -1521,7 +1521,7 @@
     "nl": "Which is cheaper, INTC or AMD? Show me the min of their prices",
     "request": {
       "key": 1,
-      "symbol": "INTC",
+      "streamKey": "INTC",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1529,12 +1529,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "INTC",
+            "streamKey": "INTC",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "AMD",
+            "streamKey": "AMD",
             "field": "lastPrice"
           }
         ]
@@ -1552,7 +1552,7 @@
     "nl": "Standard deviation across AAPL's bid and ask",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1560,12 +1560,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "bid"
           },
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "ask"
           }
         ]
@@ -1583,7 +1583,7 @@
     "nl": "Average price across NVDA, AMD, and INTC",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1591,17 +1591,17 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "NVDA",
+            "streamKey": "NVDA",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "AMD",
+            "streamKey": "AMD",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "INTC",
+            "streamKey": "INTC",
             "field": "lastPrice"
           }
         ]
@@ -1619,7 +1619,7 @@
     "nl": "How far is GOOG's price from its previous close?",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1627,12 +1627,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "GOOG",
+            "streamKey": "GOOG",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "GOOG",
+            "streamKey": "GOOG",
             "field": "prevClose"
           }
         ]
@@ -1650,7 +1650,7 @@
     "nl": "TSLA bid-ask spread count \u2014 how many times has it updated?",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1658,12 +1658,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "bid"
           },
           {
             "type": "Listener",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "ask"
           }
         ]
@@ -1681,7 +1681,7 @@
     "nl": "Max volume between JPM and BAC",
     "request": {
       "key": 1,
-      "symbol": "JPM",
+      "streamKey": "JPM",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1689,12 +1689,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "JPM",
+            "streamKey": "JPM",
             "field": "volume"
           },
           {
             "type": "Listener",
-            "symbol": "BAC",
+            "streamKey": "BAC",
             "field": "volume"
           }
         ]
@@ -1712,7 +1712,7 @@
     "nl": "Price range for META \u2014 the spread of high minus low",
     "request": {
       "key": 1,
-      "symbol": "META",
+      "streamKey": "META",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1720,12 +1720,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "META",
+            "streamKey": "META",
             "field": "highPrice"
           },
           {
             "type": "Listener",
-            "symbol": "META",
+            "streamKey": "META",
             "field": "lowPrice"
           }
         ]
@@ -1743,7 +1743,7 @@
     "nl": "Difference between AAPL's ask and its previous close",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1751,12 +1751,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "ask"
           },
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "prevClose"
           }
         ]
@@ -1774,7 +1774,7 @@
     "nl": "Pairs spread: MSFT minus GOOG",
     "request": {
       "key": 1,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1782,12 +1782,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "MSFT",
+            "streamKey": "MSFT",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "GOOG",
+            "streamKey": "GOOG",
             "field": "lastPrice"
           }
         ]
@@ -1805,7 +1805,7 @@
     "nl": "First value from the pair of AAPL volume and TSLA volume",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1813,12 +1813,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "volume"
           },
           {
             "type": "Listener",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "volume"
           }
         ]
@@ -1836,7 +1836,7 @@
     "nl": "Total volume across the chip sector: NVDA + AMD + INTC + QCOM",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1844,22 +1844,22 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "NVDA",
+            "streamKey": "NVDA",
             "field": "volume"
           },
           {
             "type": "Listener",
-            "symbol": "AMD",
+            "streamKey": "AMD",
             "field": "volume"
           },
           {
             "type": "Listener",
-            "symbol": "INTC",
+            "streamKey": "INTC",
             "field": "volume"
           },
           {
             "type": "Listener",
-            "symbol": "QCOM",
+            "streamKey": "QCOM",
             "field": "volume"
           }
         ]
@@ -1877,7 +1877,7 @@
     "nl": "Spread between DIS open and close",
     "request": {
       "key": 1,
-      "symbol": "DIS",
+      "streamKey": "DIS",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1885,12 +1885,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "DIS",
+            "streamKey": "DIS",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "DIS",
+            "streamKey": "DIS",
             "field": "openPrice"
           }
         ]
@@ -1908,7 +1908,7 @@
     "nl": "Bollinger bandwidth for AAPL \u2014 upper minus lower band",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1916,12 +1916,12 @@
         "inputs": [
           {
             "type": "AtomicAccessor",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "bollinger_upper"
           },
           {
             "type": "AtomicAccessor",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "bollinger_lower"
           }
         ]
@@ -1939,7 +1939,7 @@
     "nl": "SMA crossover delta for TSLA \u2014 SMA 20 minus SMA 50",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1947,12 +1947,12 @@
         "inputs": [
           {
             "type": "AtomicAccessor",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "sma_20"
           },
           {
             "type": "AtomicAccessor",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "sma_50"
           }
         ]
@@ -1970,7 +1970,7 @@
     "nl": "EMA convergence: difference between 9-EMA and 21-EMA for GOOG",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -1978,12 +1978,12 @@
         "inputs": [
           {
             "type": "AtomicAccessor",
-            "symbol": "GOOG",
+            "streamKey": "GOOG",
             "field": "ema_9"
           },
           {
             "type": "AtomicAccessor",
-            "symbol": "GOOG",
+            "streamKey": "GOOG",
             "field": "ema_21"
           }
         ]
@@ -2001,7 +2001,7 @@
     "nl": "Average of AAPL's SMA 5 and SMA 10",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -2009,12 +2009,12 @@
         "inputs": [
           {
             "type": "AtomicAccessor",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "sma_5"
           },
           {
             "type": "AtomicAccessor",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "sma_10"
           }
         ]
@@ -2032,7 +2032,7 @@
     "nl": "RSI comparison: max RSI between AAPL and MSFT",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -2040,12 +2040,12 @@
         "inputs": [
           {
             "type": "AtomicAccessor",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "rsi_14"
           },
           {
             "type": "AtomicAccessor",
-            "symbol": "MSFT",
+            "streamKey": "MSFT",
             "field": "rsi_14"
           }
         ]
@@ -2063,14 +2063,14 @@
     "nl": "Poll AAPL's RSI every second",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 1000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "AAPL",
+          "streamKey": "AAPL",
           "field": "rsi_14"
         }
       }
@@ -2081,14 +2081,14 @@
     "nl": "Check TSLA's VWAP every 5 seconds",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 5000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "TSLA",
+          "streamKey": "TSLA",
           "field": "vwap"
         }
       }
@@ -2099,14 +2099,14 @@
     "nl": "Every 10 seconds, show me NVDA's SMA 20",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 10000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "NVDA",
+          "streamKey": "NVDA",
           "field": "sma_20"
         }
       }
@@ -2117,14 +2117,14 @@
     "nl": "Sample GOOG's MACD line every 30 seconds",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 30000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "GOOG",
+          "streamKey": "GOOG",
           "field": "macd_line"
         }
       }
@@ -2135,14 +2135,14 @@
     "nl": "Poll Bollinger upper band for MSFT every 2 seconds",
     "request": {
       "key": 1,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 2000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "MSFT",
+          "streamKey": "MSFT",
           "field": "bollinger_upper"
         }
       }
@@ -2153,14 +2153,14 @@
     "nl": "ATR for AMD, updated every minute",
     "request": {
       "key": 1,
-      "symbol": "AMD",
+      "streamKey": "AMD",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 60000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "AMD",
+          "streamKey": "AMD",
           "field": "atr_14"
         }
       }
@@ -2171,14 +2171,14 @@
     "nl": "Every 3 seconds, give me the momentum reading on SPY",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 3000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "SPY",
+          "streamKey": "SPY",
           "field": "momentum_10"
         }
       }
@@ -2189,14 +2189,14 @@
     "nl": "OBV snapshot for META every 15 seconds",
     "request": {
       "key": 1,
-      "symbol": "META",
+      "streamKey": "META",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 15000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "META",
+          "streamKey": "META",
           "field": "obv"
         }
       }
@@ -2207,14 +2207,14 @@
     "nl": "Sample AAPL EMA 50 every half second",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 500,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "AAPL",
+          "streamKey": "AAPL",
           "field": "ema_50"
         }
       }
@@ -2225,14 +2225,14 @@
     "nl": "Check the volatility rank on QQQ every 20 seconds",
     "request": {
       "key": 1,
-      "symbol": "QQQ",
+      "streamKey": "QQQ",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 20000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "QQQ",
+          "streamKey": "QQQ",
           "field": "volatility_rank"
         }
       }
@@ -2243,14 +2243,14 @@
     "nl": "Every 4 seconds poll the rate of change for COIN",
     "request": {
       "key": 1,
-      "symbol": "COIN",
+      "streamKey": "COIN",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 4000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "COIN",
+          "streamKey": "COIN",
           "field": "roc_10"
         }
       }
@@ -2261,14 +2261,14 @@
     "nl": "Poll JPM's MACD histogram every 5 seconds",
     "request": {
       "key": 1,
-      "symbol": "JPM",
+      "streamKey": "JPM",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 5000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "JPM",
+          "streamKey": "JPM",
           "field": "macd_histogram"
         }
       }
@@ -2279,14 +2279,14 @@
     "nl": "Snapshot of PLTR's median price every 8 seconds",
     "request": {
       "key": 1,
-      "symbol": "PLTR",
+      "streamKey": "PLTR",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 8000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "PLTR",
+          "streamKey": "PLTR",
           "field": "median"
         }
       }
@@ -2297,14 +2297,14 @@
     "nl": "Give me Bollinger lower for BA every 10 seconds",
     "request": {
       "key": 1,
-      "symbol": "BA",
+      "streamKey": "BA",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 10000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "BA",
+          "streamKey": "BA",
           "field": "bollinger_lower"
         }
       }
@@ -2315,14 +2315,14 @@
     "nl": "Volume average sampled once a minute for NFLX",
     "request": {
       "key": 1,
-      "symbol": "NFLX",
+      "streamKey": "NFLX",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 60000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "NFLX",
+          "streamKey": "NFLX",
           "field": "volume_avg_20"
         }
       }
@@ -2333,14 +2333,14 @@
     "nl": "Periodic SMA 5 for DIS every 2 seconds",
     "request": {
       "key": 1,
-      "symbol": "DIS",
+      "streamKey": "DIS",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 2000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "DIS",
+          "streamKey": "DIS",
           "field": "sma_5"
         }
       }
@@ -2351,14 +2351,14 @@
     "nl": "Slow poll \u2014 check INTC's EMA 9 every 45 seconds",
     "request": {
       "key": 1,
-      "symbol": "INTC",
+      "streamKey": "INTC",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 45000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "INTC",
+          "streamKey": "INTC",
           "field": "ema_9"
         }
       }
@@ -2369,14 +2369,14 @@
     "nl": "MACD signal for AMZN refreshed every 7 seconds",
     "request": {
       "key": 1,
-      "symbol": "AMZN",
+      "streamKey": "AMZN",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 7000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "AMZN",
+          "streamKey": "AMZN",
           "field": "macd_signal"
         }
       }
@@ -2387,14 +2387,14 @@
     "nl": "Every 500 milliseconds give me TSLA's SMA 10",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 500,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "TSLA",
+          "streamKey": "TSLA",
           "field": "sma_10"
         }
       }
@@ -2405,14 +2405,14 @@
     "nl": "Mean price from the atomic store for AAPL, polled every 3 seconds",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 3000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "AAPL",
+          "streamKey": "AAPL",
           "field": "mean"
         }
       }
@@ -2423,7 +2423,7 @@
     "nl": "Running average for every stock in the feed",
     "request": {
       "key": 1,
-      "symbol": "*",
+      "streamKey": "*",
       "field": "lastPrice",
       "node": {
         "type": "SymbolSplit",
@@ -2439,7 +2439,7 @@
     "nl": "Track cumulative volume per symbol across the entire feed",
     "request": {
       "key": 1,
-      "symbol": "*",
+      "streamKey": "*",
       "field": "volume",
       "node": {
         "type": "SymbolSplit",
@@ -2455,7 +2455,7 @@
     "nl": "Max price per ticker for every stock",
     "request": {
       "key": 1,
-      "symbol": "*",
+      "streamKey": "*",
       "field": "lastPrice",
       "node": {
         "type": "SymbolSplit",
@@ -2471,7 +2471,7 @@
     "nl": "Count price ticks per symbol for every symbol in the market",
     "request": {
       "key": 1,
-      "symbol": "*",
+      "streamKey": "*",
       "field": "lastPrice",
       "node": {
         "type": "SymbolSplit",
@@ -2487,7 +2487,7 @@
     "nl": "Standard deviation of each stock's price individually",
     "request": {
       "key": 1,
-      "symbol": "*",
+      "streamKey": "*",
       "field": "lastPrice",
       "node": {
         "type": "SymbolSplit",
@@ -2503,7 +2503,7 @@
     "nl": "Price range for every symbol in the feed",
     "request": {
       "key": 1,
-      "symbol": "*",
+      "streamKey": "*",
       "field": "lastPrice",
       "node": {
         "type": "SymbolSplit",
@@ -2519,7 +2519,7 @@
     "nl": "Net change per stock across the whole market",
     "request": {
       "key": 1,
-      "symbol": "*",
+      "streamKey": "*",
       "field": "lastPrice",
       "node": {
         "type": "SymbolSplit",
@@ -2535,7 +2535,7 @@
     "nl": "Min price per symbol for all tickers",
     "request": {
       "key": 1,
-      "symbol": "*",
+      "streamKey": "*",
       "field": "lastPrice",
       "node": {
         "type": "SymbolSplit",
@@ -2551,7 +2551,7 @@
     "nl": "Last traded price per stock for every symbol",
     "request": {
       "key": 1,
-      "symbol": "*",
+      "streamKey": "*",
       "field": "lastPrice",
       "node": {
         "type": "SymbolSplit",
@@ -2567,7 +2567,7 @@
     "nl": "Volume scaled to millions for each individual ticker",
     "request": {
       "key": 1,
-      "symbol": "*",
+      "streamKey": "*",
       "field": "volume",
       "node": {
         "type": "SymbolSplit",
@@ -2584,7 +2584,7 @@
     "nl": "Running mean of AAPL price, scaled to cents",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "pipeline": [
         {
@@ -2604,7 +2604,7 @@
     "nl": "Net change in TSLA price scaled to basis points",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "pipeline": [
         {
@@ -2624,7 +2624,7 @@
     "nl": "Standard deviation of NVDA's bid, smoothed with a mean",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "bid",
       "pipeline": [
         {
@@ -2643,7 +2643,7 @@
     "nl": "Show the spread of GOOG volume then take the average",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "volume",
       "pipeline": [
         {
@@ -2662,7 +2662,7 @@
     "nl": "Average bid-ask spread for AAPL",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -2670,12 +2670,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "ask"
           },
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "bid"
           }
         ]
@@ -2697,7 +2697,7 @@
     "nl": "NVDA vs AMD price spread, then compute the stddev of that spread over time",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -2705,12 +2705,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "NVDA",
+            "streamKey": "NVDA",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "AMD",
+            "streamKey": "AMD",
             "field": "lastPrice"
           }
         ]
@@ -2732,7 +2732,7 @@
     "nl": "Cumulative sum of volume, scaled to thousands",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "volume",
       "pipeline": [
         {
@@ -2752,7 +2752,7 @@
     "nl": "Max price for TSLA, then show the count of updates",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "pipeline": [
         {
@@ -2771,7 +2771,7 @@
     "nl": "MSFT mid price (bid+ask average) smoothed further with a running mean",
     "request": {
       "key": 1,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -2779,12 +2779,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "MSFT",
+            "streamKey": "MSFT",
             "field": "bid"
           },
           {
             "type": "Listener",
-            "symbol": "MSFT",
+            "streamKey": "MSFT",
             "field": "ask"
           }
         ]
@@ -2806,7 +2806,7 @@
     "nl": "Diff of GOOG price then scale by 50",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "pipeline": [
         {
@@ -2826,7 +2826,7 @@
     "nl": "Average of the price spread for SPY",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "pipeline": [
         {
@@ -2845,7 +2845,7 @@
     "nl": "Mean of AAPL's bid-ask mid, scaled to basis points",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -2853,12 +2853,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "bid"
           },
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "ask"
           }
         ]
@@ -2881,7 +2881,7 @@
     "nl": "Sum of high and low for META then take the average",
     "request": {
       "key": 1,
-      "symbol": "META",
+      "streamKey": "META",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -2889,12 +2889,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "META",
+            "streamKey": "META",
             "field": "highPrice"
           },
           {
             "type": "Listener",
-            "symbol": "META",
+            "streamKey": "META",
             "field": "lowPrice"
           }
         ]
@@ -2916,7 +2916,7 @@
     "nl": "First bid, then count how many updates we got",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "bid",
       "pipeline": [
         {
@@ -2935,7 +2935,7 @@
     "nl": "SPY vs QQQ price diff, smoothed with a running mean, scaled to percentage points",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -2943,12 +2943,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "SPY",
+            "streamKey": "SPY",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "QQQ",
+            "streamKey": "QQQ",
             "field": "lastPrice"
           }
         ]
@@ -2975,7 +2975,7 @@
     "nl": "AMD volume sum, show just the last value scaled by 0.01",
     "request": {
       "key": 1,
-      "symbol": "AMD",
+      "streamKey": "AMD",
       "field": "volume",
       "pipeline": [
         {
@@ -2999,7 +2999,7 @@
     "nl": "TSLA price diff then stddev then scale by 100",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "pipeline": [
         {
@@ -3023,7 +3023,7 @@
     "nl": "Running min of AAPL's ask, then compute the spread of that",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "ask",
       "pipeline": [
         {
@@ -3042,7 +3042,7 @@
     "nl": "Max of INTC volume then average it out",
     "request": {
       "key": 1,
-      "symbol": "INTC",
+      "streamKey": "INTC",
       "field": "volume",
       "pipeline": [
         {
@@ -3061,7 +3061,7 @@
     "nl": "Cross-symbol volume spread \u2014 AAPL vs GOOG \u2014 then take the mean",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -3069,12 +3069,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "volume"
           },
           {
             "type": "Listener",
-            "symbol": "GOOG",
+            "streamKey": "GOOG",
             "field": "volume"
           }
         ]
@@ -3096,7 +3096,7 @@
     "nl": "Count of bid updates for JPM then scale by 10",
     "request": {
       "key": 1,
-      "symbol": "JPM",
+      "streamKey": "JPM",
       "field": "bid",
       "pipeline": [
         {
@@ -3116,7 +3116,7 @@
     "nl": "Average the high-low range for COIN over time",
     "request": {
       "key": 1,
-      "symbol": "COIN",
+      "streamKey": "COIN",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -3124,12 +3124,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "COIN",
+            "streamKey": "COIN",
             "field": "highPrice"
           },
           {
             "type": "Listener",
-            "symbol": "COIN",
+            "streamKey": "COIN",
             "field": "lowPrice"
           }
         ]
@@ -3151,7 +3151,7 @@
     "nl": "NFLX volume diff then take the last value",
     "request": {
       "key": 1,
-      "symbol": "NFLX",
+      "streamKey": "NFLX",
       "field": "volume",
       "pipeline": [
         {
@@ -3170,7 +3170,7 @@
     "nl": "BA ask spread scaled down by half",
     "request": {
       "key": 1,
-      "symbol": "BA",
+      "streamKey": "BA",
       "field": "ask",
       "pipeline": [
         {
@@ -3190,7 +3190,7 @@
     "nl": "DIS bid mean scaled to thousands",
     "request": {
       "key": 1,
-      "symbol": "DIS",
+      "streamKey": "DIS",
       "field": "bid",
       "pipeline": [
         {
@@ -3210,11 +3210,11 @@
     "nl": "SMA crossover monitor for AAPL: stream the 20 and 50 period SMAs",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "sma_20"
       }
     }
@@ -3224,11 +3224,11 @@
     "nl": "SMA crossover monitor for AAPL: stream the 20 and 50 period SMAs",
     "request": {
       "key": 2,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "sma_50"
       }
     }
@@ -3238,11 +3238,11 @@
     "nl": "Full MACD suite for TSLA: line, signal, histogram",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "TSLA",
+        "streamKey": "TSLA",
         "field": "macd_line"
       }
     }
@@ -3252,11 +3252,11 @@
     "nl": "Full MACD suite for TSLA: line, signal, histogram",
     "request": {
       "key": 2,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "TSLA",
+        "streamKey": "TSLA",
         "field": "macd_signal"
       }
     }
@@ -3266,11 +3266,11 @@
     "nl": "Full MACD suite for TSLA: line, signal, histogram",
     "request": {
       "key": 3,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "TSLA",
+        "streamKey": "TSLA",
         "field": "macd_histogram"
       }
     }
@@ -3280,11 +3280,11 @@
     "nl": "Bollinger band envelope for NVDA \u2014 upper and lower bands",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "NVDA",
+        "streamKey": "NVDA",
         "field": "bollinger_upper"
       }
     }
@@ -3294,11 +3294,11 @@
     "nl": "Bollinger band envelope for NVDA \u2014 upper and lower bands",
     "request": {
       "key": 2,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "NVDA",
+        "streamKey": "NVDA",
         "field": "bollinger_lower"
       }
     }
@@ -3308,11 +3308,11 @@
     "nl": "Compare RSI across tech stocks: AAPL, GOOG, MSFT, NVDA",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "rsi_14"
       }
     }
@@ -3322,11 +3322,11 @@
     "nl": "Compare RSI across tech stocks: AAPL, GOOG, MSFT, NVDA",
     "request": {
       "key": 2,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "GOOG",
+        "streamKey": "GOOG",
         "field": "rsi_14"
       }
     }
@@ -3336,11 +3336,11 @@
     "nl": "Compare RSI across tech stocks: AAPL, GOOG, MSFT, NVDA",
     "request": {
       "key": 3,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "MSFT",
+        "streamKey": "MSFT",
         "field": "rsi_14"
       }
     }
@@ -3350,11 +3350,11 @@
     "nl": "Compare RSI across tech stocks: AAPL, GOOG, MSFT, NVDA",
     "request": {
       "key": 4,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "NVDA",
+        "streamKey": "NVDA",
         "field": "rsi_14"
       }
     }
@@ -3364,7 +3364,7 @@
     "nl": "Stream AAPL's price, volume, and VWAP together",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice"
     }
   },
@@ -3373,7 +3373,7 @@
     "nl": "Stream AAPL's price, volume, and VWAP together",
     "request": {
       "key": 2,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "volume"
     }
   },
@@ -3382,11 +3382,11 @@
     "nl": "Stream AAPL's price, volume, and VWAP together",
     "request": {
       "key": 3,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "vwap"
       }
     }
@@ -3396,11 +3396,11 @@
     "nl": "EMA convergence monitor for MSFT: 9, 21, and 50 period EMAs",
     "request": {
       "key": 1,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "MSFT",
+        "streamKey": "MSFT",
         "field": "ema_9"
       }
     }
@@ -3410,11 +3410,11 @@
     "nl": "EMA convergence monitor for MSFT: 9, 21, and 50 period EMAs",
     "request": {
       "key": 2,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "MSFT",
+        "streamKey": "MSFT",
         "field": "ema_21"
       }
     }
@@ -3424,11 +3424,11 @@
     "nl": "EMA convergence monitor for MSFT: 9, 21, and 50 period EMAs",
     "request": {
       "key": 3,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "MSFT",
+        "streamKey": "MSFT",
         "field": "ema_50"
       }
     }
@@ -3438,11 +3438,11 @@
     "nl": "Volatility dashboard for SPY: ATR, stddev of price, and volatility rank",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "SPY",
+        "streamKey": "SPY",
         "field": "atr_14"
       }
     }
@@ -3452,7 +3452,7 @@
     "nl": "Volatility dashboard for SPY: ATR, stddev of price, and volatility rank",
     "request": {
       "key": 2,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -3465,11 +3465,11 @@
     "nl": "Volatility dashboard for SPY: ATR, stddev of price, and volatility rank",
     "request": {
       "key": 3,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "SPY",
+        "streamKey": "SPY",
         "field": "volatility_rank"
       }
     }
@@ -3479,7 +3479,7 @@
     "nl": "Pairs trade setup: NVDA vs AMD price spread mean, and the stddev of that spread",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -3487,12 +3487,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "NVDA",
+            "streamKey": "NVDA",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "AMD",
+            "streamKey": "AMD",
             "field": "lastPrice"
           }
         ]
@@ -3514,7 +3514,7 @@
     "nl": "Pairs trade setup: NVDA vs AMD price spread mean, and the stddev of that spread",
     "request": {
       "key": 2,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -3522,12 +3522,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "NVDA",
+            "streamKey": "NVDA",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "AMD",
+            "streamKey": "AMD",
             "field": "lastPrice"
           }
         ]
@@ -3549,11 +3549,11 @@
     "nl": "All four SMA periods for GOOG side by side: 5, 10, 20, 50",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "GOOG",
+        "streamKey": "GOOG",
         "field": "sma_5"
       }
     }
@@ -3563,11 +3563,11 @@
     "nl": "All four SMA periods for GOOG side by side: 5, 10, 20, 50",
     "request": {
       "key": 2,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "GOOG",
+        "streamKey": "GOOG",
         "field": "sma_10"
       }
     }
@@ -3577,11 +3577,11 @@
     "nl": "All four SMA periods for GOOG side by side: 5, 10, 20, 50",
     "request": {
       "key": 3,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "GOOG",
+        "streamKey": "GOOG",
         "field": "sma_20"
       }
     }
@@ -3591,11 +3591,11 @@
     "nl": "All four SMA periods for GOOG side by side: 5, 10, 20, 50",
     "request": {
       "key": 4,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "GOOG",
+        "streamKey": "GOOG",
         "field": "sma_50"
       }
     }
@@ -3605,7 +3605,7 @@
     "nl": "Price, RSI, and MACD for AAPL \u2014 a quick technical snapshot",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice"
     }
   },
@@ -3614,11 +3614,11 @@
     "nl": "Price, RSI, and MACD for AAPL \u2014 a quick technical snapshot",
     "request": {
       "key": 2,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "rsi_14"
       }
     }
@@ -3628,11 +3628,11 @@
     "nl": "Price, RSI, and MACD for AAPL \u2014 a quick technical snapshot",
     "request": {
       "key": 3,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "macd_line"
       }
     }
@@ -3642,7 +3642,7 @@
     "nl": "TSLA bid-ask spread and running volume, give me both",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -3650,12 +3650,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "ask"
           },
           {
             "type": "Listener",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "bid"
           }
         ]
@@ -3673,7 +3673,7 @@
     "nl": "TSLA bid-ask spread and running volume, give me both",
     "request": {
       "key": 2,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "volume",
       "node": {
         "type": "Worker",
@@ -3686,14 +3686,14 @@
     "nl": "Monitor AAPL with: RSI polled every 2 seconds, plus continuous Bollinger bands",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 2000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "AAPL",
+          "streamKey": "AAPL",
           "field": "rsi_14"
         }
       }
@@ -3704,11 +3704,11 @@
     "nl": "Monitor AAPL with: RSI polled every 2 seconds, plus continuous Bollinger bands",
     "request": {
       "key": 2,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "bollinger_upper"
       }
     }
@@ -3718,11 +3718,11 @@
     "nl": "Monitor AAPL with: RSI polled every 2 seconds, plus continuous Bollinger bands",
     "request": {
       "key": 3,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "bollinger_lower"
       }
     }
@@ -3732,11 +3732,11 @@
     "nl": "Momentum check across sectors: SPY, QQQ, and DIA price momentum",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "SPY",
+        "streamKey": "SPY",
         "field": "momentum_10"
       }
     }
@@ -3746,11 +3746,11 @@
     "nl": "Momentum check across sectors: SPY, QQQ, and DIA price momentum",
     "request": {
       "key": 2,
-      "symbol": "QQQ",
+      "streamKey": "QQQ",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "QQQ",
+        "streamKey": "QQQ",
         "field": "momentum_10"
       }
     }
@@ -3760,11 +3760,11 @@
     "nl": "Momentum check across sectors: SPY, QQQ, and DIA price momentum",
     "request": {
       "key": 3,
-      "symbol": "DIA",
+      "streamKey": "DIA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "DIA",
+        "streamKey": "DIA",
         "field": "momentum_10"
       }
     }
@@ -3774,7 +3774,7 @@
     "nl": "I want to track MSFT's price, its running mean, and the stddev \u2014 three separate streams",
     "request": {
       "key": 1,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice"
     }
   },
@@ -3783,7 +3783,7 @@
     "nl": "I want to track MSFT's price, its running mean, and the stddev \u2014 three separate streams",
     "request": {
       "key": 2,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -3796,7 +3796,7 @@
     "nl": "I want to track MSFT's price, its running mean, and the stddev \u2014 three separate streams",
     "request": {
       "key": 3,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -3809,7 +3809,7 @@
     "nl": "Pairs comparison: AAPL vs MSFT \u2014 stream both prices and the spread",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice"
     }
   },
@@ -3818,7 +3818,7 @@
     "nl": "Pairs comparison: AAPL vs MSFT \u2014 stream both prices and the spread",
     "request": {
       "key": 2,
-      "symbol": "MSFT",
+      "streamKey": "MSFT",
       "field": "lastPrice"
     }
   },
@@ -3827,7 +3827,7 @@
     "nl": "Pairs comparison: AAPL vs MSFT \u2014 stream both prices and the spread",
     "request": {
       "key": 3,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -3835,12 +3835,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "MSFT",
+            "streamKey": "MSFT",
             "field": "lastPrice"
           }
         ]
@@ -3858,14 +3858,14 @@
     "nl": "VWAP and OBV for META, polled every 5 seconds each",
     "request": {
       "key": 1,
-      "symbol": "META",
+      "streamKey": "META",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 5000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "META",
+          "streamKey": "META",
           "field": "vwap"
         }
       }
@@ -3876,14 +3876,14 @@
     "nl": "VWAP and OBV for META, polled every 5 seconds each",
     "request": {
       "key": 2,
-      "symbol": "META",
+      "streamKey": "META",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 5000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "META",
+          "streamKey": "META",
           "field": "obv"
         }
       }
@@ -3894,7 +3894,7 @@
     "nl": "Quick NVDA analysis: price, EMA 9, EMA 21, RSI",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice"
     }
   },
@@ -3903,11 +3903,11 @@
     "nl": "Quick NVDA analysis: price, EMA 9, EMA 21, RSI",
     "request": {
       "key": 2,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "NVDA",
+        "streamKey": "NVDA",
         "field": "ema_9"
       }
     }
@@ -3917,11 +3917,11 @@
     "nl": "Quick NVDA analysis: price, EMA 9, EMA 21, RSI",
     "request": {
       "key": 3,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "NVDA",
+        "streamKey": "NVDA",
         "field": "ema_21"
       }
     }
@@ -3931,11 +3931,11 @@
     "nl": "Quick NVDA analysis: price, EMA 9, EMA 21, RSI",
     "request": {
       "key": 4,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "NVDA",
+        "streamKey": "NVDA",
         "field": "rsi_14"
       }
     }
@@ -3945,7 +3945,7 @@
     "nl": "Chip sector dashboard: running mean price for NVDA, AMD, INTC",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -3958,7 +3958,7 @@
     "nl": "Chip sector dashboard: running mean price for NVDA, AMD, INTC",
     "request": {
       "key": 2,
-      "symbol": "AMD",
+      "streamKey": "AMD",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -3971,7 +3971,7 @@
     "nl": "Chip sector dashboard: running mean price for NVDA, AMD, INTC",
     "request": {
       "key": 3,
-      "symbol": "INTC",
+      "streamKey": "INTC",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -3984,7 +3984,7 @@
     "nl": "AAPL full quote: price, bid, ask, volume",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice"
     }
   },
@@ -3993,7 +3993,7 @@
     "nl": "AAPL full quote: price, bid, ask, volume",
     "request": {
       "key": 2,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "bid"
     }
   },
@@ -4002,7 +4002,7 @@
     "nl": "AAPL full quote: price, bid, ask, volume",
     "request": {
       "key": 3,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "ask"
     }
   },
@@ -4011,7 +4011,7 @@
     "nl": "AAPL full quote: price, bid, ask, volume",
     "request": {
       "key": 4,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "volume"
     }
   },
@@ -4020,7 +4020,7 @@
     "nl": "Mean reversion setup for GOOG: price, SMA 20, and Bollinger bands",
     "request": {
       "key": 1,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice"
     }
   },
@@ -4029,11 +4029,11 @@
     "nl": "Mean reversion setup for GOOG: price, SMA 20, and Bollinger bands",
     "request": {
       "key": 2,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "GOOG",
+        "streamKey": "GOOG",
         "field": "sma_20"
       }
     }
@@ -4043,11 +4043,11 @@
     "nl": "Mean reversion setup for GOOG: price, SMA 20, and Bollinger bands",
     "request": {
       "key": 3,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "GOOG",
+        "streamKey": "GOOG",
         "field": "bollinger_upper"
       }
     }
@@ -4057,11 +4057,11 @@
     "nl": "Mean reversion setup for GOOG: price, SMA 20, and Bollinger bands",
     "request": {
       "key": 4,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "GOOG",
+        "streamKey": "GOOG",
         "field": "bollinger_lower"
       }
     }
@@ -4071,7 +4071,7 @@
     "nl": "SPY price with tick count and running max",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice"
     }
   },
@@ -4080,7 +4080,7 @@
     "nl": "SPY price with tick count and running max",
     "request": {
       "key": 2,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -4093,7 +4093,7 @@
     "nl": "SPY price with tick count and running max",
     "request": {
       "key": 3,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -4106,11 +4106,11 @@
     "nl": "TSLA trend strength: stream SMA 5, SMA 20, and the diff between SMA 20 and SMA 50",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "TSLA",
+        "streamKey": "TSLA",
         "field": "sma_5"
       }
     }
@@ -4120,11 +4120,11 @@
     "nl": "TSLA trend strength: stream SMA 5, SMA 20, and the diff between SMA 20 and SMA 50",
     "request": {
       "key": 2,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "TSLA",
+        "streamKey": "TSLA",
         "field": "sma_20"
       }
     }
@@ -4134,7 +4134,7 @@
     "nl": "TSLA trend strength: stream SMA 5, SMA 20, and the diff between SMA 20 and SMA 50",
     "request": {
       "key": 3,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -4142,12 +4142,12 @@
         "inputs": [
           {
             "type": "AtomicAccessor",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "sma_20"
           },
           {
             "type": "AtomicAccessor",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "sma_50"
           }
         ]
@@ -4165,7 +4165,7 @@
     "nl": "Market breadth check: running mean price for SPY, QQQ, DIA, IWM",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -4178,7 +4178,7 @@
     "nl": "Market breadth check: running mean price for SPY, QQQ, DIA, IWM",
     "request": {
       "key": 2,
-      "symbol": "QQQ",
+      "streamKey": "QQQ",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -4191,7 +4191,7 @@
     "nl": "Market breadth check: running mean price for SPY, QQQ, DIA, IWM",
     "request": {
       "key": 3,
-      "symbol": "DIA",
+      "streamKey": "DIA",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -4204,7 +4204,7 @@
     "nl": "Market breadth check: running mean price for SPY, QQQ, DIA, IWM",
     "request": {
       "key": 4,
-      "symbol": "IWM",
+      "streamKey": "IWM",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -4217,7 +4217,7 @@
     "nl": "AMD volume analysis: raw volume, cumulative sum, and 20-period average",
     "request": {
       "key": 1,
-      "symbol": "AMD",
+      "streamKey": "AMD",
       "field": "volume"
     }
   },
@@ -4226,7 +4226,7 @@
     "nl": "AMD volume analysis: raw volume, cumulative sum, and 20-period average",
     "request": {
       "key": 2,
-      "symbol": "AMD",
+      "streamKey": "AMD",
       "field": "volume",
       "node": {
         "type": "Worker",
@@ -4239,11 +4239,11 @@
     "nl": "AMD volume analysis: raw volume, cumulative sum, and 20-period average",
     "request": {
       "key": 3,
-      "symbol": "AMD",
+      "streamKey": "AMD",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AMD",
+        "streamKey": "AMD",
         "field": "volume_avg_20"
       }
     }
@@ -4253,7 +4253,7 @@
     "nl": "Bid-ask analysis for NVDA: spread, mid price, and spread stddev",
     "request": {
       "key": 1,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -4261,12 +4261,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "NVDA",
+            "streamKey": "NVDA",
             "field": "ask"
           },
           {
             "type": "Listener",
-            "symbol": "NVDA",
+            "streamKey": "NVDA",
             "field": "bid"
           }
         ]
@@ -4284,7 +4284,7 @@
     "nl": "Bid-ask analysis for NVDA: spread, mid price, and spread stddev",
     "request": {
       "key": 2,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -4292,12 +4292,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "NVDA",
+            "streamKey": "NVDA",
             "field": "bid"
           },
           {
             "type": "Listener",
-            "symbol": "NVDA",
+            "streamKey": "NVDA",
             "field": "ask"
           }
         ]
@@ -4315,7 +4315,7 @@
     "nl": "Bid-ask analysis for NVDA: spread, mid price, and spread stddev",
     "request": {
       "key": 3,
-      "symbol": "NVDA",
+      "streamKey": "NVDA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -4323,12 +4323,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "NVDA",
+            "streamKey": "NVDA",
             "field": "ask"
           },
           {
             "type": "Listener",
-            "symbol": "NVDA",
+            "streamKey": "NVDA",
             "field": "bid"
           }
         ]
@@ -4350,11 +4350,11 @@
     "nl": "Complete AAPL technical screen: RSI, MACD line, Bollinger upper, ATR, and VWAP",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "rsi_14"
       }
     }
@@ -4364,11 +4364,11 @@
     "nl": "Complete AAPL technical screen: RSI, MACD line, Bollinger upper, ATR, and VWAP",
     "request": {
       "key": 2,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "macd_line"
       }
     }
@@ -4378,11 +4378,11 @@
     "nl": "Complete AAPL technical screen: RSI, MACD line, Bollinger upper, ATR, and VWAP",
     "request": {
       "key": 3,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "bollinger_upper"
       }
     }
@@ -4392,11 +4392,11 @@
     "nl": "Complete AAPL technical screen: RSI, MACD line, Bollinger upper, ATR, and VWAP",
     "request": {
       "key": 4,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "atr_14"
       }
     }
@@ -4406,11 +4406,11 @@
     "nl": "Complete AAPL technical screen: RSI, MACD line, Bollinger upper, ATR, and VWAP",
     "request": {
       "key": 5,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "vwap"
       }
     }
@@ -4420,7 +4420,7 @@
     "nl": "Scalping setup: TSLA price, bid-ask mid, running mean, and tick count",
     "request": {
       "key": 1,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice"
     }
   },
@@ -4429,7 +4429,7 @@
     "nl": "Scalping setup: TSLA price, bid-ask mid, running mean, and tick count",
     "request": {
       "key": 2,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -4437,12 +4437,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "bid"
           },
           {
             "type": "Listener",
-            "symbol": "TSLA",
+            "streamKey": "TSLA",
             "field": "ask"
           }
         ]
@@ -4460,7 +4460,7 @@
     "nl": "Scalping setup: TSLA price, bid-ask mid, running mean, and tick count",
     "request": {
       "key": 3,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -4473,7 +4473,7 @@
     "nl": "Scalping setup: TSLA price, bid-ask mid, running mean, and tick count",
     "request": {
       "key": 4,
-      "symbol": "TSLA",
+      "streamKey": "TSLA",
       "field": "lastPrice",
       "node": {
         "type": "Worker",
@@ -4486,7 +4486,7 @@
     "nl": "Cross-sector relative strength: SPY price diff vs QQQ, and SPY vs DIA, both smoothed",
     "request": {
       "key": 1,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -4494,12 +4494,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "SPY",
+            "streamKey": "SPY",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "QQQ",
+            "streamKey": "QQQ",
             "field": "lastPrice"
           }
         ]
@@ -4521,7 +4521,7 @@
     "nl": "Cross-sector relative strength: SPY price diff vs QQQ, and SPY vs DIA, both smoothed",
     "request": {
       "key": 2,
-      "symbol": "SPY",
+      "streamKey": "SPY",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -4529,12 +4529,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "SPY",
+            "streamKey": "SPY",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "DIA",
+            "streamKey": "DIA",
             "field": "lastPrice"
           }
         ]
@@ -4556,7 +4556,7 @@
     "nl": "Swing trade dashboard for COIN: price, EMA 9, EMA 21, RSI polled every 5s, and volume sum",
     "request": {
       "key": 1,
-      "symbol": "COIN",
+      "streamKey": "COIN",
       "field": "lastPrice"
     }
   },
@@ -4565,11 +4565,11 @@
     "nl": "Swing trade dashboard for COIN: price, EMA 9, EMA 21, RSI polled every 5s, and volume sum",
     "request": {
       "key": 2,
-      "symbol": "COIN",
+      "streamKey": "COIN",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "COIN",
+        "streamKey": "COIN",
         "field": "ema_9"
       }
     }
@@ -4579,11 +4579,11 @@
     "nl": "Swing trade dashboard for COIN: price, EMA 9, EMA 21, RSI polled every 5s, and volume sum",
     "request": {
       "key": 3,
-      "symbol": "COIN",
+      "streamKey": "COIN",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "COIN",
+        "streamKey": "COIN",
         "field": "ema_21"
       }
     }
@@ -4593,14 +4593,14 @@
     "nl": "Swing trade dashboard for COIN: price, EMA 9, EMA 21, RSI polled every 5s, and volume sum",
     "request": {
       "key": 4,
-      "symbol": "COIN",
+      "streamKey": "COIN",
       "field": "lastPrice",
       "node": {
         "type": "Interval",
         "ms": 5000,
         "child": {
           "type": "AtomicAccessor",
-          "symbol": "COIN",
+          "streamKey": "COIN",
           "field": "rsi_14"
         }
       }
@@ -4611,7 +4611,7 @@
     "nl": "Swing trade dashboard for COIN: price, EMA 9, EMA 21, RSI polled every 5s, and volume sum",
     "request": {
       "key": 5,
-      "symbol": "COIN",
+      "streamKey": "COIN",
       "field": "volume",
       "node": {
         "type": "Worker",
@@ -4624,7 +4624,7 @@
     "nl": "Full pairs trade monitor: AAPL vs GOOG spread mean, spread stddev, plus RSI for both, and Bollinger bandwidth for AAPL",
     "request": {
       "key": 1,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -4632,12 +4632,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "GOOG",
+            "streamKey": "GOOG",
             "field": "lastPrice"
           }
         ]
@@ -4659,7 +4659,7 @@
     "nl": "Full pairs trade monitor: AAPL vs GOOG spread mean, spread stddev, plus RSI for both, and Bollinger bandwidth for AAPL",
     "request": {
       "key": 2,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -4667,12 +4667,12 @@
         "inputs": [
           {
             "type": "Listener",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "lastPrice"
           },
           {
             "type": "Listener",
-            "symbol": "GOOG",
+            "streamKey": "GOOG",
             "field": "lastPrice"
           }
         ]
@@ -4694,11 +4694,11 @@
     "nl": "Full pairs trade monitor: AAPL vs GOOG spread mean, spread stddev, plus RSI for both, and Bollinger bandwidth for AAPL",
     "request": {
       "key": 3,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "AAPL",
+        "streamKey": "AAPL",
         "field": "rsi_14"
       }
     }
@@ -4708,11 +4708,11 @@
     "nl": "Full pairs trade monitor: AAPL vs GOOG spread mean, spread stddev, plus RSI for both, and Bollinger bandwidth for AAPL",
     "request": {
       "key": 4,
-      "symbol": "GOOG",
+      "streamKey": "GOOG",
       "field": "lastPrice",
       "node": {
         "type": "AtomicAccessor",
-        "symbol": "GOOG",
+        "streamKey": "GOOG",
         "field": "rsi_14"
       }
     }
@@ -4722,7 +4722,7 @@
     "nl": "Full pairs trade monitor: AAPL vs GOOG spread mean, spread stddev, plus RSI for both, and Bollinger bandwidth for AAPL",
     "request": {
       "key": 5,
-      "symbol": "AAPL",
+      "streamKey": "AAPL",
       "field": "lastPrice",
       "node": {
         "type": "Aggregate",
@@ -4730,12 +4730,12 @@
         "inputs": [
           {
             "type": "AtomicAccessor",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "bollinger_upper"
           },
           {
             "type": "AtomicAccessor",
-            "symbol": "AAPL",
+            "streamKey": "AAPL",
             "field": "bollinger_lower"
           }
         ]

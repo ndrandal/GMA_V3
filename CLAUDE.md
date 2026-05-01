@@ -51,7 +51,9 @@ include/gma/              # Engine public headers (libgma_engine)
   util/                   # Config, Logger, Metrics
   atomic/                 # AtomicProviderRegistry
   Dispatcher.hpp          # Generic event-routing hub
-  Event.hpp               # Canonical {type, symbol, payload} event
+  Event.hpp               # Canonical {type, symbol, payload} event (the `symbol`
+                          # field is an opaque streamKey internally; WS payloads
+                          # use "streamKey" as the JSON key — ENC-50)
   StreamValue.hpp         # ArgType + pipeline value
   AtomicStore.hpp         # Thread-safe (symbol, field) -> ArgType store
   FunctionMap.hpp         # Named worker-function registry
@@ -95,7 +97,7 @@ docs/
 
 ## Key Architecture (1-paragraph orientation)
 
-A connector registers itself at boot via `MyConnector::registerWith(EngineRegistries&)`. The `Dispatcher` routes inbound `Event`s by their `type` field to per-dispatcher `IEventComputer` instances (supplied by connectors). Listeners subscribe on `(symbol, field)` and receive `StreamValue`s from direct event fields (via `Dispatcher`) or from computer-written atomics (via `Dispatcher::notifyListeners`). JSON request trees are built through `TreeBuilder`, which looks up node constructors in `NodeTypeRegistry`; worker math names resolve via `FunctionMap`.
+A connector registers itself at boot via `MyConnector::registerWith(EngineRegistries&)`. The `Dispatcher` routes inbound `Event`s by their `type` field to per-dispatcher `IEventComputer` instances (supplied by connectors). Listeners subscribe on `(streamKey, field)` and receive `StreamValue`s from direct event fields (via `Dispatcher`) or from computer-written atomics (via `Dispatcher::notifyListeners`). JSON request trees are built through `TreeBuilder`, which looks up node constructors in `NodeTypeRegistry`; worker math names resolve via `FunctionMap`. The wire-format JSON key is `streamKey` everywhere — no `symbol` alias is accepted (ENC-50).
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture including the event lifecycle, connector contract, and a step-by-step guide for adding a new connector.
 

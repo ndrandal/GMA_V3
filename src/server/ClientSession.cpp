@@ -356,8 +356,8 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
       continue;
     }
 
-    if (!r.HasMember("symbol") || !r["symbol"].IsString()) {
-      sendError("subscribe", "request missing 'symbol' string");
+    if (!r.HasMember("streamKey") || !r["streamKey"].IsString()) {
+      sendError("subscribe", "request missing 'streamKey' string");
       continue;
     }
     if (!r.HasMember("field") || !r["field"].IsString()) {
@@ -365,15 +365,15 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
       continue;
     }
 
-    const std::string symbol = r["symbol"].GetString();
-    const std::string field  = r["field"].GetString();
+    const std::string streamKey = r["streamKey"].GetString();
+    const std::string field     = r["field"].GetString();
 
-    // Validate symbol/field length to prevent absurdly large map keys.
-    static constexpr std::size_t MAX_SYMBOL_LEN = 64;
-    static constexpr std::size_t MAX_FIELD_LEN  = 128;
-    if (symbol.empty() || symbol.size() > MAX_SYMBOL_LEN) {
-      sendError("subscribe", "invalid 'symbol' (empty or too long, max "
-                + std::to_string(MAX_SYMBOL_LEN) + ")");
+    // Validate streamKey/field length to prevent absurdly large map keys.
+    static constexpr std::size_t MAX_STREAM_KEY_LEN = 64;
+    static constexpr std::size_t MAX_FIELD_LEN      = 128;
+    if (streamKey.empty() || streamKey.size() > MAX_STREAM_KEY_LEN) {
+      sendError("subscribe", "invalid 'streamKey' (empty or too long, max "
+                + std::to_string(MAX_STREAM_KEY_LEN) + ")");
       continue;
     }
     if (field.empty() || field.size() > MAX_FIELD_LEN) {
@@ -397,7 +397,7 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
         w.StartObject();
         w.Key("type");   w.String("update");
         w.Key("key");    w.Int(reqKey);
-        w.Key("symbol"); w.String(sv.symbol.c_str());
+        w.Key("streamKey"); w.String(sv.symbol.c_str());
         w.Key("value");  gma::util::writeArgTypeJson(w, sv.value);
         w.EndObject();
 
@@ -417,7 +417,7 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     rq.SetObject();
     auto& a = rq.GetAllocator();
 
-    rq.AddMember("symbol", ::rapidjson::Value(symbol.c_str(), a), a);
+    rq.AddMember("streamKey", ::rapidjson::Value(streamKey.c_str(), a), a);
     rq.AddMember("field",  ::rapidjson::Value(field.c_str(),  a), a);
 
     // Optional pass-through: pipeline/stages/node
@@ -504,7 +504,7 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
       gma::util::logger().log(gma::util::LogLevel::Info,
                               "ws.subscribe",
                               { {"key", std::to_string(key)},
-                                {"symbol", symbol},
+                                {"streamKey", streamKey},
                                 {"field", field} });
     } catch (const std::exception& ex) {
       sendError("build", ex.what());
