@@ -4,6 +4,9 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <vector>
+
+#include "gma/engine/IConnector.hpp"
 
 // -------- Engine --------
 #include "gma/AtomicStore.hpp"
@@ -133,13 +136,25 @@ int main(int argc, char* argv[]) {
   shutdown.registerStep("ws-close-sessions", 40, [&ws]{ try { ws.closeAll(); } catch (...) {} });
   shutdown.registerStep("asio-stop",         60, [&ioc]{ try { ioc.stop(); } catch (...) {} });
 
-  // 8) Connector registration — a single line per connector.
+  // 8) Connector registration — construct → registerWith → start, with a
+  //    single ShutdownCoordinator step that calls stop() in reverse-registration
+  //    order. With one connector today the reverse-order is trivial; the
+  //    pattern is future-proof.
   gma::engine::EngineRegistries regs{
     &cfg, gma::gThreadPool.get(), store.get(), dispatcher.get(), &shutdown, &ioc
   };
+  std::vector<gma::engine::IConnector*> connectors;
   gma::market::MarketConnector marketConnector;
   marketConnector.registerWith(regs);
+  connectors.push_back(&marketConnector);
   // (future) gma::crypto::CoinbaseConnector{}.registerWith(regs);
+
+  for (auto* c : connectors) c->start();
+  shutdown.registerStep("connectors-stop", 30, [&connectors] {
+    for (auto it = connectors.rbegin(); it != connectors.rend(); ++it) {
+      (*it)->stop();
+    }
+  });
 
   logger().log(
     LogLevel::Info,

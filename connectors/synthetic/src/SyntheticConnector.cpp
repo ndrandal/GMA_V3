@@ -34,6 +34,15 @@ SyntheticConnector::SyntheticConnector() = default;
 SyntheticConnector::SyntheticConnector(Options opts) : _opts(std::move(opts)) {}
 SyntheticConnector::~SyntheticConnector() = default;
 
+void SyntheticConnector::start() {
+  // TODO: phase-4 — move timer arm (expires_after + async_wait) here.
+}
+
+void SyntheticConnector::stop() noexcept {
+  // TODO: phase-4 — cancel the timer here (currently done via the
+  // synthetic-timer-cancel ShutdownCoordinator step).
+}
+
 void SyntheticConnector::registerWith(engine::EngineRegistries& reg) {
   if (!reg.dispatcher || !reg.io) {
     throw std::runtime_error("SyntheticConnector: incomplete EngineRegistries");

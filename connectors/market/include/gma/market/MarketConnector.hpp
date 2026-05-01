@@ -43,6 +43,8 @@ public:
   // shutdown steps on reg.shutdown. Returns with the servers running inside
   // reg.io (which the caller drives via io.run()).
   void registerWith(engine::EngineRegistries& reg) override;
+  void start() override;
+  void stop() noexcept override;
 
 private:
   std::shared_ptr<OrderBookManager>                  _obManager;

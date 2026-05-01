@@ -31,6 +31,8 @@ public:
 
   std::string_view name() const override { return "synthetic"; }
   void registerWith(engine::EngineRegistries& reg) override;
+  void start() override;
+  void stop() noexcept override;
 
 private:
   Options                               _opts;

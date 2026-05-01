@@ -28,6 +28,16 @@ namespace gma::market {
 MarketConnector::MarketConnector()  = default;
 MarketConnector::~MarketConnector() = default;
 
+void MarketConnector::start() {
+  // TODO: phase-4 — move feed run/client start/OB init from registerWith into
+  // start; mirror in stop.
+}
+
+void MarketConnector::stop() noexcept {
+  // TODO: phase-4 — reverse-order teardown of feed clients, feed server, and
+  // AtomicProviderRegistry.
+}
+
 void MarketConnector::installDefaults() {
   Dispatcher::setDefaultComputerFactory(
     [](const util::Config& cfg) {
