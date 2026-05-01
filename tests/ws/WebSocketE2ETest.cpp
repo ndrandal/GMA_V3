@@ -143,10 +143,14 @@ TEST(WebSocketE2ETest, SubscribeAndReceiveUpdate) {
   // listener fires. Read up to a few frames within a bounded timeout
   // looking for the update.
   std::atomic<bool> done{false};
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
   std::thread readerTimeout([&]{
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-    if (!done.load()) {
-      try { stream.next_layer().close(); } catch (...) {}
+    while (!done.load()) {
+      if (std::chrono::steady_clock::now() >= deadline) {
+        try { stream.next_layer().close(); } catch (...) {}
+        return;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
   });
 
