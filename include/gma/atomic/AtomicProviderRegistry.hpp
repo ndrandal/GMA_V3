@@ -12,6 +12,13 @@ class AtomicProviderRegistry {
 public:
   using ProviderFn = std::function<double(const std::string& symbol, const std::string& fullKey)>;
 
+  // Tag instance — registry methods are static, so this is purely a handle for
+  // EngineRegistries to expose alongside the per-instance singletons.
+  static AtomicProviderRegistry& singleton() {
+    static AtomicProviderRegistry s;
+    return s;
+  }
+
   // Register (or replace) a provider function for a namespace, e.g., "ema", "vwap"
   static void registerNamespace(const std::string& ns, ProviderFn fn) {
     std::lock_guard<std::mutex> lk(mx());

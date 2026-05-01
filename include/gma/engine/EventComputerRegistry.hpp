@@ -18,6 +18,12 @@ class EventComputerRegistry {
 public:
   using Factory = std::function<std::unique_ptr<IEventComputer>()>;
 
+  // Tag instance — see EventTypeRegistry::singleton() for rationale.
+  static EventComputerRegistry& singleton() {
+    static EventComputerRegistry s;
+    return s;
+  }
+
   // Register a factory for an event type. Multiple factories per type are
   // retained in registration order. Always succeeds.
   static void registerFactory(std::string eventType, Factory factory) {

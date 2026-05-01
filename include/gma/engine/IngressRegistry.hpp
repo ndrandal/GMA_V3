@@ -34,6 +34,12 @@ using IngressFactory = std::function<std::unique_ptr<IIngressSource>(
 
 class IngressRegistry {
 public:
+  // Tag instance — see EventTypeRegistry::singleton() for rationale.
+  static IngressRegistry& singleton() {
+    static IngressRegistry s;
+    return s;
+  }
+
   static bool registerIngress(std::string kind, IngressFactory fn) {
     std::lock_guard lk(mx());
     auto [it, ok] = map().emplace(std::move(kind), std::move(fn));

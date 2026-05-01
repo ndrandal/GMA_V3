@@ -15,6 +15,14 @@ struct EventSchema {
 
 class EventTypeRegistry {
 public:
+  // Tag instance — registry methods are static, so the singleton is purely a
+  // handle for EngineRegistries to expose. All real storage lives in the
+  // private static map below.
+  static EventTypeRegistry& singleton() {
+    static EventTypeRegistry s;
+    return s;
+  }
+
   static bool registerEvent(EventSchema schema) {
     std::lock_guard lk(mx());
     auto key = schema.name;
