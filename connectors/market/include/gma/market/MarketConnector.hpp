@@ -16,34 +16,34 @@ class FeedServer;
 namespace gma::market {
 
 // The market connector owns everything market-specific: order book engine,
-// TA tick computer (via DefaultComputerFactory hook), "ob.*" atomic provider
-// namespace, TCP FeedServer, and external WsFeedClients driven by ItchAdapter.
+// TA tick computer (registered with EventComputerRegistry), "ob.*" atomic
+// provider namespace, TCP FeedServer, and external WsFeedClients driven by
+// ItchAdapter.
 //
-// Usage in main():
-//   MarketConnector::installDefaults();          // install TA computer hook
-//   // ... construct engine pieces (pool/store/dispatcher/ioc) ...
+// Lifecycle (driven by the composition root):
 //   MarketConnector connector;
-//   EngineRegistries regs{ &cfg, pool, store, dispatcher, &shutdown, &ioc };
-//   connector.registerWith(regs);                // everything else
+//   connector.registerWith(regs);   // construct + register; nothing running
+//   connector.start();              // run the feed server + WS clients
+//   ...
+//   connector.stop();               // reverse-order teardown (idempotent)
 class MarketConnector final : public engine::IConnector {
 public:
-  // Install the Dispatcher DefaultComputerFactory hook so every
-  // dispatcher constructed after this call gets its own MarketTickComputer.
-  // Safe to call multiple times (idempotent replace).
-  static void installDefaults();
-
   MarketConnector();
   ~MarketConnector() override;
 
   std::string_view name() const override { return "market"; }
 
-  // Full market boot: construct OrderBookManager, wire its provider into the
-  // AtomicProviderRegistry under "ob.*", start the TCP FeedServer on
-  // cfg.feedPort, spin up configured WsFeedClients, and register all
-  // shutdown steps on reg.shutdown. Returns with the servers running inside
-  // reg.io (which the caller drives via io.run()).
+  // Construct OrderBookManager, wire its provider into AtomicProviderRegistry
+  // under "ob.*", construct (do NOT run) the TCP FeedServer on cfg.feedPort,
+  // construct (do NOT start) configured WsFeedClients, and register the
+  // "tick" event-computer factory.
   void registerWith(engine::EngineRegistries& reg) override;
+
+  // Run the feed server + WS feed clients. Failures on individual feed
+  // clients are logged and do not abort the rest.
   void start() override;
+
+  // Reverse-order teardown. Idempotent: a second call is a no-op.
   void stop() noexcept override;
 
 private:

@@ -111,15 +111,31 @@ gma_server                        composition root
 
 ### Composition root
 
+The composition root drives every connector through the same lifecycle:
+construct → `registerWith` → `start` → … → `stop` (in reverse-registration
+order via a single `connectors-stop` ShutdownCoordinator step at priority 30).
+Connectors do NOT register their own ShutdownCoordinator steps.
+
 ```cpp
 int main(int argc, char* argv[]) {
-  gma::engine::Engine engine = gma::engine::Engine::fromArgs(argc, argv);
+  // ... engine bootstrap (config, threadpool, store, dispatcher, ioc) ...
+  gma::engine::EngineRegistries regs{ /* 14 fields, see EngineRegistries.hpp */ };
 
-  // ─── one registration line per connector ───
-  gma::market::MarketConnector::registerWith(engine.registries());
-  // (future) gma::crypto::CoinbaseConnector::registerWith(engine.registries());
+  std::vector<gma::engine::IConnector*> connectors;
+  gma::market::MarketConnector marketConnector;
+  marketConnector.registerWith(regs);
+  connectors.push_back(&marketConnector);
+  // (future) gma::crypto::CoinbaseConnector{}.registerWith(regs);
 
-  engine.boot();
+  for (auto* c : connectors) c->start();
+  shutdown.registerStep("connectors-stop", 30, [&connectors] {
+    for (auto it = connectors.rbegin(); it != connectors.rend(); ++it) {
+      (*it)->stop();
+    }
+  });
+
+  ioc.run();           // event loop
+  shutdown.stop();     // drains every priority, including connectors-stop
   return 0;
 }
 ```

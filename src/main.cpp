@@ -88,7 +88,7 @@ int main(int argc, char* argv[]) {
   if (argc > 1) wsPort   = parsePort(argv[1], wsPort);
   if (argc > 3) feedPort = parsePort(argv[3], feedPort);
 
-  // Make CLI overrides authoritative — MarketConnector reads cfg.feedPort.
+  // CLI args win over the config file — connectors read cfg.{wsPort,feedPort}.
   cfg.wsPort   = wsPort;
   cfg.feedPort = feedPort;
 
@@ -99,12 +99,10 @@ int main(int argc, char* argv[]) {
     {{"wsPort", std::to_string(wsPort)}, {"feedPort", std::to_string(feedPort)}}
   );
 
-  // 3) Engine bootstrap: register generic worker functions and node types, and
-  //    install the market-side default-computer-factory hook BEFORE the
-  //    dispatcher is constructed so it picks up a fresh MarketTickComputer.
+  // 3) Engine bootstrap: register generic worker functions and node types.
+  //    Connectors register their own event computers in registerWith().
   gma::registerBuiltinFunctions();
   gma::registerBuiltinNodeTypes();
-  gma::market::MarketConnector::installDefaults();
 
   // 4) Thread pool (global)
   unsigned poolSize = cfg.threadPoolSize > 0

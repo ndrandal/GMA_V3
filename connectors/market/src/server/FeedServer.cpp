@@ -345,10 +345,20 @@ FeedServer::FeedServer(boost::asio::io_context& ioc,
   : ioc_(ioc),
     acceptor_(ioc),
     dispatcher_(dispatcher),
-    obManager_(obManager)
+    obManager_(obManager),
+    port_(port)
 {
+  // Constructor is intentionally side-effect-free — no bind, no listen.
+  // run() opens the socket so callers can construct ahead of start (per
+  // the IConnector lifecycle: registerWith allocates, start brings up).
+}
+
+void FeedServer::run() {
+  bool expected = false;
+  if (!accepting_.compare_exchange_strong(expected, true)) return;
+
   boost::system::error_code ec;
-  tcp::endpoint ep{tcp::v4(), port};
+  tcp::endpoint ep{tcp::v4(), port_};
 
   acceptor_.open(ep.protocol(), ec);
   if (ec) throw boost::system::system_error(ec);
@@ -361,11 +371,7 @@ FeedServer::FeedServer(boost::asio::io_context& ioc,
 
   acceptor_.listen(boost::asio::socket_base::max_listen_connections, ec);
   if (ec) throw boost::system::system_error(ec);
-}
 
-void FeedServer::run() {
-  bool expected = false;
-  if (!accepting_.compare_exchange_strong(expected, true)) return;
   doAccept();
 }
 

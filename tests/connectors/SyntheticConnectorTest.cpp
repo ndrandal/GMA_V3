@@ -5,11 +5,14 @@
 #include "gma/AtomicStore.hpp"
 #include "gma/Dispatcher.hpp"
 #include "gma/Event.hpp"
-#include "gma/engine/EngineRegistries.hpp"
+#include "gma/FunctionMap.hpp"
+#include "gma/atomic/AtomicProviderRegistry.hpp"
+#include "gma/engine/Registries.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include "gma/runtime/ShutdownCoordinator.hpp"
 #include "gma/synthetic/SyntheticConnector.hpp"
 #include "gma/util/Config.hpp"
+#include "gma/util/Logger.hpp"
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
@@ -87,18 +90,70 @@ TEST(SyntheticConnectorTest, DispatcherRoutesByEventType) {
   EXPECT_FALSE(store.get("SYN", "lastPrice").has_value());
 }
 
-TEST(SyntheticConnectorTest, RegisterWithDrivesIoContext) {
-  // End-to-end: register the connector with a real EngineRegistries, run the
-  // io_context briefly, and verify the timer fired and the computer ran.
+namespace {
+
+// Build a fully-populated EngineRegistries pointing at the supplied per-test
+// engine objects. Mirrors what the composition root does in main().
+engine::EngineRegistries buildRegs(util::Config& cfg,
+                                   rt::ThreadPool& pool,
+                                   AtomicStore& store,
+                                   Dispatcher& dispatcher,
+                                   rt::ShutdownCoordinator& shutdown,
+                                   boost::asio::io_context& ioc) {
+  return engine::EngineRegistries{
+    &cfg, &pool, &store, &dispatcher, &shutdown, &ioc,
+    &engine::EventTypeRegistry::singleton(),
+    &engine::EventComputerRegistry::singleton(),
+    &engine::NodeTypeRegistry::singleton(),
+    &engine::IngressRegistry::singleton(),
+    &engine::ConfigNamespaceRegistry::singleton(),
+    &AtomicProviderRegistry::singleton(),
+    &FunctionMap::instance(),
+    &util::logger(),
+  };
+}
+
+} // namespace
+
+TEST(SyntheticConnectorTest, RegisterWithDoesNotFireTimer) {
+  // Lifecycle invariant: registerWith must allocate but not arm the timer.
+  // Running the io_context after registerWith alone should produce zero
+  // synthetic events, since start() has not been called.
   AtomicStore store;
   rt::ThreadPool pool(1);
   Dispatcher dispatcher(&pool, &store);
   boost::asio::io_context ioc;
-
   util::Config cfg;
   rt::ShutdownCoordinator shutdown;
 
-  engine::EngineRegistries regs{ &cfg, &pool, &store, &dispatcher, &shutdown, &ioc };
+  auto regs = buildRegs(cfg, pool, store, dispatcher, shutdown, ioc);
+
+  synthetic::SyntheticConnector::Options opts;
+  opts.streamKey = "SYN_NOSTART";
+  opts.tickMs    = 1;     // would fire fast if armed.
+  opts.maxTicks  = 5;
+  synthetic::SyntheticConnector connector(opts);
+  connector.registerWith(regs);
+
+  ioc.run_for(std::chrono::milliseconds(50));
+  pool.shutdown();
+
+  EXPECT_FALSE(store.get("SYN_NOSTART", "synthetic.sin").has_value())
+      << "registerWith leaked timer arming — start() should be the only path "
+         "that schedules events";
+}
+
+TEST(SyntheticConnectorTest, StartArmsTimerStopCancels) {
+  // End-to-end lifecycle: registerWith → start fires the timer; stop cancels
+  // any further callbacks. Verifies the post-phase-4 control flow.
+  AtomicStore store;
+  rt::ThreadPool pool(1);
+  Dispatcher dispatcher(&pool, &store);
+  boost::asio::io_context ioc;
+  util::Config cfg;
+  rt::ShutdownCoordinator shutdown;
+
+  auto regs = buildRegs(cfg, pool, store, dispatcher, shutdown, ioc);
 
   synthetic::SyntheticConnector::Options opts;
   opts.streamKey = "SYN_E2E";
@@ -106,12 +161,12 @@ TEST(SyntheticConnectorTest, RegisterWithDrivesIoContext) {
   opts.maxTicks  = 3;
   synthetic::SyntheticConnector connector(opts);
   connector.registerWith(regs);
+  connector.start();
 
-  // Drive the timer until all three ticks fire.
   ioc.run_for(std::chrono::milliseconds(200));
-  shutdown.stop();
+  connector.stop();
   pool.shutdown();
 
-  auto sin0 = store.get("SYN_E2E", "synthetic.sin");
-  ASSERT_TRUE(sin0.has_value()) << "computer never ran — timer didn't dispatch";
+  EXPECT_TRUE(store.get("SYN_E2E", "synthetic.sin").has_value())
+      << "computer never ran — start() didn't arm the timer";
 }
