@@ -10,6 +10,10 @@
 #include "gma/engine/IConnector.hpp"
 #include "gma/engine/IEventComputer.hpp"
 
+namespace gma {
+class Dispatcher;
+}
+
 namespace gma::synthetic {
 
 // Demo connector that proves the engine/connector boundary: it lives entirely
@@ -37,6 +41,7 @@ public:
 private:
   Options                               _opts;
   std::unique_ptr<boost::asio::steady_timer> _timer;
+  Dispatcher*                           _dispatcher { nullptr };
   std::uint64_t                         _counter { 0 };
 };
 
