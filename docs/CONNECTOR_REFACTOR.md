@@ -116,6 +116,15 @@ construct → `registerWith` → `start` → … → `stop` (in reverse-registra
 order via a single `connectors-stop` ShutdownCoordinator step at priority 30).
 Connectors do NOT register their own ShutdownCoordinator steps.
 
+After `dispatchPendingKeys`, the composition root also drives **engine-owned
+ingress** (ENC-31): for each entry in `cfg.ingress[]` it looks up the
+`kind` in `IngressRegistry` and invokes the connector-supplied factory
+with that entry's parsed params. Resulting `IIngressSource` instances are
+started in registration order; an `ingress-stop` ShutdownCoordinator step
+at priority 35 stops them in reverse. Adding a new ingress kind is a
+factory registration in some connector's `registerWith` plus an
+`ingress.N.kind = …` line in the INI — no `main.cpp` change.
+
 ```cpp
 int main(int argc, char* argv[]) {
   // ... engine bootstrap (config, threadpool, store, dispatcher, ioc) ...
