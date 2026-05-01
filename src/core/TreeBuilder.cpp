@@ -119,26 +119,33 @@ gma::Worker::Fn fnFromName(const rapidjson::Value& spec) {
     throw std::runtime_error("Worker: missing 'fn'");
 
   const std::string fn = spec["fn"].GetString();
+  auto& fmap = gma::FunctionMap::instance();
 
-  // "scale" is the only parametric builtin — it reads 'factor' from the spec,
-  // so it can't live in the plain vector<double>->double FunctionMap registry.
-  if (fn == "scale") {
-    double factor =
-      spec.HasMember("factor") && spec["factor"].IsNumber()
-        ? spec["factor"].GetDouble()
-        : 1.0;
-
-    return [factor](Span_t xs) -> gma::ArgType {
-      if (!xs.size()) return gma::ArgType{0.0};
-      const auto& v = xs[xs.size() - 1];
-      return gma::ArgType{toDouble(v) * factor};
+  // Parametric reducer? Extract every numeric spec member as a named
+  // parameter (filtering out structural/well-known keys), bind into the
+  // ParamFunc, and return.
+  if (fmap.isParametric(fn)) {
+    std::map<std::string, double> params;
+    for (auto it = spec.MemberBegin(); it != spec.MemberEnd(); ++it) {
+      const std::string key = it->name.GetString();
+      if (key == "fn" || key == "type" || key == "child" ||
+          key == "node" || key == "inputs" || key == "stages" ||
+          key == "pipeline") continue;
+      if (it->value.IsNumber()) params[key] = it->value.GetDouble();
+    }
+    auto pfn = fmap.getParamFunction(fn);
+    return [pfn, params = std::move(params)](Span_t xs) -> gma::ArgType {
+      std::vector<double> dv;
+      dv.reserve(xs.size());
+      for (const auto& v : xs) dv.push_back(toDouble(v));
+      return gma::ArgType{pfn(dv, params)};
     };
   }
 
-  // Everything else resolves through FunctionMap. Adapts FunctionMap's
+  // Plain reducer: resolve through FunctionMap. Adapts FunctionMap's
   // double(vector<double>) to Worker's ArgType(Span<const ArgType>).
   try {
-    auto mapFn = gma::FunctionMap::instance().getFunction(fn);
+    auto mapFn = fmap.getFunction(fn);
     return [mapFn](Span_t xs) -> gma::ArgType {
       std::vector<double> dv;
       dv.reserve(xs.size());
