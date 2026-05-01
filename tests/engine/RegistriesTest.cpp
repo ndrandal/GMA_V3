@@ -169,8 +169,8 @@ TEST(NodeTypeRegistryTest, MissingFindReturnsNull) {
 
 TEST(IngressRegistryTest, RegisterAndFind) {
   IngressRegistry::clear();
-  auto factory = [](boost::asio::io_context&, Dispatcher*,
-                    const util::Config&) -> std::unique_ptr<IIngressSource> {
+  auto factory = [](EngineRegistries&, const IngressParams&)
+      -> std::unique_ptr<IIngressSource> {
     return std::make_unique<NoopIngress>();
   };
   EXPECT_TRUE(IngressRegistry::registerIngress("synthetic", factory));
@@ -180,8 +180,8 @@ TEST(IngressRegistryTest, RegisterAndFind) {
 
 TEST(IngressRegistryTest, DuplicateRejected) {
   IngressRegistry::clear();
-  auto factory = [](boost::asio::io_context&, Dispatcher*,
-                    const util::Config&) -> std::unique_ptr<IIngressSource> {
+  auto factory = [](EngineRegistries&, const IngressParams&)
+      -> std::unique_ptr<IIngressSource> {
     return nullptr;
   };
   EXPECT_TRUE(IngressRegistry::registerIngress("x", factory));

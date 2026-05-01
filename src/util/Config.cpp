@@ -1,5 +1,6 @@
 #include "gma/util/Config.hpp"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -9,6 +10,7 @@
 #include <algorithm>
 
 #include "gma/engine/ConfigNamespaceRegistry.hpp"
+#include "gma/util/Logger.hpp"
 
 #ifdef _WIN32
   #define NOMINMAX
@@ -101,6 +103,25 @@ bool Config::loadFromFile(const std::string& path) {
     else if (key == "maxSymbols") { int v = std::atoi(val.c_str()); if (v > 0) maxSymbols = v; }
     else if (key == "maxFieldsPerSymbol") { int v = std::atoi(val.c_str()); if (v > 0) maxFieldsPerSymbol = v; }
     else if (key == "allowNegativePrices") { allowNegativePrices = (val == "true" || val == "1" || val == "yes"); }
+    // Canonical ingress entries: ingress.N.kind = ..., ingress.N.<param> = ...
+    else if (key.size() > 8 && key.substr(0, 8) == "ingress.") {
+      auto dot2 = key.find('.', 8);
+      if (dot2 != std::string::npos) {
+        std::string idxStr = key.substr(8, dot2 - 8);
+        if (!idxStr.empty() && std::isdigit(static_cast<unsigned char>(idxStr[0]))) {
+          int idx = std::atoi(idxStr.c_str());
+          if (idx >= 0 && idx < 64) {
+            while (static_cast<int>(ingress.size()) <= idx) ingress.emplace_back();
+            std::string field = key.substr(dot2 + 1);
+            if (field == "kind") {
+              ingress[idx].kind = val;
+            } else {
+              ingress[idx].params[field] = val;
+            }
+          }
+        }
+      }
+    }
     // Multi-feed config: feed.0.url, feed.0.adapter, feed.0.symbols, etc.
     else if (key.substr(0, 5) == "feed." && key.size() > 5) {
       // Parse "feed.N.field"
@@ -172,11 +193,66 @@ bool Config::loadFromFile(const std::string& path) {
 
   // fileGuard closes f automatically via RAII.
 
+  synthesizeIngressFromLegacy();
+
   // Basic sanity: slow >= fast for MACD; stdK positive.
   if (taMACD_slow < taMACD_fast) std::swap(taMACD_slow, taMACD_fast);
   if (taBBands_stdK <= 0.0) taBBands_stdK = 2.0;
 
   return true;
+}
+
+void Config::synthesizeIngressFromLegacy() {
+  if (!ingress.empty()) return;
+
+  Ingress fsEntry;
+  fsEntry.kind = "market.feedserver";
+  fsEntry.params["port"] = std::to_string(feedPort);
+  ingress.push_back(std::move(fsEntry));
+
+  bool synthesizedWS = false;
+
+  if (!feedUrl.empty()) {
+    Ingress wsEntry;
+    wsEntry.kind = "market.wsclient";
+    wsEntry.params["url"] = feedUrl;
+    wsEntry.params["adapter"] = "itch";
+    if (!feedSymbols.empty()) {
+      std::string joined;
+      for (size_t i = 0; i < feedSymbols.size(); ++i) {
+        if (i) joined += ",";
+        joined += feedSymbols[i];
+      }
+      wsEntry.params["symbols"] = joined;
+    }
+    ingress.push_back(std::move(wsEntry));
+    synthesizedWS = true;
+  }
+  for (const auto& fc : feeds) {
+    if (fc.url.empty()) continue;
+    Ingress wsEntry;
+    wsEntry.kind = "market.wsclient";
+    wsEntry.params["url"] = fc.url;
+    wsEntry.params["adapter"] = fc.adapter;
+    if (!fc.symbols.empty()) {
+      std::string joined;
+      for (size_t i = 0; i < fc.symbols.size(); ++i) {
+        if (i) joined += ",";
+        joined += fc.symbols[i];
+      }
+      wsEntry.params["symbols"] = joined;
+    }
+    ingress.push_back(std::move(wsEntry));
+    synthesizedWS = true;
+  }
+  if (synthesizedWS) {
+    gma::util::logger().log(
+        gma::util::LogLevel::Warn,
+        "config.deprecated_keys",
+        {{"keys", "feedUrl/feedSymbols/feeds.N.*"},
+         {"replacement", "ingress.N.kind = market.wsclient + ingress.N.url|adapter|symbols"},
+         {"window", "one release"}});
+  }
 }
 
 std::size_t Config::dispatchPendingKeys() {

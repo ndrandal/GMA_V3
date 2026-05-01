@@ -7,14 +7,9 @@
 #include <unordered_map>
 #include <vector>
 
-namespace boost::asio { class io_context; }
-
-namespace gma {
-class Dispatcher;        // legacy routing hub
-namespace util { struct Config; }
-}
-
 namespace gma::engine {
+
+struct EngineRegistries;
 
 // Long-lived data source (TCP server, WS client, file replay, …) owned by the engine.
 class IIngressSource {
@@ -24,13 +19,19 @@ public:
   virtual void stop() noexcept = 0;
 };
 
-// Factory wired up at connector-registration time; invoked when engine boots an ingress.
-// Signature will be refined as Dispatcher is generalized (Step 6) and Config
-// gains a namespaced view (Step 7). For Step 2 scaffolding we use the types in-tree today.
+// Per-instance INI-style parameters for one ingress entry, e.g. {"port":"9001"}
+// for `ingress.0.kind = market.feedserver, ingress.0.port = 9001`. Engine
+// parses the entry's sub-keys and passes the map to the factory.
+using IngressParams = std::unordered_map<std::string, std::string>;
+
+// Factory wired up at connector-registration time; invoked once per
+// cfg.ingress[] entry of this kind. Receives the engine handles plus the
+// entry's parsed params. Connectors typically close over their own state
+// (OrderBookManager, SnapshotSource, …) at registration time and pull
+// engine handles (io, dispatcher) out of regs at instantiation time.
 using IngressFactory = std::function<std::unique_ptr<IIngressSource>(
-    boost::asio::io_context& io,
-    Dispatcher*        dispatcher,
-    const util::Config&      config)>;
+    EngineRegistries& regs,
+    const IngressParams& params)>;
 
 class IngressRegistry {
 public:

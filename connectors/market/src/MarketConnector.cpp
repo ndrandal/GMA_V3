@@ -18,8 +18,11 @@
 #include "gma/atomic/AtomicProviderRegistry.hpp"
 #include "gma/book/OrderBookManager.hpp"
 #include "gma/engine/ConfigNamespaceRegistry.hpp"
+#include "gma/engine/EngineRegistries.hpp"
 #include "gma/engine/EventComputerRegistry.hpp"
 #include "gma/engine/IEventComputer.hpp"
+#include "gma/engine/IngressRegistry.hpp"
+#include "gma/market/MarketIngress.hpp"
 #include "gma/feed/IFeedAdapter.hpp"
 #include "gma/feed/ItchAdapter.hpp"
 #include "gma/ob/FunctionalSnapshotSource.hpp"
@@ -155,6 +158,54 @@ void MarketConnector::registerWith(engine::EngineRegistries& reg) {
       return obProvider->get(symbol, fullKey);
     });
 
+  // Register the two market ingress factories. Engine driver instantiates
+  // each entry of cfg.ingress[] whose kind matches; factories close over
+  // the connector-owned OrderBookManager so feed handlers can write into
+  // it directly. Per-entry params (port, url, adapter, symbols) come from
+  // the parsed ingress.N.* sub-keys.
+  reg.ingress->registerIngress("market.feedserver",
+    [obManager](engine::EngineRegistries& r,
+                const engine::IngressParams& params) -> std::unique_ptr<engine::IIngressSource> {
+      unsigned short port = 9001;
+      auto pit = params.find("port");
+      if (pit != params.end()) {
+        try { port = static_cast<unsigned short>(std::stoi(pit->second)); }
+        catch (...) {}
+      }
+      auto fs = std::make_unique<FeedServer>(*r.io, r.dispatcher, obManager.get(), port);
+      return std::make_unique<FeedServerIngress>(std::move(fs));
+    });
+
+  reg.ingress->registerIngress("market.wsclient",
+    [obManager](engine::EngineRegistries& r,
+                const engine::IngressParams& params) -> std::unique_ptr<engine::IIngressSource> {
+      std::string url;
+      std::string adapter = "itch";
+      auto uit = params.find("url");      if (uit != params.end()) url = uit->second;
+      auto ait = params.find("adapter");  if (ait != params.end()) adapter = ait->second;
+      std::vector<std::string> symbols;
+      auto sit = params.find("symbols");
+      if (sit != params.end()) {
+        std::stringstream ss(sit->second);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+          auto b = tok.find_first_not_of(" \t");
+          auto e = tok.find_last_not_of(" \t");
+          if (b != std::string::npos) symbols.emplace_back(tok.substr(b, e - b + 1));
+        }
+      }
+      if (symbols.empty()) symbols = {"*"};
+
+      std::unique_ptr<feed::IFeedAdapter> ad;
+      if (adapter == "itch") ad = std::make_unique<feed::ItchAdapter>();
+      else                   ad = std::make_unique<feed::ItchAdapter>();  // default ITCH
+
+      auto client = std::make_shared<ws::WsFeedClient>(
+          *r.io, r.dispatcher, obManager.get(),
+          url, std::move(ad), symbols);
+      return std::make_unique<WsFeedClientIngress>(std::move(client));
+    });
+
   // Register the "tick" computer factory through the engine registry. Each
   // Dispatcher's onTick lazily instantiates one MarketTickComputer per type
   // using the dispatcher's own cfg + this connector's configured field map.
@@ -167,84 +218,27 @@ void MarketConnector::registerWith(engine::EngineRegistries& reg) {
       return std::make_unique<MarketTickComputer>(dispatcherCfg, *fieldMapShared);
     });
 
-  // ---- TCP FeedServer (constructed, not started) ----
-  const unsigned short feedPort = static_cast<unsigned short>(cfg.feedPort);
-  _feedServer = std::make_unique<FeedServer>(*reg.io, reg.dispatcher,
-                                             _obManager.get(), feedPort);
-
-  // ---- External WS feed clients (constructed, not started) ----
-  auto effectiveFeeds = cfg.feeds;
-  if (effectiveFeeds.empty()) {
-    std::string feedUrl = cfg.feedUrl;
-    if (feedUrl.empty()) {
-      const char* envUrl = std::getenv("GMA_FEED_URL");
-      if (envUrl && envUrl[0]) feedUrl = envUrl;
-    }
-    if (!feedUrl.empty()) {
-      util::Config::FeedConfig legacy;
-      legacy.url = feedUrl;
-      legacy.adapter = "itch";
-      legacy.symbols = cfg.feedSymbols;
-      effectiveFeeds.push_back(std::move(legacy));
-    }
-  }
-
-  for (const auto& fc : effectiveFeeds) {
-    if (fc.url.empty()) continue;
-
-    std::unique_ptr<feed::IFeedAdapter> adapter;
-    if (fc.adapter == "itch") {
-      adapter = std::make_unique<feed::ItchAdapter>();
-    } else {
-      // Default to ITCH; future: "generic", "coinbase", …
-      adapter = std::make_unique<feed::ItchAdapter>();
-    }
-
-    auto client = std::make_shared<ws::WsFeedClient>(
-        *reg.io, reg.dispatcher, _obManager.get(),
-        fc.url, std::move(adapter), fc.symbols);
-    _feedClients.push_back(std::move(client));
-  }
+  // ENC-31: FeedServer + WsFeedClient construction is no longer the
+  // connector's job. The engine driver (main.cpp) instantiates them via
+  // the registered ingress factories above using cfg.ingress[] entries
+  // (which include the legacy synthesis path for feedPort/feedUrl/
+  // feeds.N.*). Connector just registers the factories and ob.* atomic
+  // provider; nothing else to do here.
 }
 
 void MarketConnector::start() {
-  using util::logger;
-  using util::LogLevel;
-
-  if (_feedServer) {
-    _feedServer->run();
-  }
-
-  for (std::size_t i = 0; i < _feedClients.size(); ++i) {
-    auto& client = _feedClients[i];
-    if (!client) continue;
-    try {
-      client->start();
-      logger().log(LogLevel::Info, "feed_client.started",
-                   {{"index", std::to_string(i)}});
-    } catch (const std::exception& ex) {
-      logger().log(LogLevel::Error, "feed_client.start_failed",
-                   {{"err", ex.what()}, {"index", std::to_string(i)}});
-    }
-  }
+  // ENC-31: ingress sources are engine-driven now. The connector has no
+  // long-lived process to start beyond the ob.* AtomicProviderRegistry
+  // entry that registerWith already published.
 }
 
 void MarketConnector::stop() noexcept {
-  // Reverse of start / registerWith. Old per-step priorities preserved as
-  // comments so reviewers can map the old ShutdownCoordinator order to here.
-  for (auto& fc : _feedClients) {           // was priority 56 (feed-ws-stop)
-    if (!fc) continue;
-    try { fc->stop(); } catch (...) {}
-  }
-  _feedClients.clear();
-
-  if (_feedServer) {                        // was priority 55 (feed-stop)
-    try { _feedServer->stop(); } catch (...) {}
-    _feedServer.reset();
-  }
-
-  try { AtomicProviderRegistry::clear(); }  // was priority 50 (ob-provider-clear)
-  catch (...) {}
+  // Clear the ob.* AtomicProvider namespace so subsequent listener
+  // resolutions return nullopt. Order: connectors-stop (priority 30)
+  // runs first, then ingress-stop (35) tears down FeedServer +
+  // WsFeedClient — same temporal sequence as the pre-ENC-31 per-step
+  // priorities (ob-provider-clear=50, feed-stop=55, feed-ws-stop=56).
+  try { AtomicProviderRegistry::clear(); } catch (...) {}
 }
 
 } // namespace gma::market

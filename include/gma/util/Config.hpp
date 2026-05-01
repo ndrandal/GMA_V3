@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <cstdint>
 
@@ -26,6 +27,13 @@ public:
   // its namespaces. Returns the number of keys that found a reader; the
   // remainder are silently dropped (forward-compat for stray keys).
   std::size_t dispatchPendingKeys();
+
+  // ENC-31: when no `ingress.*` entries were parsed, synthesize equivalent
+  // ones from the legacy keys (feedPort default + feedUrl + feeds.N.*).
+  // Idempotent — once `ingress` is non-empty, this is a no-op. Called by
+  // the composition root and by loadFromFile so behavior is preserved
+  // whether the user has an INI or not.
+  void synthesizeIngressFromLegacy();
 
   // --- Public fields (referenced elsewhere in your code) ---
   // TA params (now actually members so those C2039 errors go away)
@@ -95,6 +103,15 @@ public:
       std::vector<std::string> symbols = {"*"};
   };
   std::vector<FeedConfig> feeds;
+
+  // ENC-31: engine-driven ingress entries (`ingress.N.kind = ..., ingress.N.X = ...`).
+  // The engine reads this list after connectors register their factories,
+  // looks each kind up in IngressRegistry, and drives start/stop centrally.
+  struct Ingress {
+      std::string kind;
+      std::unordered_map<std::string, std::string> params;
+  };
+  std::vector<Ingress> ingress;
 
 private:
   static bool parseLineKV(const std::string& line, std::string& k, std::string& v);

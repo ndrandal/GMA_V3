@@ -10,8 +10,6 @@
 namespace gma {
 class OrderBookManager;
 namespace ob       { class Provider; class FunctionalSnapshotSource; }
-namespace ws       { class WsFeedClient; }
-class FeedServer;
 } // namespace gma
 
 namespace gma::market {
@@ -51,8 +49,6 @@ private:
   std::shared_ptr<OrderBookManager>                  _obManager;
   std::shared_ptr<ob::FunctionalSnapshotSource>      _snapSource;
   std::shared_ptr<ob::Provider>                      _obProvider;
-  std::unique_ptr<FeedServer>                        _feedServer;
-  std::vector<std::shared_ptr<ws::WsFeedClient>>     _feedClients;
 
   // Populated by ConfigNamespaceRegistry callbacks during
   // Config::dispatchPendingKeys(); shared with MarketTickComputer
