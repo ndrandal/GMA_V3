@@ -114,7 +114,9 @@ int main(int argc, char* argv[]) {
   shutdown.registerStep("pool-destroy", 85, []{ gma::gThreadPool.reset(); });
 
   // 5) Core components
-  auto store      = std::make_shared<gma::AtomicStore>();
+  auto store = std::make_shared<gma::AtomicStore>();
+  store->setCaps(static_cast<std::size_t>(std::max(0, cfg.maxSymbols)),
+                 static_cast<std::size_t>(std::max(0, cfg.maxFieldsPerSymbol)));
   auto dispatcher = std::make_shared<gma::Dispatcher>(gma::gThreadPool.get(), store.get(), cfg);
 
   // 6) Metrics reporter
