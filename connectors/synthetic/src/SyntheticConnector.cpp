@@ -4,6 +4,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -12,7 +13,7 @@
 #include "gma/AtomicStore.hpp"
 #include "gma/Dispatcher.hpp"
 #include "gma/Event.hpp"
-#include "gma/runtime/ShutdownCoordinator.hpp"
+#include "gma/engine/EventComputerRegistry.hpp"
 
 namespace gma::synthetic {
 
@@ -34,36 +35,34 @@ SyntheticConnector::SyntheticConnector() = default;
 SyntheticConnector::SyntheticConnector(Options opts) : _opts(std::move(opts)) {}
 SyntheticConnector::~SyntheticConnector() = default;
 
-void SyntheticConnector::start() {
-  // TODO: phase-4 — move timer arm (expires_after + async_wait) here.
-}
-
-void SyntheticConnector::stop() noexcept {
-  // TODO: phase-4 — cancel the timer here (currently done via the
-  // synthetic-timer-cancel ShutdownCoordinator step).
-}
-
 void SyntheticConnector::registerWith(engine::EngineRegistries& reg) {
-  if (!reg.dispatcher || !reg.io) {
+  if (!reg.dispatcher || !reg.io || !reg.computers) {
     throw std::runtime_error("SyntheticConnector: incomplete EngineRegistries");
   }
 
-  // Hand the dispatcher our computer — it will filter events by eventType().
-  reg.dispatcher->addComputer(std::make_unique<SyntheticEventComputer>());
+  // Register the synthetic.tick computer factory. Each Dispatcher's onTick
+  // lazily instantiates one fresh SyntheticEventComputer per type.
+  reg.computers->registerFactory("synthetic.tick", [] {
+    return std::make_unique<SyntheticEventComputer>();
+  });
 
-  // Fire an event every tickMs. Tick loop re-arms itself until maxTicks is
-  // reached (0 = unbounded).
+  // Allocate the timer here; arming happens in start(), cancel in stop().
   _timer = std::make_unique<boost::asio::steady_timer>(*reg.io);
-  auto* timer = _timer.get();
-  auto streamKey = _opts.streamKey;
-  auto period    = std::chrono::milliseconds(std::max(1, _opts.tickMs));
-  int  maxTicks  = _opts.maxTicks;
-  auto counter   = std::make_shared<std::uint64_t>(0);
-  auto dispatcher = reg.dispatcher;
+  _dispatcher = reg.dispatcher;
+}
 
-  std::function<void(const boost::system::error_code&)> onExpiry;
+void SyntheticConnector::start() {
+  if (!_timer || !_dispatcher) return;
+
+  auto* timer        = _timer.get();
+  auto  streamKey    = _opts.streamKey;
+  auto  period       = std::chrono::milliseconds(std::max(1, _opts.tickMs));
+  int   maxTicks     = _opts.maxTicks;
+  auto  counter      = std::make_shared<std::uint64_t>(0);
+  auto* dispatcher   = _dispatcher;
+
   auto selfRef = std::make_shared<std::function<void(const boost::system::error_code&)>>();
-  onExpiry = [timer, streamKey, period, maxTicks, counter, dispatcher, selfRef]
+  *selfRef = [timer, streamKey, period, maxTicks, counter, dispatcher, selfRef]
              (const boost::system::error_code& ec) {
     if (ec) return;
     if (maxTicks > 0 && *counter >= static_cast<std::uint64_t>(maxTicks)) return;
@@ -84,17 +83,14 @@ void SyntheticConnector::registerWith(engine::EngineRegistries& reg) {
     timer->expires_after(period);
     timer->async_wait(*selfRef);
   };
-  *selfRef = std::move(onExpiry);
 
   timer->expires_after(period);
   timer->async_wait(*selfRef);
+}
 
-  if (reg.shutdown) {
-    auto* cancelable = _timer.get();
-    reg.shutdown->registerStep("synthetic-timer-cancel", 58, [cancelable] {
-      try { cancelable->cancel(); } catch (...) {}
-    });
-  }
+void SyntheticConnector::stop() noexcept {
+  if (!_timer) return;
+  try { _timer->cancel(); } catch (...) {}
 }
 
 } // namespace gma::synthetic

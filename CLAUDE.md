@@ -116,6 +116,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture including 
 - Runtime config: INI-style key=value files (see `src/util/gma.conf`)
 - Prefer lock-free / fine-grained locking (shared_mutex, SPSCQueue)
 - Test files named `<Component>Test.cpp` under `tests/<category>/`; the gtest binary is a single `gma_tests` executable
+- Connectors implement the strict `IConnector` lifecycle: `registerWith()` allocates and registers (no live sockets/timers), `start()` brings sources online, `stop()` noexcept tears down in reverse order. The composition root drives all three; never wire your own `ShutdownCoordinator` step from inside a connector.
 
 ## Configuration
 

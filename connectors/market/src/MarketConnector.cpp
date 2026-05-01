@@ -3,8 +3,8 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 
 #include "gma/AtomicStore.hpp"
@@ -19,7 +19,6 @@
 #include "gma/ob/FunctionalSnapshotSource.hpp"
 #include "gma/ob/ObMaterializer.hpp"
 #include "gma/ob/ObProvider.hpp"
-#include "gma/runtime/ShutdownCoordinator.hpp"
 #include "gma/server/FeedServer.hpp"
 #include "gma/util/Config.hpp"
 #include "gma/util/Logger.hpp"
@@ -30,49 +29,11 @@ namespace gma::market {
 MarketConnector::MarketConnector()  = default;
 MarketConnector::~MarketConnector() = default;
 
-void MarketConnector::start() {
-  // TODO: phase-4 — move feed run/client start/OB init from registerWith into
-  // start; mirror in stop.
-}
-
-void MarketConnector::stop() noexcept {
-  // TODO: phase-4 — reverse-order teardown of feed clients, feed server, and
-  // AtomicProviderRegistry.
-}
-
-void MarketConnector::installDefaults() {
-  // Register the market tick computer factory with the engine. Every
-  // Dispatcher built after this call will lazily pick up a fresh
-  // MarketTickComputer the first time it sees a "tick" event.
-  //
-  // EventComputerRegistry::registerFactory is additive, but main.cpp +
-  // registerWith() both invoke this — std::call_once preserves the
-  // "safe to call multiple times" idempotent-replace semantics.
-  //
-  // The factory receives each Dispatcher's own util::Config so per-Dispatcher
-  // tuning (sourceProfile, taHistoryMax, …) is honored. Phase 4 will move
-  // this registration into registerWith() where reg.cfg is also available.
-  static std::once_flag once;
-  std::call_once(once, [] {
-    engine::EventComputerRegistry::registerFactory("tick",
-      [](const util::Config& cfg) {
-        return std::make_unique<MarketTickComputer>(cfg);
-      });
-  });
-}
-
 void MarketConnector::registerWith(engine::EngineRegistries& reg) {
-  using util::logger;
-  using util::LogLevel;
-
-  if (!reg.cfg || !reg.shutdown || !reg.io || !reg.dispatcher) {
+  if (!reg.cfg || !reg.io || !reg.dispatcher || !reg.computers) {
     throw std::runtime_error("MarketConnector: incomplete EngineRegistries");
   }
   const util::Config& cfg = *reg.cfg;
-
-  // Ensure the computer factory hook is installed — safe no-op if the caller
-  // already did it, so consumers don't have to remember two steps.
-  installDefaults();
 
   // ---- Order book engine ----
   _obManager = std::make_shared<OrderBookManager>();
@@ -117,22 +78,20 @@ void MarketConnector::registerWith(engine::EngineRegistries& reg) {
       return obProvider->get(symbol, fullKey);
     });
 
-  reg.shutdown->registerStep("ob-provider-clear", 50, [] {
-    AtomicProviderRegistry::clear();
-  });
+  // Register the "tick" computer factory through the engine registry. Each
+  // Dispatcher's onTick lazily instantiates one MarketTickComputer per type
+  // using the dispatcher's own cfg, so per-Dispatcher tuning is honored.
+  reg.computers->registerFactory("tick",
+    [](const util::Config& dispatcherCfg) {
+      return std::make_unique<MarketTickComputer>(dispatcherCfg);
+    });
 
-  // ---- TCP FeedServer (market message schema) ----
+  // ---- TCP FeedServer (constructed, not started) ----
   const unsigned short feedPort = static_cast<unsigned short>(cfg.feedPort);
   _feedServer = std::make_unique<FeedServer>(*reg.io, reg.dispatcher,
                                              _obManager.get(), feedPort);
-  _feedServer->run();
 
-  FeedServer* feedPtr = _feedServer.get();
-  reg.shutdown->registerStep("feed-stop", 55, [feedPtr] {
-    try { feedPtr->stop(); } catch (...) {}
-  });
-
-  // ---- External WS feed clients ----
+  // ---- External WS feed clients (constructed, not started) ----
   auto effectiveFeeds = cfg.feeds;
   if (effectiveFeeds.empty()) {
     std::string feedUrl = cfg.feedUrl;
@@ -149,42 +108,62 @@ void MarketConnector::registerWith(engine::EngineRegistries& reg) {
     }
   }
 
-  for (std::size_t i = 0; i < effectiveFeeds.size(); ++i) {
-    const auto& fc = effectiveFeeds[i];
+  for (const auto& fc : effectiveFeeds) {
     if (fc.url.empty()) continue;
 
+    std::unique_ptr<feed::IFeedAdapter> adapter;
+    if (fc.adapter == "itch") {
+      adapter = std::make_unique<feed::ItchAdapter>();
+    } else {
+      // Default to ITCH; future: "generic", "coinbase", …
+      adapter = std::make_unique<feed::ItchAdapter>();
+    }
+
+    auto client = std::make_shared<ws::WsFeedClient>(
+        *reg.io, reg.dispatcher, _obManager.get(),
+        fc.url, std::move(adapter), fc.symbols);
+    _feedClients.push_back(std::move(client));
+  }
+}
+
+void MarketConnector::start() {
+  using util::logger;
+  using util::LogLevel;
+
+  if (_feedServer) {
+    _feedServer->run();
+  }
+
+  for (std::size_t i = 0; i < _feedClients.size(); ++i) {
+    auto& client = _feedClients[i];
+    if (!client) continue;
     try {
-      std::unique_ptr<feed::IFeedAdapter> adapter;
-      if (fc.adapter == "itch") {
-        adapter = std::make_unique<feed::ItchAdapter>();
-      } else {
-        // Default to ITCH; future: "generic", "coinbase", …
-        adapter = std::make_unique<feed::ItchAdapter>();
-      }
-
-      auto client = std::make_shared<ws::WsFeedClient>(
-          *reg.io, reg.dispatcher, _obManager.get(),
-          fc.url, std::move(adapter), fc.symbols);
       client->start();
-      _feedClients.push_back(client);
-
       logger().log(LogLevel::Info, "feed_client.started",
-                   {{"url", fc.url}, {"adapter", fc.adapter},
-                    {"index", std::to_string(i)}});
+                   {{"index", std::to_string(i)}});
     } catch (const std::exception& ex) {
       logger().log(LogLevel::Error, "feed_client.start_failed",
-                   {{"err", ex.what()}, {"url", fc.url},
-                    {"index", std::to_string(i)}});
+                   {{"err", ex.what()}, {"index", std::to_string(i)}});
     }
   }
-  for (auto& fc : _feedClients) {
-    auto weak = std::weak_ptr<ws::WsFeedClient>(fc);
-    reg.shutdown->registerStep("feed-ws-stop", 56, [weak] {
-      if (auto s = weak.lock()) {
-        try { s->stop(); } catch (...) {}
-      }
-    });
+}
+
+void MarketConnector::stop() noexcept {
+  // Reverse of start / registerWith. Old per-step priorities preserved as
+  // comments so reviewers can map the old ShutdownCoordinator order to here.
+  for (auto& fc : _feedClients) {           // was priority 56 (feed-ws-stop)
+    if (!fc) continue;
+    try { fc->stop(); } catch (...) {}
   }
+  _feedClients.clear();
+
+  if (_feedServer) {                        // was priority 55 (feed-stop)
+    try { _feedServer->stop(); } catch (...) {}
+    _feedServer.reset();
+  }
+
+  try { AtomicProviderRegistry::clear(); }  // was priority 50 (ob-provider-clear)
+  catch (...) {}
 }
 
 } // namespace gma::market

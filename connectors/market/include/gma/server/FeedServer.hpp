@@ -46,6 +46,7 @@ private:
   boost::asio::io_context& ioc_;
   tcp::acceptor            acceptor_;
   std::atomic<bool>        accepting_{false};
+  unsigned short           port_{0};
 
   Dispatcher*        dispatcher_; // not owned
   OrderBookManager*        obManager_{nullptr}; // not owned
