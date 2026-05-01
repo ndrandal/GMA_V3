@@ -7,14 +7,9 @@
 #include <unordered_map>
 #include <vector>
 
-namespace boost::asio { class io_context; }
-
-namespace gma {
-class Dispatcher;        // legacy routing hub
-namespace util { struct Config; }
-}
-
 namespace gma::engine {
+
+struct EngineRegistries;
 
 // Long-lived data source (TCP server, WS client, file replay, …) owned by the engine.
 class IIngressSource {
@@ -24,13 +19,14 @@ public:
   virtual void stop() noexcept = 0;
 };
 
-// Factory wired up at connector-registration time; invoked when engine boots an ingress.
-// Signature will be refined as Dispatcher is generalized (Step 6) and Config
-// gains a namespaced view (Step 7). For Step 2 scaffolding we use the types in-tree today.
+// Factory wired up at connector-registration time; invoked when the engine
+// instantiates an ingress source from cfg.ingress[]. The factory receives a
+// fully-populated EngineRegistries — connectors typically close over their
+// own state (OrderBookManager, SnapshotSource, …) at registration time and
+// pull engine handles (io, dispatcher, configNs reader) out of regs at
+// instantiation time.
 using IngressFactory = std::function<std::unique_ptr<IIngressSource>(
-    boost::asio::io_context& io,
-    Dispatcher*        dispatcher,
-    const util::Config&      config)>;
+    EngineRegistries& regs)>;
 
 class IngressRegistry {
 public:
