@@ -113,6 +113,59 @@ TEST(JsonValidatorTreeTest, AcceptsValidTree) {
     EXPECT_NO_THROW(JsonValidator::validateTree(d));
 }
 
+// --- Open-vocabulary checks (ENC-43) ---
+//
+// Validator must check string lengths / array sizes / depth on ANY key, not
+// just the engine's pre-allowed set. This guards connector-introduced
+// sub-spec keys (e.g. a future "trade.notes" or "binance.params") from
+// silently bypassing limits.
+
+TEST(JsonValidatorTreeTest, OversizeStringUnderForeignKeyRejected) {
+    // 5000-char string under "tradeNotes" (not in the legacy allowlist).
+    std::string oversize(5000, 'x');
+    std::string json =
+        "{\"type\":\"Worker\",\"fn\":\"sum\",\"tradeNotes\":\"" + oversize + "\"}";
+    auto d = parseDoc(json);
+    try {
+        JsonValidator::validateTree(d);
+        FAIL() << "expected validateTree to throw on oversize foreign-key string";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("tradeNotes"), std::string::npos)
+            << "error should name the offending key, got: " << e.what();
+    }
+}
+
+TEST(JsonValidatorTreeTest, OversizeArrayUnderForeignKeyRejected) {
+    std::string body = "{\"type\":\"Worker\",\"fn\":\"sum\",\"legs\":[";
+    // MAX_ARRAY_SIZE is 1024 in JsonValidator.cpp; emit 1100 ints.
+    for (int i = 0; i < 1100; ++i) {
+        if (i) body += ",";
+        body += std::to_string(i);
+    }
+    body += "]}";
+    auto d = parseDoc(body);
+    try {
+        JsonValidator::validateTree(d);
+        FAIL() << "expected validateTree to throw on oversize foreign-key array";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("legs"), std::string::npos)
+            << "error should name the offending key, got: " << e.what();
+    }
+}
+
+TEST(JsonValidatorTreeTest, DeepNestingViaForeignKeyRejected) {
+    // Nest 35 levels deep through a key that isn't in the legacy
+    // recursion allowlist ("foo" instead of "child"/"node"/"inputs").
+    std::string json = "{\"type\":\"Worker\",\"fn\":\"sum\",\"foo\":";
+    for (int i = 0; i < 35; ++i) {
+        json += "{\"type\":\"Worker\",\"fn\":\"sum\",\"foo\":";
+    }
+    json += "{}";
+    for (int i = 0; i < 36; ++i) json += "}";
+    auto d = parseDoc(json);
+    EXPECT_THROW(JsonValidator::validateTree(d), std::runtime_error);
+}
+
 // --- requireMember tests ---
 
 TEST(JsonValidatorRequireMemberTest, ThrowsOnMissing) {

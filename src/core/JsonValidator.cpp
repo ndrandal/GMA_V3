@@ -71,62 +71,46 @@ void JsonValidator::validateTree(const rapidjson::Value& v, int depth) {
     throw std::runtime_error("Tree node must be an object");
   }
 
-  // Check string field lengths
-  const char* stringFields[] = {"type", "symbol", "field", "node", "function", "fn"};
-  for (const char* sf : stringFields) {
-    if (v.HasMember(sf) && v[sf].IsString()) {
-      if (std::strlen(v[sf].GetString()) > MAX_STRING_LEN) {
+  // Open-vocabulary walk: every member is checked / recursed into based on
+  // its value's type, not its key name. This means connector-introduced
+  // node types with new sub-spec keys get the same length / depth /
+  // array-size checks as engine built-ins, no allowlist edits required.
+  for (auto it = v.MemberBegin(); it != v.MemberEnd(); ++it) {
+    const char* key = it->name.GetString();
+    const auto& val = it->value;
+
+    if (val.IsString()) {
+      if (std::strlen(val.GetString()) > MAX_STRING_LEN) {
         throw std::runtime_error(
-            std::string("field '") + sf + "' exceeds maximum length");
+            std::string("field '") + key + "' exceeds maximum length");
       }
-    }
-  }
-
-  // If this node has a "type" field, validate it as a node
-  if (v.HasMember("type")) {
-    validateNode(v);
-  }
-
-  // Recurse into child nodes
-  if (v.HasMember("child") && v["child"].IsObject()) {
-    validateTree(v["child"], depth + 1);
-  }
-
-  // Recurse into inputs array
-  if (v.HasMember("inputs") && v["inputs"].IsArray()) {
-    const auto& arr = v["inputs"];
-    if (static_cast<int>(arr.Size()) > MAX_ARRAY_SIZE) {
-      throw std::runtime_error("'inputs' array exceeds maximum size of " +
-                               std::to_string(MAX_ARRAY_SIZE));
-    }
-    for (const auto& elem : arr.GetArray()) {
-      if (elem.IsObject()) {
-        validateTree(elem, depth + 1);
-      }
-    }
-  }
-
-  // Recurse into stages/pipeline arrays
-  const char* arrayKeys[] = {"stages", "pipeline"};
-  for (const char* key : arrayKeys) {
-    if (v.HasMember(key) && v[key].IsArray()) {
-      const auto& arr = v[key];
-      if (static_cast<int>(arr.Size()) > MAX_ARRAY_SIZE) {
+    } else if (val.IsObject()) {
+      validateTree(val, depth + 1);
+    } else if (val.IsArray()) {
+      if (static_cast<int>(val.Size()) > MAX_ARRAY_SIZE) {
         throw std::runtime_error(std::string("'") + key +
                                  "' array exceeds maximum size of " +
                                  std::to_string(MAX_ARRAY_SIZE));
       }
-      for (const auto& elem : arr.GetArray()) {
-        if (elem.IsObject()) {
+      for (const auto& elem : val.GetArray()) {
+        if (elem.IsString()) {
+          if (std::strlen(elem.GetString()) > MAX_STRING_LEN) {
+            throw std::runtime_error(
+                std::string("element in array '") + key +
+                "' exceeds maximum length");
+          }
+        } else if (elem.IsObject()) {
           validateTree(elem, depth + 1);
         }
       }
     }
   }
 
-  // Recurse into "node" field
-  if (v.HasMember("node") && v["node"].IsObject()) {
-    validateTree(v["node"], depth + 1);
+  // If this node has a "type" field, look it up in NodeTypeRegistry.
+  // (Length already checked above; here we only verify the type name
+  // resolves to a registered builder.)
+  if (v.HasMember("type")) {
+    validateNode(v);
   }
 }
 
