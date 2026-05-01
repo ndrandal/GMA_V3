@@ -125,7 +125,7 @@ TEST(EventComputerRegistryTest, CreateAllOnMissingTypeReturnsEmpty) {
 
 TEST(EventComputerRegistryTest, NullFactoryIgnored) {
   const std::string t = "__test_cr_null__";
-  EventComputerRegistry::registerFactory(t, nullptr);
+  EventComputerRegistry::registerFactory(t, EventComputerRegistry::Factory{});
   EXPECT_EQ(EventComputerRegistry::factoryCount(t), 0u);
 }
 

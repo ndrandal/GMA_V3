@@ -7,25 +7,6 @@
 
 using namespace gma;
 
-namespace {
-// Guarded singleton for the default computer factory. Set once at boot by
-// whichever side owns market-specific computers (main.cpp / test bootstrap /
-// a future MarketConnector::registerWith); read from every dispatcher ctor.
-std::mutex& hookMutex() {
-  static std::mutex m;
-  return m;
-}
-Dispatcher::DefaultComputerFactory& hook() {
-  static Dispatcher::DefaultComputerFactory f;
-  return f;
-}
-} // namespace
-
-void Dispatcher::setDefaultComputerFactory(DefaultComputerFactory f) {
-  std::lock_guard<std::mutex> lk(hookMutex());
-  hook() = std::move(f);
-}
-
 void Dispatcher::addComputer(std::unique_ptr<engine::IEventComputer> c) {
   if (c) _computers.push_back(std::move(c));
 }
@@ -39,19 +20,7 @@ Dispatcher::Dispatcher(rt::ThreadPool* threadPool,
   , _maxHistory(static_cast<std::size_t>(std::max(1, cfg.taHistoryMax)))
   , _maxSymbols(static_cast<std::size_t>(std::max(1, cfg.maxSymbols)))
   , _maxFieldsPerSymbol(static_cast<std::size_t>(std::max(1, cfg.maxFieldsPerSymbol)))
-{
-  DefaultComputerFactory installed;
-  {
-    std::lock_guard<std::mutex> lk(hookMutex());
-    installed = hook();
-  }
-  if (installed) {
-    auto computers = installed(cfg);
-    for (auto& c : computers) {
-      if (c) _computers.push_back(std::move(c));
-    }
-  }
-}
+{}
 
 void Dispatcher::registerListener(const std::string& symbol,
                                         const std::string& field,
@@ -80,16 +49,33 @@ void Dispatcher::unregisterListener(const std::string& symbol,
 void Dispatcher::onTick(const Event& tick) {
   if (tick.symbol.empty() || !tick.payload) return;
 
-  // Invoke every domain computer whose eventType matches this event's type
-  // (defaults to "tick"). TA writes to the store and may notifyListeners on
-  // computed keys (sma_5, rsi_14, …).
-  if (!_computers.empty()) {
-    engine::ComputeContext ctx{ _store, this, _threadPool };
-    for (auto& c : _computers) {
-      if (!c) continue;
-      if (c->eventType() != tick.type) continue;
-      c->compute(tick, ctx);
+  engine::ComputeContext ctx{ _store, this, _threadPool };
+
+  // Per-type cache fed from EventComputerRegistry. First event of a given
+  // type instantiates the registered factories; subsequent events reuse the
+  // cached instances. Late-registered factories are picked up the first time
+  // an event of their type arrives.
+  std::vector<engine::IEventComputer*> typedComputers;
+  {
+    std::lock_guard<std::mutex> lk(_computerCacheMx);
+    auto it = _computersByType.find(tick.type);
+    if (it == _computersByType.end()) {
+      auto fresh = engine::EventComputerRegistry::createAll(tick.type, _cfg);
+      it = _computersByType.emplace(tick.type, std::move(fresh)).first;
     }
+    typedComputers.reserve(it->second.size());
+    for (auto& c : it->second) typedComputers.push_back(c.get());
+  }
+  for (auto* c : typedComputers) {
+    if (c) c->compute(tick, ctx);
+  }
+
+  // Computers added directly via addComputer() — kept for tests and code
+  // paths that want to inject without the global registry.
+  for (auto& c : _computers) {
+    if (!c) continue;
+    if (c->eventType() != tick.type) continue;
+    c->compute(tick, ctx);
   }
 
   // Collect (field, listener) pairs for this symbol under the listener lock.

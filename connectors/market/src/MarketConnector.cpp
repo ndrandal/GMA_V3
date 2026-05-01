@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <utility>
 
@@ -11,6 +12,7 @@
 #include "gma/MarketTA.hpp"
 #include "gma/atomic/AtomicProviderRegistry.hpp"
 #include "gma/book/OrderBookManager.hpp"
+#include "gma/engine/EventComputerRegistry.hpp"
 #include "gma/engine/IEventComputer.hpp"
 #include "gma/feed/IFeedAdapter.hpp"
 #include "gma/feed/ItchAdapter.hpp"
@@ -39,12 +41,24 @@ void MarketConnector::stop() noexcept {
 }
 
 void MarketConnector::installDefaults() {
-  Dispatcher::setDefaultComputerFactory(
-    [](const util::Config& cfg) {
-      std::vector<std::unique_ptr<engine::IEventComputer>> out;
-      out.push_back(std::make_unique<MarketTickComputer>(cfg));
-      return out;
-    });
+  // Register the market tick computer factory with the engine. Every
+  // Dispatcher built after this call will lazily pick up a fresh
+  // MarketTickComputer the first time it sees a "tick" event.
+  //
+  // EventComputerRegistry::registerFactory is additive, but main.cpp +
+  // registerWith() both invoke this — std::call_once preserves the
+  // "safe to call multiple times" idempotent-replace semantics.
+  //
+  // The factory receives each Dispatcher's own util::Config so per-Dispatcher
+  // tuning (sourceProfile, taHistoryMax, …) is honored. Phase 4 will move
+  // this registration into registerWith() where reg.cfg is also available.
+  static std::once_flag once;
+  std::call_once(once, [] {
+    engine::EventComputerRegistry::registerFactory("tick",
+      [](const util::Config& cfg) {
+        return std::make_unique<MarketTickComputer>(cfg);
+      });
+  });
 }
 
 void MarketConnector::registerWith(engine::EngineRegistries& reg) {
