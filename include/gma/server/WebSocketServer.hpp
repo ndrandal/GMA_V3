@@ -42,6 +42,10 @@ public:
   /// Close all active sessions.
   void closeAll();
 
+/// Returns the port the acceptor is bound to. Useful for tests that pass
+  /// port=0 and want to discover the OS-assigned port.
+  unsigned short port() const;
+
   /// Called by a session to register itself; returns a numeric id.
   std::size_t registerSession(const std::shared_ptr<ClientSession>& sp);
 
