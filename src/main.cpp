@@ -11,10 +11,12 @@
 // -------- Engine --------
 #include "gma/AtomicStore.hpp"
 #include "gma/ExecutionContext.hpp"
+#include "gma/FunctionMap.hpp"
 #include "gma/FunctionRegistry.hpp"
 #include "gma/Dispatcher.hpp"
 #include "gma/NodeRegistry.hpp"
-#include "gma/engine/EngineRegistries.hpp"
+#include "gma/atomic/AtomicProviderRegistry.hpp"
+#include "gma/engine/Registries.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include "gma/runtime/ShutdownCoordinator.hpp"
 #include "gma/server/WebSocketServer.hpp"
@@ -141,7 +143,15 @@ int main(int argc, char* argv[]) {
   //    order. With one connector today the reverse-order is trivial; the
   //    pattern is future-proof.
   gma::engine::EngineRegistries regs{
-    &cfg, gma::gThreadPool.get(), store.get(), dispatcher.get(), &shutdown, &ioc
+    &cfg, gma::gThreadPool.get(), store.get(), dispatcher.get(), &shutdown, &ioc,
+    &gma::engine::EventTypeRegistry::singleton(),
+    &gma::engine::EventComputerRegistry::singleton(),
+    &gma::engine::NodeTypeRegistry::singleton(),
+    &gma::engine::IngressRegistry::singleton(),
+    &gma::engine::ConfigNamespaceRegistry::singleton(),
+    &gma::AtomicProviderRegistry::singleton(),
+    &gma::FunctionMap::instance(),
+    &gma::util::logger(),
   };
   std::vector<gma::engine::IConnector*> connectors;
   gma::market::MarketConnector marketConnector;

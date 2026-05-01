@@ -22,6 +22,12 @@ using NodeBuilderFn = std::function<std::shared_ptr<INode>(
 
 class NodeTypeRegistry {
 public:
+  // Tag instance — see EventTypeRegistry::singleton() for rationale.
+  static NodeTypeRegistry& singleton() {
+    static NodeTypeRegistry s;
+    return s;
+  }
+
   static bool registerNodeType(std::string name, NodeBuilderFn fn) {
     std::lock_guard lk(mx());
     auto [it, ok] = map().emplace(std::move(name), std::move(fn));

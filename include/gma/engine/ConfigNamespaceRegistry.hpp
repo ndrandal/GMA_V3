@@ -16,6 +16,12 @@ using ConfigReaderFn = std::function<bool(std::string_view keyTail,
 
 class ConfigNamespaceRegistry {
 public:
+  // Tag instance — see EventTypeRegistry::singleton() for rationale.
+  static ConfigNamespaceRegistry& singleton() {
+    static ConfigNamespaceRegistry s;
+    return s;
+  }
+
   static bool registerNamespace(std::string prefix, ConfigReaderFn reader) {
     std::lock_guard lk(mx());
     auto [it, ok] = map().emplace(std::move(prefix), std::move(reader));
