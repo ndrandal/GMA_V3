@@ -39,11 +39,11 @@ namespace tree {
   // ---- Low level builders (used internally & for tests) ----
 
   // Build a single node from JSON spec.
-  //  - defaultSymbol: used when spec omits explicit "symbol"
+  //  - defaultStreamKey: used when spec omits explicit "streamKey"
   //  - downstream   : parent node (may be nullptr at the tail)
   std::shared_ptr<INode> buildOne(
     const rapidjson::Value& spec,
-    const std::string&      defaultSymbol,
+    const std::string&      defaultStreamKey,
     const Deps&             deps,
     std::shared_ptr<INode>  downstream = nullptr
   );
@@ -59,14 +59,14 @@ namespace tree {
   // Build a pipeline from spec → terminal
   std::shared_ptr<INode> buildNode(
     const rapidjson::Value& spec,
-    const std::string&      defaultSymbol,
+    const std::string&      defaultStreamKey,
     const Deps&             deps,
     std::shared_ptr<INode>  terminal
   );
 
   // Build a simple AtomicAccessor, optionally wrapped in an Interval poller
   std::shared_ptr<INode> buildSimple(
-    const std::string&      symbol,
+    const std::string&      streamKey,
     const std::string&      field,
     int                     pollMs,
     const Deps&             deps,

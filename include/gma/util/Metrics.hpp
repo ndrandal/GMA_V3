@@ -132,7 +132,7 @@ struct MetricsSnapshot {
   uint64_t adds             = 0;
   uint64_t updates          = 0;
   uint64_t deletes          = 0;
-  uint64_t trades           = 0;
+  uint64_t events           = 0;
 
   uint64_t priorities       = 0;   // priority updates
   uint64_t snapshots        = 0;   // snapshot apply calls
@@ -149,13 +149,13 @@ struct MetricsSnapshot {
 
 class Metrics {
 public:
-  // Core book actions
+  // Core action counters
   void incAdds()      { adds_.fetch_add(1, std::memory_order_relaxed); }
   void incUpdates()   { updates_.fetch_add(1, std::memory_order_relaxed); }
   void incDeletes()   { deletes_.fetch_add(1, std::memory_order_relaxed); }
-  void incTrades()    { trades_.fetch_add(1, std::memory_order_relaxed); }
+  void incEvents()    { events_.fetch_add(1, std::memory_order_relaxed); }
 
-  // Book-manager features used in src/book/OrderBookManager.cpp
+  // Domain-specific extensions
   void incPriorities()      { priorities_.fetch_add(1, std::memory_order_relaxed); }
   void incSnapshots()       { snapshots_.fetch_add(1, std::memory_order_relaxed); }
   void incSummaries()       { summaries_.fetch_add(1, std::memory_order_relaxed); }
@@ -177,7 +177,7 @@ public:
     s.adds             = adds_.load(std::memory_order_relaxed);
     s.updates          = updates_.load(std::memory_order_relaxed);
     s.deletes          = deletes_.load(std::memory_order_relaxed);
-    s.trades           = trades_.load(std::memory_order_relaxed);
+    s.events           = events_.load(std::memory_order_relaxed);
 
     s.priorities       = priorities_.load(std::memory_order_relaxed);
     s.snapshots        = snapshots_.load(std::memory_order_relaxed);
@@ -197,7 +197,7 @@ private:
   std::atomic<uint64_t> adds_{0};
   std::atomic<uint64_t> updates_{0};
   std::atomic<uint64_t> deletes_{0};
-  std::atomic<uint64_t> trades_{0};
+  std::atomic<uint64_t> events_{0};
 
   std::atomic<uint64_t> priorities_{0};
   std::atomic<uint64_t> snapshots_{0};

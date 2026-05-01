@@ -15,13 +15,13 @@ class AtomicStore {
 public:
   AtomicStore() = default;
 
-  void set(const std::string& symbol, const std::string& field, ArgType value);
+  void set(const std::string& streamKey, const std::string& field, ArgType value);
 
-  /// Write multiple fields for a symbol under a single lock acquisition.
-  void setBatch(const std::string& symbol,
+  /// Write multiple fields for a streamKey under a single lock acquisition.
+  void setBatch(const std::string& streamKey,
                 const std::vector<std::pair<std::string, ArgType>>& fields);
 
-  std::optional<ArgType> get(const std::string& symbol, const std::string& field) const;
+  std::optional<ArgType> get(const std::string& streamKey, const std::string& field) const;
 
 private:
   using FieldMap = std::unordered_map<std::string, ArgType>;

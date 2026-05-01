@@ -88,7 +88,7 @@ int main(int argc, char* argv[]) {
   if (argc > 1) wsPort   = parsePort(argv[1], wsPort);
   if (argc > 3) feedPort = parsePort(argv[3], feedPort);
 
-  // CLI args win over the config file — connectors read cfg.{wsPort,feedPort}.
+  // CLI args win over the config file — engine + connectors read these as-is.
   cfg.wsPort   = wsPort;
   cfg.feedPort = feedPort;
 

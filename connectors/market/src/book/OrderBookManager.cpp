@@ -330,7 +330,7 @@ bool OrderBookManager::onDeleteByVenueKey(const std::string& symbol, const std::
 bool OrderBookManager::onTrade(const std::string& symbol, double tradePrice, uint64_t size, Aggressor aggr) {
     if (gate_(symbol)) { metrics_.incDroppedStale(); return false; }
     if (!validatePrice_(symbol, tradePrice) || !validateSize_(size)) { metrics_.incDroppedMalformed(); return false; }
-    metrics_.incTrades();
+    metrics_.incEvents();
 
     Price tp = toTicks(symbol, tradePrice);
     OrderBook& b = book(symbol);

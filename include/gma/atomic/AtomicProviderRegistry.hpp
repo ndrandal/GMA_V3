@@ -19,7 +19,7 @@ public:
     return s;
   }
 
-  // Register (or replace) a provider function for a namespace, e.g., "ema", "vwap"
+  // Register (or replace) a provider function for a namespace prefix.
   static void registerNamespace(const std::string& ns, ProviderFn fn) {
     std::lock_guard<std::mutex> lk(mx());
     map()[ns] = std::move(fn);
