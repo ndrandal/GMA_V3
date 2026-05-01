@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -13,6 +14,7 @@
 #include "gma/FunctionMap.hpp"
 #include "gma/Event.hpp"
 #include "gma/StreamValue.hpp"
+#include "gma/engine/EventComputerRegistry.hpp"
 #include "gma/engine/IEventComputer.hpp"
 #include "gma/nodes/INode.hpp"
 #include "gma/rt/ThreadPool.hpp"
@@ -26,30 +28,20 @@ namespace gma {
  * can be recomputed on each update.
  *
  * Domain-specific computations (market TA, order-book derivations, …) live in
- * IEventComputer implementations owned by the dispatcher. They are invoked on
- * every onTick BEFORE the raw-field notify loop runs. Computers may call
- * notifyListeners() to deliver their computed values to subscribers.
- *
- * Renamed to engine::Dispatcher in a later step — this class will become the
- * generic routing layer. Until then, the market tick computer is wired in by
- * the constructor for backward compatibility with existing call sites.
+ * IEventComputer implementations sourced from EventComputerRegistry. The
+ * dispatcher caches per-type computer instances lazily on first event of
+ * each type, so late-registered factories are picked up automatically.
+ * Computers may call notifyListeners() to deliver values to subscribers.
  */
 class Dispatcher {
 public:
   Dispatcher(gma::rt::ThreadPool* threadPool, AtomicStore* store,
                    const util::Config& cfg = util::Config{});
 
-  // Factory hook installed by the market side at boot. Every new dispatcher
-  // calls this (if installed) to populate its computers list — lets the engine
-  // header avoid any market include while preserving existing construction
-  // call sites. Removed in Step 8 when IConnector formalization lands.
-  using DefaultComputerFactory =
-      std::function<std::vector<std::unique_ptr<engine::IEventComputer>>(
-          const util::Config&)>;
-  static void setDefaultComputerFactory(DefaultComputerFactory f);
-
   // Append an event computer after construction. Primarily used by tests and
-  // code paths that want TA without depending on the default-factory hook.
+  // code paths that want a computer without going through
+  // EventComputerRegistry. Connectors should prefer the registry path so the
+  // dispatcher's per-type cache picks them up automatically.
   void addComputer(std::unique_ptr<engine::IEventComputer> computer);
 
   void registerListener(const std::string& symbol,
@@ -89,9 +81,20 @@ private:
       std::map<std::string, std::vector<std::shared_ptr<INode>>>
   > _listeners;
 
-  // Domain-specific computers (e.g. MarketTickComputer for TA). Constructed in
-  // the ctor; invoked on every onTick in registration order.
+  // Computers added explicitly via addComputer(). Filtered by eventType() on
+  // every onTick. Kept separate from the registry-driven cache so test code
+  // can inject computers without touching the global EventComputerRegistry.
   std::vector<std::unique_ptr<engine::IEventComputer>> _computers;
+
+  // Per-type cache of computers built from EventComputerRegistry. Populated
+  // lazily on first event of a given type — every `onTick` for an unseen
+  // type calls EventComputerRegistry::createAll(type) and caches the result
+  // for the lifetime of this Dispatcher. Late-registered factories are
+  // therefore picked up on the first event of their type.
+  std::unordered_map<std::string,
+                     std::vector<std::unique_ptr<engine::IEventComputer>>>
+                                          _computersByType;
+  mutable std::mutex                      _computerCacheMx;
 
   mutable std::shared_mutex _histMutex;
   mutable std::shared_mutex _listenerMutex;
