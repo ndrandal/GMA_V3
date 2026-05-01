@@ -56,7 +56,7 @@ TEST_F(TreeBuilderTestFixture, BuildForRequestRejectsMissingId) {
     initDeps();
     auto terminal = std::make_shared<TerminalStub>();
     rapidjson::Document doc;
-    doc.Parse(R"({"tree":{"type":"Listener","symbol":"SYM","field":"price"}})");
+    doc.Parse(R"({"tree":{"type":"Listener","streamKey":"SYM","field":"price"}})");
     EXPECT_THROW(tree::buildForRequest(doc, deps, terminal), std::runtime_error);
 }
 
@@ -72,7 +72,7 @@ TEST_F(TreeBuilderTestFixture, BuildForRequestBuildsListener) {
     initDeps();
     auto terminal = std::make_shared<TerminalStub>();
     rapidjson::Document doc;
-    doc.Parse(R"({"id":"1","symbol":"SYM","field":"price"})");
+    doc.Parse(R"({"id":"1","streamKey":"SYM","field":"price"})");
     ASSERT_FALSE(doc.HasParseError());
 
     auto chain = tree::buildForRequest(doc, deps, terminal);

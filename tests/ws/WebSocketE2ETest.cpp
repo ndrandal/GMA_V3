@@ -122,7 +122,7 @@ TEST(WebSocketE2ETest, SubscribeAndReceiveUpdate) {
 
   // Send a minimal subscribe request.
   const std::string req =
-    R"({"type":"subscribe","requests":[{"key":42,"symbol":"E2E","field":"px"}]})";
+    R"({"type":"subscribe","requests":[{"key":42,"streamKey":"E2E","field":"px"}]})";
   stream.write(asio::buffer(req));
 
   // Give the server a moment to wire the listener.

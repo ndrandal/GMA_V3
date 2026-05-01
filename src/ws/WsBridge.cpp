@@ -66,20 +66,20 @@ void WsBridge::handleSubscribe(const std::string& connId, const rapidjson::Docum
       continue;
     }
 
-    if (!r.HasMember("symbol") || !r["symbol"].IsString() ||
+    if (!r.HasMember("streamKey") || !r["streamKey"].IsString() ||
         !r.HasMember("field") || !r["field"].IsString()) {
-      sendTo(connId, R"({"type":"error","message":"request missing 'symbol' or 'field'"})");
+      sendTo(connId, R"({"type":"error","message":"request missing 'streamKey' or 'field'"})");
       continue;
     }
 
-    const std::string symbol = r["symbol"].GetString();
-    const std::string field  = r["field"].GetString();
+    const std::string streamKey = r["streamKey"].GetString();
+    const std::string field     = r["field"].GetString();
 
-    // Validate symbol/field length to prevent absurdly large map keys.
-    static constexpr std::size_t MAX_SYMBOL_LEN = 64;
-    static constexpr std::size_t MAX_FIELD_LEN  = 128;
-    if (symbol.empty() || symbol.size() > MAX_SYMBOL_LEN) {
-      sendTo(connId, R"json({"type":"error","message":"invalid 'symbol' (empty or too long)"})json");
+    // Validate streamKey/field length to prevent absurdly large map keys.
+    static constexpr std::size_t MAX_STREAM_KEY_LEN = 64;
+    static constexpr std::size_t MAX_FIELD_LEN      = 128;
+    if (streamKey.empty() || streamKey.size() > MAX_STREAM_KEY_LEN) {
+      sendTo(connId, R"json({"type":"error","message":"invalid 'streamKey' (empty or too long)"})json");
       continue;
     }
     if (field.empty() || field.size() > MAX_FIELD_LEN) {
@@ -129,7 +129,7 @@ void WsBridge::handleSubscribe(const std::string& connId, const rapidjson::Docum
     rapidjson::Document rq;
     rq.SetObject();
     auto& a = rq.GetAllocator();
-    rq.AddMember("symbol", rapidjson::Value(symbol.c_str(), a), a);
+    rq.AddMember("streamKey", rapidjson::Value(streamKey.c_str(), a), a);
     rq.AddMember("field",  rapidjson::Value(field.c_str(), a), a);
 
     // Pass through pipeline/stages/node so the full tree can be built.

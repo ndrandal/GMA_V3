@@ -28,7 +28,7 @@ void WSResponder::onValue(const StreamValue& sv) {
     w.StartObject();
     w.Key("type");   w.String("update");
     w.Key("id");     w.String(reqId_.c_str());
-    w.Key("symbol"); w.String(sv.symbol.c_str());
+    w.Key("streamKey"); w.String(sv.symbol.c_str());
     w.Key("value");
     gma::util::writeArgTypeJson(w, sv.value);
 

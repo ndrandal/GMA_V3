@@ -162,15 +162,15 @@ TEST(ClientSessionTest, ParseErrorOnInvalidJson) {
   stream.close(ws::close_code::normal, ec);
 }
 
-TEST(ClientSessionTest, SubscribeRejectsOversizedSymbol) {
+TEST(ClientSessionTest, SubscribeRejectsOversizedStreamKey) {
   ServerHarness srv;
   asio::io_context clientIoc;
   auto stream = connect(clientIoc, srv.port());
 
-  // MAX_SYMBOL_LEN is 64 in ClientSession.cpp.
+  // MAX_STREAM_KEY_LEN is 64 in ClientSession.cpp.
   std::string oversized(80, 'X');
   std::string req =
-    R"({"type":"subscribe","requests":[{"key":1,"symbol":")" + oversized
+    R"({"type":"subscribe","requests":[{"key":1,"streamKey":")" + oversized
     + R"(","field":"px"}]})";
   stream.write(asio::buffer(req));
 
@@ -178,7 +178,7 @@ TEST(ClientSessionTest, SubscribeRejectsOversizedSymbol) {
   ASSERT_FALSE(frame.empty());
   auto err = expectErrorFrame(frame);
   EXPECT_EQ(err.where, "subscribe");
-  EXPECT_NE(err.message.find("symbol"), std::string::npos)
+  EXPECT_NE(err.message.find("streamKey"), std::string::npos)
       << "message: " << err.message;
 
   beast::error_code ec;
@@ -193,7 +193,7 @@ TEST(ClientSessionTest, SubscribeRejectsOversizedField) {
   // MAX_FIELD_LEN is 128 in ClientSession.cpp.
   std::string oversized(150, 'F');
   std::string req =
-    R"({"type":"subscribe","requests":[{"key":1,"symbol":"X","field":")" + oversized
+    R"({"type":"subscribe","requests":[{"key":1,"streamKey":"X","field":")" + oversized
     + R"("}]})";
   stream.write(asio::buffer(req));
 
@@ -254,7 +254,7 @@ TEST(ClientSessionTest, RateLimitEnforcedOnBurstSubscribes) {
   for (int i = 0; i < 22; ++i) {
     std::string req =
       std::string(R"({"type":"subscribe","requests":[{"key":)") + std::to_string(i) +
-      R"(,"symbol":"R","field":"px"}]})";
+      R"(,"streamKey":"R","field":"px"}]})";
     stream.write(asio::buffer(req));
   }
 

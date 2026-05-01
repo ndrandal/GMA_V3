@@ -232,16 +232,16 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
                            std::shared_ptr<gma::INode>  terminal) {
   const auto& rq = expectObj(requestJson, "request");
 
-  if (!rq.HasMember("symbol") || !rq["symbol"].IsString())
-    throw std::runtime_error("buildForRequest: missing 'symbol'");
+  if (!rq.HasMember("streamKey") || !rq["streamKey"].IsString())
+    throw std::runtime_error("buildForRequest: missing 'streamKey'");
   if (!rq.HasMember("field") || !rq["field"].IsString())
     throw std::runtime_error("buildForRequest: missing 'field'");
 
-  const std::string symbol = rq["symbol"].GetString();
-  const std::string field  = rq["field"].GetString();
+  const std::string streamKey = rq["streamKey"].GetString();
+  const std::string field     = rq["field"].GetString();
 
-  if (symbol.empty())
-    throw std::runtime_error("buildForRequest: 'symbol' must not be empty");
+  if (streamKey.empty())
+    throw std::runtime_error("buildForRequest: 'streamKey' must not be empty");
   if (field.empty())
     throw std::runtime_error("buildForRequest: 'field' must not be empty");
 
@@ -257,7 +257,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
 
   // Single node under "node"
   if (rq.HasMember("node") && rq["node"].IsObject()) {
-    midHead = buildOne(rq["node"], symbol, deps, terminal);
+    midHead = buildOne(rq["node"], streamKey, deps, terminal);
     keepAlive.push_back(midHead);
   }
 
@@ -269,7 +269,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
       const auto& arr = rq[k];
       for (size_t i = arr.Size(); i > 0; --i) {
         curDown = buildOne(arr[static_cast<rapidjson::SizeType>(i - 1)],
-                           symbol,
+                           streamKey,
                            deps,
                            curDown);
         keepAlive.push_back(curDown);
@@ -283,7 +283,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
     throw std::runtime_error("buildForRequest: missing dispatcher/pool");
 
   using gma::nodes::Listener;
-  auto head = std::make_shared<Listener>(symbol,
+  auto head = std::make_shared<Listener>(streamKey,
                                         field,
                                         midHead,
                                         deps.pool,
@@ -317,15 +317,15 @@ void registerBuiltinNodeTypes() {
       if (!deps.dispatcher || !deps.pool)
         throw std::runtime_error("Listener: missing dispatcher/pool");
 
-      const std::string symbol = strOr(v, "symbol", defaultStreamKey);
-      const std::string field  = strOr(v, "field",  "");
-      if (symbol.empty())
-        throw std::runtime_error("Listener: missing 'symbol'");
+      const std::string streamKey = strOr(v, "streamKey", defaultStreamKey);
+      const std::string field     = strOr(v, "field",  "");
+      if (streamKey.empty())
+        throw std::runtime_error("Listener: missing 'streamKey'");
       if (field.empty())
         throw std::runtime_error("Listener: missing 'field'");
 
       using gma::nodes::Listener;
-      auto sp = std::make_shared<Listener>(symbol, field, downstream,
+      auto sp = std::make_shared<Listener>(streamKey, field, downstream,
                                            deps.pool, deps.dispatcher);
       sp->start();
       return sp;
@@ -364,12 +364,12 @@ void registerBuiltinNodeTypes() {
       if (!deps.store)
         throw std::runtime_error("AtomicAccessor: missing store");
 
-      const std::string symbol = strOr(v, "symbol", defaultStreamKey);
-      const std::string field  = strOr(v, "field",  "");
+      const std::string streamKey = strOr(v, "streamKey", defaultStreamKey);
+      const std::string field     = strOr(v, "field",  "");
       if (field.empty())
         throw std::runtime_error("AtomicAccessor: missing 'field'");
 
-      return std::make_shared<AtomicAccessor>(symbol, field, deps.store, downstream);
+      return std::make_shared<AtomicAccessor>(streamKey, field, deps.store, downstream);
     });
 
   NodeTypeRegistry::registerNodeType("Worker",

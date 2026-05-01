@@ -27,7 +27,7 @@ TEST(WSResponderTest, OnValueDouble) {
     ASSERT_FALSE(d.HasParseError());
     EXPECT_STREQ(d["type"].GetString(), "update");
     EXPECT_STREQ(d["id"].GetString(), "req-1");
-    EXPECT_STREQ(d["symbol"].GetString(), "AAPL");
+    EXPECT_STREQ(d["streamKey"].GetString(), "AAPL");
     EXPECT_DOUBLE_EQ(d["value"].GetDouble(), 150.5);
 }
 
