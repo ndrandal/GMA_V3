@@ -161,8 +161,37 @@ int main(int argc, char* argv[]) {
 
   // Replay any config keys parked during cfg.loadFromFile() through
   // ConfigNamespaceRegistry now that connectors have registered their
-  // namespaces. Ordering: load → registerWith → dispatchPendingKeys → start.
+  // namespaces. Ordering: load → registerWith → dispatchPendingKeys
+  // → ingress driver → connector start.
   cfg.dispatchPendingKeys();
+
+  // Engine-driven ingress (ENC-31): read cfg.ingress[], lookup each kind in
+  // IngressRegistry, instantiate, start in registration order. A single
+  // ShutdownCoordinator step at priority 35 stops them in reverse order.
+  std::vector<std::unique_ptr<gma::engine::IIngressSource>> ingresses;
+  for (const auto& entry : cfg.ingress) {
+    const auto* factory = gma::engine::IngressRegistry::find(entry.kind);
+    if (!factory) {
+      gma::util::logger().log(gma::util::LogLevel::Warn,
+        "ingress.unknown_kind",
+        {{"kind", entry.kind}});
+      continue;
+    }
+    try {
+      auto src = (*factory)(regs, entry.params);
+      if (src) ingresses.push_back(std::move(src));
+    } catch (const std::exception& ex) {
+      gma::util::logger().log(gma::util::LogLevel::Error,
+        "ingress.factory_threw",
+        {{"kind", entry.kind}, {"err", ex.what()}});
+    }
+  }
+  for (auto& src : ingresses) src->start();
+  shutdown.registerStep("ingress-stop", 35, [&ingresses] {
+    for (auto it = ingresses.rbegin(); it != ingresses.rend(); ++it) {
+      if (*it) (*it)->stop();
+    }
+  });
 
   for (auto* c : connectors) c->start();
   shutdown.registerStep("connectors-stop", 30, [&connectors] {

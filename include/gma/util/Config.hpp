@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <cstdint>
 
@@ -95,6 +96,15 @@ public:
       std::vector<std::string> symbols = {"*"};
   };
   std::vector<FeedConfig> feeds;
+
+  // ENC-31: engine-driven ingress entries (`ingress.N.kind = ..., ingress.N.X = ...`).
+  // The engine reads this list after connectors register their factories,
+  // looks each kind up in IngressRegistry, and drives start/stop centrally.
+  struct Ingress {
+      std::string kind;
+      std::unordered_map<std::string, std::string> params;
+  };
+  std::vector<Ingress> ingress;
 
 private:
   static bool parseLineKV(const std::string& line, std::string& k, std::string& v);
