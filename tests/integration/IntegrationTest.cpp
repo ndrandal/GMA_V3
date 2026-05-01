@@ -11,6 +11,7 @@
 #include "gma/SymbolHistory.hpp"
 #include "gma/util/Config.hpp"
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <memory>
 #include <fstream>
 #include <cstdio>
