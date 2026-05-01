@@ -47,6 +47,12 @@ void WebSocketServer::run() {
   doAccept();
 }
 
+unsigned short WebSocketServer::port() const {
+  boost::system::error_code ec;
+  auto ep = acceptor_.local_endpoint(ec);
+  return ec ? 0 : ep.port();
+}
+
 void WebSocketServer::stopAccept() {
   accepting_.store(false);
   boost::system::error_code ec;
