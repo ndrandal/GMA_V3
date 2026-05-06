@@ -29,55 +29,55 @@ const VERBOSE  = args.includes('--verbose');
 // ---------------------------------------------------------------------------
 const REQUESTS = [
   // Tier 1: Direct field subscriptions (raw tick + TA)
-  { key: 1,  symbol: 'NEXO',  field: 'lastPrice',       label: 'NEXO/lastPrice' },
-  { key: 2,  symbol: 'NEXO',  field: 'volume',          label: 'NEXO/volume' },
-  { key: 3,  symbol: 'NEXO',  field: 'sma_5',           label: 'NEXO/sma_5' },
-  { key: 4,  symbol: 'NEXO',  field: 'sma_20',          label: 'NEXO/sma_20' },
-  { key: 5,  symbol: 'NEXO',  field: 'ema_12',          label: 'NEXO/ema_12' },
-  { key: 6,  symbol: 'NEXO',  field: 'rsi_14',          label: 'NEXO/rsi_14' },
-  { key: 7,  symbol: 'NEXO',  field: 'macd_line',       label: 'NEXO/macd_line' },
-  { key: 8,  symbol: 'NEXO',  field: 'bollinger_upper', label: 'NEXO/bollinger_upper' },
-  { key: 9,  symbol: 'VALT',  field: 'lastPrice',       label: 'VALT/lastPrice' },
-  { key: 10, symbol: 'BLITZ', field: 'lastPrice',       label: 'BLITZ/lastPrice' },
+  { key: 1,  streamKey: 'NEXO',  field: 'lastPrice',       label: 'NEXO/lastPrice' },
+  { key: 2,  streamKey: 'NEXO',  field: 'volume',          label: 'NEXO/volume' },
+  { key: 3,  streamKey: 'NEXO',  field: 'sma_5',           label: 'NEXO/sma_5' },
+  { key: 4,  streamKey: 'NEXO',  field: 'sma_20',          label: 'NEXO/sma_20' },
+  { key: 5,  streamKey: 'NEXO',  field: 'ema_9',          label: 'NEXO/ema_9' },
+  { key: 6,  streamKey: 'NEXO',  field: 'rsi_14',          label: 'NEXO/rsi_14' },
+  { key: 7,  streamKey: 'NEXO',  field: 'macd_line',       label: 'NEXO/macd_line' },
+  { key: 8,  streamKey: 'NEXO',  field: 'bollinger_upper', label: 'NEXO/bollinger_upper' },
+  { key: 9,  streamKey: 'VALT',  field: 'lastPrice',       label: 'VALT/lastPrice' },
+  { key: 10, streamKey: 'VALT', field: 'lastPrice',       label: 'VALT/lastPrice' },
 
   // Tier 2: Worker pipelines
-  { key: 20, symbol: 'NEXO', field: 'lastPrice', label: 'NEXO/Worker(mean)',
+  { key: 20, streamKey: 'NEXO', field: 'lastPrice', label: 'NEXO/Worker(mean)',
     pipeline: [{ type: 'Worker', fn: 'mean' }] },
-  { key: 21, symbol: 'NEXO', field: 'lastPrice', label: 'NEXO/Worker(max)',
+  { key: 21, streamKey: 'NEXO', field: 'lastPrice', label: 'NEXO/Worker(max)',
     pipeline: [{ type: 'Worker', fn: 'max' }] },
-  { key: 22, symbol: 'NEXO', field: 'lastPrice', label: 'NEXO/Worker(spread)',
+  { key: 22, streamKey: 'NEXO', field: 'lastPrice', label: 'NEXO/Worker(spread)',
     pipeline: [{ type: 'Worker', fn: 'spread' }] },
-  { key: 23, symbol: 'NEXO', field: 'lastPrice', label: 'NEXO/Worker(last→scale)',
+  { key: 23, streamKey: 'NEXO', field: 'lastPrice', label: 'NEXO/Worker(last→scale)',
     pipeline: [{ type: 'Worker', fn: 'last' }, { type: 'Worker', fn: 'scale', factor: 100 }] },
 
   // Tier 3: AtomicAccessor
-  { key: 30, symbol: 'NEXO', field: 'lastPrice', label: 'NEXO/Atomic(rsi_14)',
+  { key: 30, streamKey: 'NEXO', field: 'lastPrice', label: 'NEXO/Atomic(rsi_14)',
     pipeline: [{ type: 'AtomicAccessor', field: 'rsi_14' }] },
-  { key: 31, symbol: 'NEXO', field: 'lastPrice', label: 'NEXO/Atomic(ob.spread)',
+  { key: 31, streamKey: 'NEXO', field: 'lastPrice', label: 'NEXO/Atomic(ob.spread)',
     pipeline: [{ type: 'AtomicAccessor', field: 'ob.spread' }] },
-  { key: 32, symbol: 'NEXO', field: 'lastPrice', label: 'NEXO/Atomic(ob.level.bid.1.price)',
+  { key: 32, streamKey: 'NEXO', field: 'lastPrice', label: 'NEXO/Atomic(ob.level.bid.1.price)',
     pipeline: [{ type: 'AtomicAccessor', field: 'ob.level.bid.1.price' }] },
 
   // Tier 4: Interval polling
-  { key: 40, symbol: 'NEXO', field: 'lastPrice', label: 'NEXO/Interval(sma_5)',
+  { key: 40, streamKey: 'NEXO', field: 'lastPrice', label: 'NEXO/Interval(sma_5)',
     node: { type: 'Interval', ms: 1000,
-            child: { type: 'AtomicAccessor', symbol: 'NEXO', field: 'sma_5' } } },
-  { key: 41, symbol: 'NEXO', field: 'lastPrice', label: 'NEXO/Interval(ob.spread)',
+            child: { type: 'AtomicAccessor', streamKey: 'NEXO', field: 'sma_5' } } },
+  { key: 41, streamKey: 'NEXO', field: 'lastPrice', label: 'NEXO/Interval(ob.spread)',
     node: { type: 'Interval', ms: 500,
-            child: { type: 'AtomicAccessor', symbol: 'NEXO', field: 'ob.spread' } } },
+            child: { type: 'AtomicAccessor', streamKey: 'NEXO', field: 'ob.spread' } } },
 
   // Tier 5: Multi-symbol
-  { key: 50, symbol: 'QBIT', field: 'lastPrice', label: 'QBIT/Worker(mean)',
+  { key: 50, streamKey: 'NEXO', field: 'lastPrice', label: 'NEXO/Worker(mean)',
     pipeline: [{ type: 'Worker', fn: 'mean' }] },
-  { key: 51, symbol: 'FLUX', field: 'lastPrice', label: 'FLUX/Atomic(macd_line)',
+  { key: 51, streamKey: 'VALT', field: 'lastPrice', label: 'VALT/Atomic(macd_line)',
     pipeline: [{ type: 'AtomicAccessor', field: 'macd_line' }] },
-  { key: 52, symbol: 'BLITZ', field: 'lastPrice', label: 'BLITZ/Worker(max)',
+  { key: 52, streamKey: 'VALT', field: 'lastPrice', label: 'VALT/Worker(max)',
     pipeline: [{ type: 'Worker', fn: 'max' }] },
 
   // Tier 6: Aggregate batching
-  { key: 60, symbol: 'NEXO', field: 'lastPrice', label: 'NEXO/Aggregate(5)',
+  { key: 60, streamKey: 'NEXO', field: 'lastPrice', label: 'NEXO/Aggregate(5)',
     node: { type: 'Aggregate', arity: 5,
-            inputs: [{ type: 'Listener', symbol: 'NEXO', field: 'lastPrice' }] } },
+            inputs: [{ type: 'Listener', streamKey: 'NEXO', field: 'lastPrice' }] } },
 ];
 
 // ---------------------------------------------------------------------------
@@ -168,7 +168,7 @@ function run() {
         const valStr = typeof msg.value === 'object'
           ? JSON.stringify(msg.value)
           : String(msg.value);
-        log(`  key=${String(msg.key).padEnd(3)} ${msg.symbol.padEnd(6)} `
+        log(`  key=${String(msg.key).padEnd(3)} ${msg.streamKey.padEnd(6)} `
           + `${s.label.padEnd(32)} = ${valStr}`);
       }
     }
