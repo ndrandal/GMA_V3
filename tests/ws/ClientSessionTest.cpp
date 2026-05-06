@@ -208,6 +208,36 @@ TEST(ClientSessionTest, SubscribeRejectsOversizedField) {
   stream.close(ws::close_code::normal, ec);
 }
 
+// ENC-101 push-vs-pull rule: a subscribe with field=ob.* must round-trip
+// as an `error` frame whose `where` is "build" (TreeBuilder catch block at
+// src/server/ClientSession.cpp ~line 510) and whose `message` contains
+// the literal "pipeline-only" + the offending field. This is the only
+// test that exercises the full WS round-trip; ListenerTest +
+// TreeBuilderTest already cover the reject at lower layers.
+TEST(ClientSessionTest, SubscribeRejectsObListenerField) {
+  ServerHarness srv;
+  asio::io_context clientIoc;
+  auto stream = connect(clientIoc, srv.port());
+
+  std::string req =
+    R"({"type":"subscribe","requests":[{"key":1,"streamKey":"NEXO","field":"ob.best.bid.price"}]})";
+  stream.write(asio::buffer(req));
+
+  auto frame = readFrameBounded(stream, std::chrono::seconds(2));
+  ASSERT_FALSE(frame.empty()) << "expected an error frame; got nothing";
+  auto err = expectErrorFrame(frame);
+  EXPECT_EQ(err.where, "build")
+      << "ENC-101 reject is thrown from TreeBuilder, caught by the 'build' "
+         "catch in ClientSession; got where=" << err.where;
+  EXPECT_NE(err.message.find("pipeline-only"), std::string::npos)
+      << "message must echo the canonical ENC-101 wording; got: " << err.message;
+  EXPECT_NE(err.message.find("ob.best.bid.price"), std::string::npos)
+      << "message must echo the offending field; got: " << err.message;
+
+  beast::error_code ec;
+  stream.close(ws::close_code::normal, ec);
+}
+
 TEST(ClientSessionTest, CancelMissingKeysArrayError) {
   ServerHarness srv;
   asio::io_context clientIoc;

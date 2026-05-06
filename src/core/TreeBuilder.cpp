@@ -283,12 +283,21 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
     throw std::runtime_error("buildForRequest: missing dispatcher/pool");
 
   using gma::nodes::Listener;
-  auto head = std::make_shared<Listener>(streamKey,
-                                        field,
-                                        midHead,
-                                        deps.pool,
-                                        deps.dispatcher);
-  head->start();
+  auto headRes = Listener::Create(streamKey,
+                                  field,
+                                  midHead,
+                                  deps.pool,
+                                  deps.dispatcher);
+  if (!headRes) {
+    // Propagate the ENC-101 reject (and any future Listener::Create
+    // pre-flight errors) up through ClientSession's
+    // try { TreeBuilder } catch (std::exception&) {
+    //   sendError("validate", ex.what());
+    // } chain at src/server/ClientSession.cpp:456 — which produces a
+    // {"type":"error","where":"validate","message":...} WS response.
+    throw std::runtime_error(headRes.error().message);
+  }
+  auto head = std::move(headRes.value());
 
   BuiltChain out;
   out.head      = head;

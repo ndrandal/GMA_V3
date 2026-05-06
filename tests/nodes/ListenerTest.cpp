@@ -122,3 +122,75 @@ TEST(ListenerTest, NoCrashOnDestructionWithoutStart) {
     }
     SUCCEED();
 }
+
+// --------------------------------------------------------------------
+// Listener::Create factory — ENC-101 push-vs-pull rule enforcement.
+// See GMA_V3/docs/atomic-keys.md and the spec at
+// GMA_V3/specs/2026-05-06-ob-keys-pipeline-only/.
+// --------------------------------------------------------------------
+
+TEST(ListenerTest, RejectsObNamespaceAtFactory) {
+    rt::ThreadPool pool(1);
+    AtomicStore store;
+    Dispatcher dispatcher(&pool, &store);
+
+    auto stub = std::make_shared<DownstreamStub>();
+    auto res = Listener::Create("NEXO", "ob.best.bid.price", stub, &pool, &dispatcher);
+
+    ASSERT_FALSE(res.has_value()) << "Listener::Create must reject ob.* fields";
+    const auto& msg = res.error().message;
+    EXPECT_NE(msg.find("pipeline-only"), std::string::npos)
+        << "error message must contain literal 'pipeline-only'; got: " << msg;
+    EXPECT_NE(msg.find("ob.best.bid.price"), std::string::npos)
+        << "error message must echo the offending field name; got: " << msg;
+    EXPECT_NE(msg.find("docs/atomic-keys.md"), std::string::npos)
+        << "error message must point at docs/atomic-keys.md; got: " << msg;
+    pool.shutdown();
+}
+
+TEST(ListenerTest, RejectsObSpread) {
+    rt::ThreadPool pool(1);
+    AtomicStore store;
+    Dispatcher dispatcher(&pool, &store);
+
+    auto stub = std::make_shared<DownstreamStub>();
+    auto res = Listener::Create("NEXO", "ob.spread", stub, &pool, &dispatcher);
+
+    ASSERT_FALSE(res.has_value());
+    EXPECT_NE(res.error().message.find("pipeline-only"), std::string::npos);
+    EXPECT_NE(res.error().message.find("ob.spread"), std::string::npos);
+    pool.shutdown();
+}
+
+TEST(ListenerTest, AcceptsBareKeyAtFactory) {
+    rt::ThreadPool pool(1);
+    AtomicStore store;
+    Dispatcher dispatcher(&pool, &store);
+
+    auto stub = std::make_shared<DownstreamStub>();
+    auto res = Listener::Create("AAPL", "lastPrice", stub, &pool, &dispatcher);
+
+    ASSERT_TRUE(res.has_value()) << "bare key 'lastPrice' should pass";
+    auto listener = res.value();
+    EXPECT_EQ(listener->symbol(), "AAPL");
+    EXPECT_EQ(listener->field(), "lastPrice");
+    // Create() returns an already-started Listener; values propagate.
+    listener->onValue(StreamValue{"AAPL", 42.0});
+    pool.shutdown();
+    EXPECT_EQ(stub->safeSize(), 1u);
+    EXPECT_DOUBLE_EQ(std::get<double>(stub->received[0].value), 42.0);
+}
+
+TEST(ListenerTest, FactoryDoesNotMatchObesityFalsePositive) {
+    // Defensive: the prefix check is the literal three chars 'o','b','.'
+    // — not a starts_with("ob") call. Field names like "obesity" or
+    // "obvious" must NOT be rejected.
+    rt::ThreadPool pool(1);
+    AtomicStore store;
+    Dispatcher dispatcher(&pool, &store);
+
+    auto stub = std::make_shared<DownstreamStub>();
+    auto res = Listener::Create("X", "obesity", stub, &pool, &dispatcher);
+    EXPECT_TRUE(res.has_value());
+    pool.shutdown();
+}

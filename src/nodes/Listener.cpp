@@ -5,6 +5,48 @@
 
 using namespace gma::nodes;
 
+namespace {
+
+// ENC-101: ob.* atomic keys are written by ob::Provider into the
+// AtomicStore but never push through Dispatcher::notifyListeners,
+// so a Listener bound to one of them registers and silently never
+// fires. Reject at construction time so the failure is loud.
+//
+// Literal 3-char prefix ('o','b','.') — not a starts_with("ob")
+// check, which would catch "obesity" or "obvious".
+bool isPipelineOnlyKey(const std::string& field) {
+  return field.size() >= 3
+      && field[0] == 'o'
+      && field[1] == 'b'
+      && field[2] == '.';
+}
+
+} // anonymous namespace
+
+gma::Result<std::shared_ptr<Listener>> Listener::Create(
+    std::string symbol,
+    std::string field,
+    std::shared_ptr<INode> downstream,
+    gma::rt::ThreadPool* pool,
+    gma::Dispatcher* dispatcher) {
+  if (isPipelineOnlyKey(field)) {
+    return gma::Error{
+      "listener: field '" + field +
+        "' is pipeline-only — see docs/atomic-keys.md; bind via "
+        "AtomicAccessor downstream of a bare-key Listener clock",
+      "Listener::Create"
+    };
+  }
+  auto self = std::make_shared<Listener>(
+      std::move(symbol),
+      std::move(field),
+      std::move(downstream),
+      pool,
+      dispatcher);
+  self->start();
+  return self;
+}
+
 Listener::Listener(std::string symbol,
                    std::string field,
                    std::shared_ptr<INode> downstream,
