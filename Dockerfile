@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libboost-system-dev \
     libboost-thread-dev \
     libssl-dev \
+    rapidjson-dev \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
