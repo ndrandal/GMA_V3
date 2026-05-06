@@ -5,6 +5,7 @@
 #include <mutex>
 #include <string>
 
+#include "gma/Result.hpp"
 #include "gma/nodes/INode.hpp"
 #include "gma/rt/ThreadPool.hpp"
 
@@ -19,6 +20,25 @@ class Listener final
   , public std::enable_shared_from_this<Listener>
 {
 public:
+  // Prefer Create() over the public constructor: it enforces the
+  // ENC-101 push-vs-pull rule (see GMA_V3/docs/atomic-keys.md) by
+  // rejecting `ob.*` fields, which the dispatcher never notifies on
+  // and which would silently produce zero updates. The constructor
+  // remains public so unit tests can build a Listener with arbitrary
+  // fields to exercise the reject path itself.
+  //
+  // On success the returned Listener has already had `start()`
+  // called; callers do not need the two-step pattern. On failure the
+  // returned Result carries an Error whose `message` field begins
+  // with `"listener: field '<field>' is pipeline-only"` and points
+  // at `docs/atomic-keys.md`.
+  static gma::Result<std::shared_ptr<Listener>> Create(
+      std::string symbol,
+      std::string field,
+      std::shared_ptr<INode> downstream,
+      gma::rt::ThreadPool* pool,
+      gma::Dispatcher* dispatcher);
+
   Listener(std::string symbol,
            std::string field,
            std::shared_ptr<INode> downstream,
@@ -28,7 +48,7 @@ public:
   // IMPORTANT:
   // Do NOT register with Dispatcher from the constructor.
   // shared_from_this() is not valid until the object is owned by a shared_ptr.
-  // Call start() immediately after construction.
+  // Call start() immediately after construction (or use Create()).
   void start();
 
   // INode
