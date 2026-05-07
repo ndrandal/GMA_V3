@@ -14,6 +14,7 @@
 #include "gma/nodes/Worker.hpp"
 #include "gma/nodes/AtomicAccessor.hpp"
 #include "gma/nodes/Interval.hpp"
+#include "gma/nodes/BucketTime.hpp"
 
 // Runtime deps
 #include "gma/AtomicStore.hpp"
@@ -364,6 +365,36 @@ void registerBuiltinNodeTypes() {
           std::chrono::milliseconds(ms), child, pool);
       interval->start();
       return interval;
+    });
+
+  // BucketTime emits ticks aligned to wall-clock period boundaries (e.g.
+  // ms=60000 ticks at every minute boundary regardless of when the node
+  // was constructed). Same JSON shape as Interval — pipelines that need
+  // alignment swap "Interval" for "BucketTime" without other changes.
+  NodeTypeRegistry::registerNodeType("BucketTime",
+    [](const rapidjson::Value& v, const std::string& defaultStreamKey,
+       const tree::Deps& deps, std::shared_ptr<INode> downstream)
+        -> std::shared_ptr<INode> {
+      rt::ThreadPool* pool = deps.pool;
+      if (!pool && gThreadPool) pool = gThreadPool.get();
+      if (!pool)
+        throw std::runtime_error("BucketTime: no thread pool available");
+
+      int ms = intOr(v, "ms", intOr(v, "periodMs", 0));
+      if (ms <= 0)
+        throw std::runtime_error("BucketTime: positive 'ms' required");
+      static constexpr int MAX_BUCKET_MS = 3600000;
+      if (ms > MAX_BUCKET_MS)
+        throw std::runtime_error("BucketTime: 'ms' exceeds maximum (3600000)");
+
+      auto child = downstream;
+      if (v.HasMember("child"))
+        child = tree::buildOne(v["child"], defaultStreamKey, deps, downstream);
+
+      auto bucket = std::make_shared<BucketTime>(
+          std::chrono::milliseconds(ms), child, pool);
+      bucket->start();
+      return bucket;
     });
 
   NodeTypeRegistry::registerNodeType("AtomicAccessor",
