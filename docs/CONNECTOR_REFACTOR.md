@@ -125,6 +125,18 @@ at priority 35 stops them in reverse. Adding a new ingress kind is a
 factory registration in some connector's `registerWith` plus an
 `ingress.N.kind = …` line in the INI — no `main.cpp` change.
 
+**Forum-driven ingress (feed-sim-connector phase 2).** Ingress entries
+no longer have to come from the INI: when `cfg.forumUrl` (or the
+`FORUM_URL` env var) is non-empty, the composition root calls
+`gma::forum::ConnectorsClient::fetchIngresses(forumUrl, tenantId,
+authToken)` after `synthesizeIngressFromLegacy()` and *replaces*
+`cfg.ingress` with the result. Each connector row from forum's
+`/api/connectors` becomes a `market.wsclient` ingress (one per
+`protocol == "itch"` row with a non-empty `endpoint_url`). Failure to
+reach forum aborts startup — see fail-fast acceptance criterion in the
+proposal SPEC. The static INI ingress remains the authoritative source
+in forum-less dev runs.
+
 ```cpp
 int main(int argc, char* argv[]) {
   // ... engine bootstrap (config, threadpool, store, dispatcher, ioc) ...

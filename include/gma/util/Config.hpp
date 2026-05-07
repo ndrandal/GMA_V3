@@ -113,6 +113,16 @@ public:
   };
   std::vector<Ingress> ingress;
 
+  // forum-driven ingress (feed-sim-connector phase 2).
+  // When forumUrl is non-empty the composition root replaces the static
+  // `ingress[]` with the result of `gma::forum::ConnectorsClient::
+  // fetchIngresses(forumUrl, forumTenantId, forumAuthToken)` after the
+  // INI is loaded but before connectors start. Empty values disable
+  // the pull (legacy INI ingress remains authoritative).
+  std::string forumUrl;
+  std::string forumTenantId;
+  std::string forumAuthToken;
+
 private:
   static bool parseLineKV(const std::string& line, std::string& k, std::string& v);
   static std::string trim(const std::string& s);
