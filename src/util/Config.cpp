@@ -152,6 +152,9 @@ bool Config::loadFromFile(const std::string& path) {
     else if (key == "metricsEnabled") { metricsEnabled = (val == "true" || val == "1" || val == "yes"); }
     else if (key == "metricsIntervalSec") { int v = std::atoi(val.c_str()); if (v > 0) metricsIntervalSec = v; }
     else if (key == "logLevel") { logLevel = val; }
+    else if (key == "forumUrl") { forumUrl = val; }
+    else if (key == "forumTenantId") { forumTenantId = val; }
+    else if (key == "forumAuthToken") { forumAuthToken = val; }
     else if (key == "feedUrl") { feedUrl = val; }
     else if (key == "feedSymbols") {
       feedSymbols.clear();

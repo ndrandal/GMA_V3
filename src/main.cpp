@@ -27,6 +27,9 @@
 // -------- Connectors --------
 #include "gma/market/MarketConnector.hpp"
 
+// -------- Forum-driven ingress --------
+#include "gma/forum/ConnectorsClient.hpp"
+
 // ---------------------------
 // Globals
 // ---------------------------
@@ -162,6 +165,44 @@ int main(int argc, char* argv[]) {
   // ENC-31: ensure cfg.ingress[] is populated even when the user provided
   // no INI (loadFromFile not called). Idempotent.
   cfg.synthesizeIngressFromLegacy();
+
+  // feed-sim-connector phase 2: when forumUrl is configured, replace
+  // cfg.ingress with what forum's /api/connectors says. Connector
+  // record is the source of truth; static INI ingress only matters
+  // for forum-less dev runs (which now go through this fallback).
+  // Env-var overrides apply when the INI didn't carry the keys.
+  {
+    auto envOr = [](const std::string& cfgVal, const char* envName) {
+      if (!cfgVal.empty()) return cfgVal;
+      const char* env = std::getenv(envName);
+      return env ? std::string{env} : std::string{};
+    };
+    const std::string forumUrl       = envOr(cfg.forumUrl,       "FORUM_URL");
+    const std::string forumTenantId  = envOr(cfg.forumTenantId,  "FORUM_TENANT_ID");
+    const std::string forumAuthToken = envOr(cfg.forumAuthToken, "FORUM_AGENT_TOKEN");
+
+    if (!forumUrl.empty()) {
+      try {
+        auto pulled = gma::forum::ConnectorsClient::fetchIngresses(
+            forumUrl, forumTenantId, forumAuthToken);
+        cfg.ingress = std::move(pulled);
+        logger().log(
+            LogLevel::Info,
+            "forum.connectors.ingress_replaced",
+            {{"count", std::to_string(cfg.ingress.size())}, {"forumUrl", forumUrl}});
+      } catch (const std::exception& ex) {
+        logger().log(
+            LogLevel::Error,
+            "forum.connectors.fetch_failed",
+            {{"err", ex.what()}, {"forumUrl", forumUrl}});
+        // Fail-fast per spec AC-6: do not boot with empty ingress
+        // and silently produce no data. The dev compose has forum
+        // as a depends_on; hitting this almost always means a
+        // misconfig the operator should see.
+        std::exit(1);
+      }
+    }
+  }
 
   // Replay any config keys parked during cfg.loadFromFile() through
   // ConfigNamespaceRegistry now that connectors have registered their
