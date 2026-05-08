@@ -17,6 +17,8 @@
 #include <string>
 #include <unordered_map>
 
+#include "gma/server/RequestKey.hpp"
+
 namespace gma {
 
 class WebSocketServer;
@@ -72,10 +74,11 @@ private:
   std::deque<std::string> outbox_;
   bool writing_{false};
 
-  // Active requests for this session.
+  // Active requests for this session. Variant key supports both
+  // smoke.js's int-keyed wire and embassy's string-id wire.
   std::mutex reqMu_;
-  std::unordered_map<int, std::shared_ptr<INode>> active_;
-  std::unordered_map<int, std::vector<std::shared_ptr<INode>>> chains_; // keeps pipeline alive
+  std::unordered_map<gma::server::RequestKey, std::shared_ptr<INode>> active_;
+  std::unordered_map<gma::server::RequestKey, std::vector<std::shared_ptr<INode>>> chains_; // keeps pipeline alive
 
   // Rate limiting: token-bucket for subscribe requests
   static constexpr int    RATE_LIMIT_BURST    = 20;   // max burst of subscribes
