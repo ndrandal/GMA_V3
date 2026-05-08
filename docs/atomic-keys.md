@@ -124,6 +124,32 @@ aggregation. The TreeBuilder's `pipeline` array form expresses this:
 two-AtomicAccessor + Aggregate(arity=2) + Worker(spread) shape;
 see `forum/db/seed/seed.go`'s `NEXO bid-ask spread` pipeline.)
 
+### Subscribe request key — int vs string (`RequestKey`)
+
+Each subscribe request must carry a per-request identifier. The
+wire accepts three input forms — `key:<int>`, `id:<int>` (legacy
+fallback), or `id:"<string>"`. Outbound `subscribed` ack frames and
+`update` frames mirror the input type via two distinct field
+names: `key:<int>` for int-keyed subs, `requestId:"<string>"` for
+string-keyed subs. Supplying both `key` and `id` on the same
+request is a protocol error, as is mixing `keys:[int,...]` and
+`ids:[string,...]` on a single `cancel` payload.
+
+Internal routing — Dispatcher, AtomicStore, TreeBuilder, Listener —
+stays key-type-agnostic: subscribers route on `(streamKey, field)`,
+not on the request id. The variant lives at the wire boundary
+(`gma::server::RequestKey` in `include/gma/server/RequestKey.hpp`).
+
+```jsonc
+// int-keyed subscribe (smoke.js, int-native consumers)
+{ "type": "subscribe", "requests": [ { "key": 1, "streamKey": "NEXO", "field": "lastPrice" } ] }
+// → { "type": "update", "key": 1, "streamKey": "NEXO", "value": 24.83 }
+
+// string-id subscribe (embassy, saved-scene consumers)
+{ "type": "subscribe", "requests": [ { "id": "r-NEXO-open", "streamKey": "NEXO", "field": "lastPrice" } ] }
+// → { "type": "update", "requestId": "r-NEXO-open", "streamKey": "NEXO", "value": 24.83 }
+```
+
 ## Decision rule
 
 | Your feed source emits ... | Subscribe via |
