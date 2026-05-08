@@ -347,14 +347,18 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
       continue;
     }
 
-    // Request key (int)
-    int key = 0;
-    if (r.HasMember("key") && r["key"].IsInt()) key = r["key"].GetInt();
-    else if (r.HasMember("id") && r["id"].IsInt()) key = r["id"].GetInt();
-    else {
-      sendError("subscribe", "request missing integer 'key'");
+    // Request key — int (smoke.js / legacy clients) or string
+    // (embassy / saved-scene). See gma/server/RequestKey.hpp.
+    if (gma::server::requestObjHasBothKeyAndId(r)) {
+      sendError("subscribe", "request must have key (int) OR id (int|string), not both");
       continue;
     }
+    auto keyOpt = gma::server::parseRequestKeyFromObj(r);
+    if (!keyOpt) {
+      sendError("subscribe", "request missing valid 'key' (int) or 'id' (int|string)");
+      continue;
+    }
+    gma::server::RequestKey key = std::move(*keyOpt);
 
     if (!r.HasMember("streamKey") || !r["streamKey"].IsString()) {
       sendError("subscribe", "request missing 'streamKey' string");
@@ -386,7 +390,8 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     // Capture weak_ptr to avoid reference cycle:
     //   ClientSession → chains_ → Responder → sendFn → ClientSession
     auto weak = weak_from_this();
-    auto sendFn = [weak](int reqKey, const gma::StreamValue& sv) {
+    auto sendFn = [weak](const gma::server::RequestKey& reqKey,
+                         const gma::StreamValue& sv) {
       try {
         auto self = weak.lock();
         if (!self) return;
@@ -396,7 +401,7 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
 
         w.StartObject();
         w.Key("type");   w.String("update");
-        w.Key("key");    w.Int(reqKey);
+        gma::server::writeRequestKeyJSON(w, reqKey);
         w.Key("streamKey"); w.String(sv.symbol.c_str());
         w.Key("value");  gma::util::writeArgTypeJson(w, sv.value);
         w.EndObject();
@@ -405,7 +410,8 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
         self->sendText(sb.GetString());
       } catch (const std::exception& ex) {
         gma::util::logger().log(gma::util::LogLevel::Error,
-          "ws.sendFn exception", {{"err", ex.what()}, {"key", std::to_string(reqKey)}});
+          "ws.sendFn exception",
+          {{"err", ex.what()}, {"reqKey", gma::server::keyDebugString(reqKey)}});
       }
     };
 
@@ -494,16 +500,22 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
       ::rapidjson::Writer<::rapidjson::StringBuffer> w(sb);
       w.StartObject();
       w.Key("type"); w.String("subscribed");
-      w.Key("key");  w.Int(key);
+      gma::server::writeRequestKeyJSON(w, key);
       w.EndObject();
 
       GMA_METRIC_HIT("ws.subscribe");
       GMA_METRIC_HIT("ws.msg_out");
       sendText(sb.GetString());
 
+      // Log structured field uses "key" or "requestId" mirroring the
+      // wire so operators grepping forum's instruction_id can hop
+      // straight into gma's view.
       gma::util::logger().log(gma::util::LogLevel::Info,
                               "ws.subscribe",
-                              { {"key", std::to_string(key)},
+                              { {gma::server::isInt(key) ? "key" : "requestId",
+                                 gma::server::isInt(key)
+                                     ? std::to_string(std::get<int>(key))
+                                     : std::get<std::string>(key)},
                                 {"streamKey", streamKey},
                                 {"field", field} });
     } catch (const std::exception& ex) {
@@ -513,19 +525,42 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
 }
 
 void ClientSession::handleCancel(const ::rapidjson::Document& doc) {
-  if (!doc.HasMember("keys") || !doc["keys"].IsArray()) {
-    sendError("cancel", "missing 'keys' array");
+  // Accept legacy `keys: [int,...]` AND new `ids: ["...",...]` arrays.
+  // Both present in the same payload is a protocol error — keep the
+  // parser tight and the failure modes obvious.
+  const bool hasKeys = doc.HasMember("keys") && doc["keys"].IsArray();
+  const bool hasIds  = doc.HasMember("ids")  && doc["ids"].IsArray();
+
+  if (hasKeys && hasIds) {
+    sendError("cancel", "specify keys (int) or ids (string), not both");
+    return;
+  }
+  if (!hasKeys && !hasIds) {
+    sendError("cancel", "missing 'keys' (int array) or 'ids' (string array)");
     return;
   }
 
-  for (auto& v : doc["keys"].GetArray()) {
-    if (!v.IsInt()) {
-      sendError("cancel", "keys must be integers");
-      continue;
+  // Normalize to a vector<RequestKey>.
+  std::vector<gma::server::RequestKey> toCancel;
+  if (hasKeys) {
+    for (auto& v : doc["keys"].GetArray()) {
+      if (!v.IsInt()) {
+        sendError("cancel", "keys must be integers");
+        continue;
+      }
+      toCancel.push_back(gma::server::requestKeyInt(v.GetInt()));
     }
+  } else {  // hasIds
+    for (auto& v : doc["ids"].GetArray()) {
+      if (!v.IsString()) {
+        sendError("cancel", "ids must be strings");
+        continue;
+      }
+      toCancel.push_back(gma::server::requestKeyStr(v.GetString()));
+    }
+  }
 
-    const int key = v.GetInt();
-
+  for (auto& key : toCancel) {
     std::shared_ptr<gma::INode> root;
     {
       std::lock_guard<std::mutex> lk(reqMu_);
@@ -543,7 +578,7 @@ void ClientSession::handleCancel(const ::rapidjson::Document& doc) {
     ::rapidjson::Writer<::rapidjson::StringBuffer> w(sb);
     w.StartObject();
     w.Key("type"); w.String("canceled");
-    w.Key("key");  w.Int(key);
+    gma::server::writeRequestKeyJSON(w, key);
     w.EndObject();
 
     GMA_METRIC_HIT("ws.cancel");
@@ -552,7 +587,10 @@ void ClientSession::handleCancel(const ::rapidjson::Document& doc) {
 
     gma::util::logger().log(gma::util::LogLevel::Info,
                             "ws.cancel",
-                            { {"key", std::to_string(key)} });
+                            { {gma::server::isInt(key) ? "key" : "requestId",
+                               gma::server::isInt(key)
+                                   ? std::to_string(std::get<int>(key))
+                                   : std::get<std::string>(key)} });
   }
 }
 

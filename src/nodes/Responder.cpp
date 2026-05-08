@@ -3,10 +3,9 @@
 
 using namespace gma::nodes;
 
-Responder::Responder(std::function<void(int,const StreamValue&)> send,
-                     int key)
+Responder::Responder(SendFn send, gma::server::RequestKey key)
   : send_(std::move(send))
-  , key_(key)
+  , key_(std::move(key))
 {}
 
 void Responder::onValue(const StreamValue& sv) {
@@ -15,7 +14,7 @@ void Responder::onValue(const StreamValue& sv) {
     if (stopped_.load(std::memory_order_acquire)) return;
 
     // Copy send_ under lock to avoid TOCTOU race with shutdown().
-    std::function<void(int,const StreamValue&)> fn;
+    SendFn fn;
     {
         std::lock_guard<std::mutex> lk(mx_);
         fn = send_;
