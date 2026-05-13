@@ -6,6 +6,7 @@ add_executable(tests_nodes
     ListenerTest.cpp
     ResponderTest.cpp
     SymbolSplitTest.cpp
+    TumblingWindowTest.cpp
     WorkerTest.cpp
 )
 

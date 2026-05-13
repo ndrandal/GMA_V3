@@ -15,6 +15,7 @@
 #include "gma/nodes/AtomicAccessor.hpp"
 #include "gma/nodes/Interval.hpp"
 #include "gma/nodes/BucketTime.hpp"
+#include "gma/nodes/TumblingWindow.hpp"
 
 // Runtime deps
 #include "gma/AtomicStore.hpp"
@@ -395,6 +396,34 @@ void registerBuiltinNodeTypes() {
           std::chrono::milliseconds(ms), child, pool);
       bucket->start();
       return bucket;
+    });
+
+  // TumblingWindow taps an upstream scalar stream, buffers per (streamKey)
+  // until each wall-clock-aligned boundary, then emits one
+  // StreamValue{symbol, vector<double>} downstream and clears. Pipeline-
+  // stage shape (no "child" / no "input" key) — wired via the standard
+  // pipeline-array reverse-iteration in buildForRequest; the OUTER caller
+  // passes `downstream`.
+  NodeTypeRegistry::registerNodeType("TumblingWindow",
+    [](const rapidjson::Value& v, const std::string& /*defaultStreamKey*/,
+       const tree::Deps& deps, std::shared_ptr<INode> downstream)
+        -> std::shared_ptr<INode> {
+      rt::ThreadPool* pool = deps.pool;
+      if (!pool && gThreadPool) pool = gThreadPool.get();
+      if (!pool)
+        throw std::runtime_error("TumblingWindow: no thread pool available");
+
+      int ms = intOr(v, "ms", intOr(v, "periodMs", 0));
+      if (ms <= 0)
+        throw std::runtime_error("TumblingWindow: positive 'periodMs' required");
+      static constexpr int MAX_TUMBLING_MS = 3600000;
+      if (ms > MAX_TUMBLING_MS)
+        throw std::runtime_error("TumblingWindow: 'periodMs' exceeds maximum (3600000)");
+
+      auto tw = std::make_shared<TumblingWindow>(
+          std::chrono::milliseconds(ms), downstream, pool);
+      tw->start();
+      return tw;
     });
 
   NodeTypeRegistry::registerNodeType("AtomicAccessor",
