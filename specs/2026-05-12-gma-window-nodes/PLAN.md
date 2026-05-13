@@ -88,11 +88,23 @@ so filter at the GoogleTest layer via `--gtest_filter`.
 
 **Verification:**
 ```sh
-cd GMA_V3/build
-ctest --output-on-failure -R "VectorReducer|WindowReducerComposition"  # 5 tests pass
-ctest --output-on-failure                                                # full suite green
-ctest -R Bench                                                            # bench numbers within margin of pre-phase baseline
+cd GMA_V3/build-debug
+./gma_tests --gtest_filter='VectorReducerTest.*:WindowReducerCompositionTest.*' --gtest_brief=1   # 6 tests pass
+ctest --output-on-failure                                                                          # full suite green
+
+# Benches: configure a Release tree with -DGMA_BUILD_BENCHMARKS=ON and
+# run each microbench by name (the combined run can hang with multiple
+# TumblingWindow instances + ThreadPool teardowns in one process).
+cd ../build-bench
+./bench_dispatcher    --benchmark_filter=BM_DispatcherOnTick       --benchmark_min_time=2s
+./bench_window_nodes  --benchmark_filter=BM_VectorReducer_Max      --benchmark_min_time=1s
+./bench_window_nodes  --benchmark_filter=BM_VectorReducer_Sum      --benchmark_min_time=1s
+./bench_window_nodes  --benchmark_filter=BM_TumblingWindow         --benchmark_min_time=1s
 ```
+Note: the gtest suite is a single CTest target (`gma_tests`) wrapping all
+GoogleTest cases — `ctest -R` filters CTest names, not GoogleTest names,
+so filter at the GoogleTest layer via `--gtest_filter` (same caveat as
+Phase 1).
 
 **Risks:**
 - **`StreamValue::value` carrying a non-vector variant silently does nothing.** Could mask a wiring bug if a user mis-pairs `VectorReducer` with a non-vector source. *Mitigation:* the `Warn` log on the drop path, plus a one-line note in `docs/window-nodes.md` about the expected upstream shape. A future stricter `TreeBuilder` could validate type compat at build time, but that's out of scope here.

@@ -16,6 +16,7 @@
 #include "gma/nodes/Interval.hpp"
 #include "gma/nodes/BucketTime.hpp"
 #include "gma/nodes/TumblingWindow.hpp"
+#include "gma/nodes/VectorReducer.hpp"
 
 // Runtime deps
 #include "gma/AtomicStore.hpp"
@@ -424,6 +425,28 @@ void registerBuiltinNodeTypes() {
           std::chrono::milliseconds(ms), downstream, pool);
       tw->start();
       return tw;
+    });
+
+  // VectorReducer consumes one StreamValue{vector<double>} per upstream
+  // emit (typically from TumblingWindow), applies `fn` from the shared
+  // FunctionMap registry, and forwards a scalar downstream. Pipeline-
+  // stage shape; reuses the same registry Worker resolves through, but
+  // consumes FunctionMap's native double(vector<double>) signature
+  // directly — no variant-typed adapter needed.
+  NodeTypeRegistry::registerNodeType("VectorReducer",
+    [](const rapidjson::Value& v, const std::string& /*defaultStreamKey*/,
+       const tree::Deps& /*deps*/, std::shared_ptr<INode> downstream)
+        -> std::shared_ptr<INode> {
+      if (!v.HasMember("fn") || !v["fn"].IsString())
+        throw std::runtime_error("VectorReducer: missing 'fn'");
+      const std::string fn = v["fn"].GetString();
+      gma::Func reducer;
+      try {
+        reducer = gma::FunctionMap::instance().getFunction(fn);
+      } catch (...) {
+        throw std::runtime_error("VectorReducer: unknown fn '" + fn + "'");
+      }
+      return std::make_shared<VectorReducer>(std::move(reducer), downstream);
     });
 
   NodeTypeRegistry::registerNodeType("AtomicAccessor",
