@@ -1,8 +1,21 @@
 # Window nodes
 
-> Phase 1 stub — covers `TumblingWindow` only. `VectorReducer` and the
-> worked OHLC composition land in Phase 2 (proposal:
-> `specs/2026-05-12-gma-window-nodes`).
+Two single-purpose nodes for expressing "reduce a stream over a
+wall-clock period":
+
+- **`TumblingWindow(periodMs)`** — per-symbol scalar accumulator that
+  emits a `vector<double>` at every wall-clock-aligned boundary.
+- **`VectorReducer(fn)`** — takes one `vector<double>`, applies a
+  reducer from the shared `FunctionMap`, emits a scalar.
+
+Together they express "the max of every NEXO high price observed in a
+60-second window" or any other per-period reduction. The OHLC worked
+example below shows how four of these expressions feed a compound
+buffer to drive per-minute candles.
+
+The two nodes were proposed and landed under
+`specs/2026-05-12-gma-window-nodes` (Phase 1 = TumblingWindow,
+Phase 2 = VectorReducer + composition + this doc).
 
 ## TumblingWindow
 
@@ -28,8 +41,8 @@ takes no `child` / `input` key.
   "streamKey": "NEXO",
   "field": "highPrice",
   "pipeline": [
-    { "type": "TumblingWindow", "periodMs": 60000 }
-    /* … further stages (e.g. VectorReducer in Phase 2) … */
+    { "type": "TumblingWindow", "periodMs": 60000 },
+    { "type": "VectorReducer", "fn": "max" }
   ]
 }
 ```
@@ -70,3 +83,112 @@ Per-symbol buffer growth is capped by `MAX_SYMBOLS = 10000` (same
 constant as `Worker`). A symbol that would push past the cap is dropped
 with a single `WARN`-level log line; existing symbols continue to
 accumulate.
+
+## VectorReducer
+
+A thin transform: receive one `StreamValue{symbol, vector<double>}`,
+apply a reducer function from the shared `FunctionMap` registry, emit
+one `StreamValue{symbol, double}` downstream. Synchronous (no timer
+thread, no pool dispatch).
+
+### JSON shape (pipeline stage)
+
+```json
+{ "type": "VectorReducer", "fn": "max" }
+```
+
+Keys:
+- **`fn`** (required, string) — name of a registered reducer in
+  `FunctionMap`. Resolved at build time via
+  `FunctionMap::instance().getFunction(fn)`; unknown names produce a
+  `runtime_error("VectorReducer: unknown fn '<name>'")` which
+  `ClientSession`'s subscribe/validate `try { TreeBuilder } catch` chain
+  surfaces to the WS peer as
+  `{"type":"error","where":"validate","message":...}`.
+
+### Available reducers
+
+`VectorReducer` reuses the same `FunctionMap` registry `Worker` uses, so
+every plain reducer that has shipped for `Worker` is usable here. The
+built-in set (from `src/core/BuiltinFunctions.cpp`) includes at least:
+`sum`, `mean`, `avg`, `max`, `min`, `first`, `last`, `count`, `median`,
+`range`, `stddev`, `variance`, `spread`, `midpoint`, `product`.
+
+### Input shape contract
+
+`VectorReducer` is wired to consume `vector<double>` emits — primarily
+from `TumblingWindow`. Inputs whose `StreamValue::value` variant holds a
+different alternative (a scalar, an int, a string, a `vector<int>`) are
+dropped with a single `Warn` line and no downstream emit fires.
+Surface-it-loudly rather than reduce a synthetic 1-element vector that
+would mask the upstream miswire.
+
+### Lifecycle
+
+- Constructed via `std::make_shared<VectorReducer>(fn, downstream)`.
+- No `start()` is required.
+- `shutdown()` clears `downstream_` under the internal mutex; further
+  `onValue` calls early-return on the stopping flag.
+
+## Composition: per-minute OHLC
+
+Per-minute open / high / low / close candles are four `VectorReducer ←
+TumblingWindow` expressions over the same scalar source. Each expression
+produces one scalar per minute; the four scalars per minute feed a
+compound buffer in embassy (per the saved-chart-slice work in
+`specs/2026-05-07-saved-chart-slice`) to drive a candlestick chart.
+
+```json
+{
+  "streamKey": "NEXO",
+  "field": "lastPrice",
+  "pipeline": [
+    { "type": "TumblingWindow", "periodMs": 60000 },
+    { "type": "VectorReducer", "fn": "first" }
+  ]
+}
+```
+→ Per-minute **open**: first tick price within each minute.
+
+```json
+{ "field": "highPrice",
+  "pipeline": [
+    { "type": "TumblingWindow", "periodMs": 60000 },
+    { "type": "VectorReducer", "fn": "max" }
+  ] }
+```
+→ Per-minute **high**: `max` of every `highPrice` observation in the
+minute. (Use `field: "highPrice"` — `MarketTA`'s running OHLC already
+maintains a per-tick high.)
+
+```json
+{ "field": "lowPrice",
+  "pipeline": [
+    { "type": "TumblingWindow", "periodMs": 60000 },
+    { "type": "VectorReducer", "fn": "min" }
+  ] }
+```
+→ Per-minute **low**: `min` of every `lowPrice` observation.
+
+```json
+{ "field": "lastPrice",
+  "pipeline": [
+    { "type": "TumblingWindow", "periodMs": 60000 },
+    { "type": "VectorReducer", "fn": "last" }
+  ] }
+```
+→ Per-minute **close**: last tick price within each minute.
+
+Per-minute volume sum is the same shape with `field: "volume"` and
+`fn: "sum"`. The four boundaries coincide (wall-clock alignment is
+inherited from `BucketTime`), so the compound-buffer join downstream sees
+all four scalars line up per minute, no jitter.
+
+## Follow-up
+
+The saved-chart-slice demo currently uses bare atomic keys
+(`openPrice`/`highPrice`/`lowPrice`/`lastPrice`) — running OHLC over
+`taHistoryMax` that updates per tick, not per minute. Switching its seed
+back to `pipeline_json` subscriptions driven by these nodes is a
+separate proposal (the embassy ferrying path already supports it). See
+`specs/2026-05-12-gma-window-nodes/PLAN.md` "Out of plan" for context.

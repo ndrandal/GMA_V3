@@ -324,6 +324,7 @@ if (GMA_BUILD_BENCHMARKS)
   gma_add_benchmark(bench_dispatcher        "${CMAKE_SOURCE_DIR}/benchmarks/DispatcherBench.cpp")
   gma_add_benchmark(bench_atomic_store      "${CMAKE_SOURCE_DIR}/benchmarks/AtomicStoreBench.cpp")
   gma_add_benchmark(bench_thread_pool       "${CMAKE_SOURCE_DIR}/benchmarks/ThreadPoolBench.cpp")
+  gma_add_benchmark(bench_window_nodes      "${CMAKE_SOURCE_DIR}/benchmarks/WindowNodesBench.cpp")
 
   # Convenience target: build all benchmarks at once
   add_custom_target(gma_benchmarks DEPENDS
@@ -331,5 +332,6 @@ if (GMA_BUILD_BENCHMARKS)
     bench_dispatcher
     bench_atomic_store
     bench_thread_pool
+    bench_window_nodes
   )
 endif()

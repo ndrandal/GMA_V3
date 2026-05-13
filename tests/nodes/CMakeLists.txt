@@ -7,6 +7,8 @@ add_executable(tests_nodes
     ResponderTest.cpp
     SymbolSplitTest.cpp
     TumblingWindowTest.cpp
+    VectorReducerTest.cpp
+    WindowReducerCompositionTest.cpp
     WorkerTest.cpp
 )
 
