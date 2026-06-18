@@ -68,6 +68,46 @@ TEST_F(TreeBuilderTestFixture, BuildForRequestRejectsMissingTree) {
     EXPECT_THROW(tree::buildForRequest(doc, deps, terminal), std::runtime_error);
 }
 
+// ----- Tee fan-out node (ENC-646) -----
+
+TEST_F(TreeBuilderTestFixture, BuildsTeeFanoutFromJson) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({
+      "type":"Tee",
+      "outputs":[
+        {"type":"Worker","fn":"last"},
+        {"type":"Worker","fn":"last"}
+      ]
+    })");
+    auto tee = tree::buildNode(doc, "SYM", deps, terminal);
+    ASSERT_TRUE(tee);
+
+    // One value into the Tee fans out through both Worker branches, each of
+    // which forwards into the shared terminal — so the terminal sees it twice.
+    tee->onValue(StreamValue{"SYM", 5.0});
+    EXPECT_EQ(terminal->received.size(), 2u);
+    for (const auto& sv : terminal->received)
+        EXPECT_DOUBLE_EQ(std::get<double>(sv.value), 5.0);
+}
+
+TEST_F(TreeBuilderTestFixture, TeeRejectsMissingOutputs) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({"type":"Tee"})");
+    EXPECT_THROW(tree::buildNode(doc, "SYM", deps, terminal), std::runtime_error);
+}
+
+TEST_F(TreeBuilderTestFixture, TeeRejectsEmptyOutputs) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({"type":"Tee","outputs":[]})");
+    EXPECT_THROW(tree::buildNode(doc, "SYM", deps, terminal), std::runtime_error);
+}
+
 TEST_F(TreeBuilderTestFixture, BuildForRequestBuildsListener) {
     initDeps();
     auto terminal = std::make_shared<TerminalStub>();
