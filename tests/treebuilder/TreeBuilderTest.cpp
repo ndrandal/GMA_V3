@@ -221,6 +221,43 @@ TEST_F(TreeBuilderTestFixture, FilterRejectsMissingWhen) {
     EXPECT_THROW(tree::buildNode(doc, "SYM", deps, terminal), std::runtime_error);
 }
 
+// ----- Switch node (ENC-650) -----
+
+TEST_F(TreeBuilderTestFixture, BuildsSwitchFromJsonAndRoutes) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    // select by value; two Worker(last) cases both forward into the terminal.
+    doc.Parse(R"({
+      "type":"Switch",
+      "select":{"ref":"value"},
+      "cases":[{"type":"Worker","fn":"last"},{"type":"Worker","fn":"last"}]
+    })");
+    auto node = tree::buildNode(doc, "SYM", deps, terminal);
+    ASSERT_TRUE(node);
+
+    node->onValue(StreamValue{"SYM", 1.0});  // routes to case 1 -> terminal
+    node->onValue(StreamValue{"SYM", 9.0});  // out of range, no default -> drop
+    ASSERT_EQ(terminal->received.size(), 1u);
+    EXPECT_DOUBLE_EQ(std::get<double>(terminal->received[0].value), 1.0);
+}
+
+TEST_F(TreeBuilderTestFixture, SwitchRejectsMissingSelect) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({"type":"Switch","cases":[{"type":"Worker","fn":"last"}]})");
+    EXPECT_THROW(tree::buildNode(doc, "SYM", deps, terminal), std::runtime_error);
+}
+
+TEST_F(TreeBuilderTestFixture, SwitchRejectsEmptyCases) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({"type":"Switch","select":{"ref":"value"},"cases":[]})");
+    EXPECT_THROW(tree::buildNode(doc, "SYM", deps, terminal), std::runtime_error);
+}
+
 TEST_F(TreeBuilderTestFixture, BuildForRequestBuildsListener) {
     initDeps();
     auto terminal = std::make_shared<TerminalStub>();

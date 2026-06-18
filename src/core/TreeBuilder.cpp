@@ -22,6 +22,7 @@
 #include "gma/nodes/Field.hpp"
 #include "gma/nodes/Expr.hpp"
 #include "gma/nodes/Filter.hpp"
+#include "gma/nodes/Switch.hpp"
 
 // Runtime deps
 #include "gma/AtomicStore.hpp"
@@ -651,6 +652,37 @@ void registerBuiltinNodeTypes() {
         throw std::runtime_error("Filter: missing 'when'");
       auto pred = gma::expr::compile(v["when"]);
       return std::make_shared<Filter>(std::move(pred), downstream);
+    });
+
+  // Switch routes each value to one of N case branches by a selector expression
+  // (rounded to an index); out-of-range routes to the optional default branch
+  // or drops. Shape: {"type":"Switch","select":<expr>,"cases":[<sub>,...],
+  // "default":<sub>?}. Each branch is built terminating in the shared
+  // `downstream`. The selector is compiled once (throws on malformed).
+  NodeTypeRegistry::registerNodeType("Switch",
+    [](const rapidjson::Value& v, const std::string& defaultStreamKey,
+       const tree::Deps& deps, std::shared_ptr<INode> downstream)
+        -> std::shared_ptr<INode> {
+      if (!v.HasMember("select"))
+        throw std::runtime_error("Switch: missing 'select'");
+      if (!v.HasMember("cases") || !v["cases"].IsArray())
+        throw std::runtime_error("Switch: 'cases' must be an array");
+      const auto& arr = v["cases"];
+      if (arr.Size() == 0)
+        throw std::runtime_error("Switch: 'cases' must not be empty");
+
+      auto sel = gma::expr::compile(v["select"]);
+
+      std::vector<std::shared_ptr<INode>> cases;
+      cases.reserve(arr.Size());
+      for (auto& it : arr.GetArray())
+        cases.push_back(tree::buildOne(it, defaultStreamKey, deps, downstream));
+
+      std::shared_ptr<INode> def;
+      if (v.HasMember("default"))
+        def = tree::buildOne(v["default"], defaultStreamKey, deps, downstream);
+
+      return std::make_shared<Switch>(std::move(sel), std::move(cases), std::move(def));
     });
 }
 
