@@ -20,6 +20,7 @@
 #include "gma/nodes/Tee.hpp"
 #include "gma/nodes/Pack.hpp"
 #include "gma/nodes/Field.hpp"
+#include "gma/nodes/Expr.hpp"
 
 // Runtime deps
 #include "gma/AtomicStore.hpp"
@@ -621,6 +622,21 @@ void registerBuiltinNodeTypes() {
       if (name.empty())
         throw std::runtime_error("Field: missing 'name'");
       return std::make_shared<Field>(name, downstream);
+    });
+
+  // Expr evaluates a compiled expression over each incoming value. Shape:
+  // {"type":"Expr","expr":<expression-tree>}. A Record input exposes its fields
+  // as named refs; a scalar is exposed as ref "value". The expression is
+  // compiled once here (compile() throws on malformed input -> surfaces as a
+  // build error). Compose Pack -> Expr to read several named inputs.
+  NodeTypeRegistry::registerNodeType("Expr",
+    [](const rapidjson::Value& v, const std::string& /*defaultStreamKey*/,
+       const tree::Deps& /*deps*/, std::shared_ptr<INode> downstream)
+        -> std::shared_ptr<INode> {
+      if (!v.HasMember("expr"))
+        throw std::runtime_error("Expr: missing 'expr'");
+      auto fn = gma::expr::compile(v["expr"]);
+      return std::make_shared<ExprNode>(std::move(fn), downstream);
     });
 }
 
