@@ -17,6 +17,7 @@
 #include "gma/nodes/BucketTime.hpp"
 #include "gma/nodes/TumblingWindow.hpp"
 #include "gma/nodes/VectorReducer.hpp"
+#include "gma/nodes/Tee.hpp"
 
 // Runtime deps
 #include "gma/AtomicStore.hpp"
@@ -546,6 +547,30 @@ void registerBuiltinNodeTypes() {
                                  defaultStreamKey, deps, curDown);
       }
       return curDown;
+    });
+
+  // Tee fans each incoming value out to every output subtree, unchanged. Each
+  // entry of "outputs" is built as an independent subtree terminating in the
+  // shared `downstream`, so a Tee taps one upstream value into N parallel
+  // branches. The data-plane multi-downstream primitive underpinning
+  // let-bindings (ENC-647) and Switch (ENC-650).
+  NodeTypeRegistry::registerNodeType("Tee",
+    [](const rapidjson::Value& v, const std::string& defaultStreamKey,
+       const tree::Deps& deps, std::shared_ptr<INode> downstream)
+        -> std::shared_ptr<INode> {
+      if (!v.HasMember("outputs") || !v["outputs"].IsArray())
+        throw std::runtime_error("Tee: 'outputs' must be an array");
+
+      const auto& arr = v["outputs"];
+      if (arr.Size() == 0)
+        throw std::runtime_error("Tee: 'outputs' must not be empty");
+
+      std::vector<std::shared_ptr<INode>> outs;
+      outs.reserve(arr.Size());
+      for (auto& it : arr.GetArray())
+        outs.push_back(tree::buildOne(it, defaultStreamKey, deps, downstream));
+
+      return std::make_shared<Tee>(std::move(outs));
     });
 }
 
