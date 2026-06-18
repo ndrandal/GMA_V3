@@ -18,6 +18,8 @@
 #include "gma/nodes/TumblingWindow.hpp"
 #include "gma/nodes/VectorReducer.hpp"
 #include "gma/nodes/Tee.hpp"
+#include "gma/nodes/Pack.hpp"
+#include "gma/nodes/Field.hpp"
 
 // Runtime deps
 #include "gma/AtomicStore.hpp"
@@ -571,6 +573,54 @@ void registerBuiltinNodeTypes() {
         outs.push_back(tree::buildOne(it, defaultStreamKey, deps, downstream));
 
       return std::make_shared<Tee>(std::move(outs));
+    });
+
+  // Pack assembles N named input subtrees into a keyed Record per symbol
+  // (combineLatest). Shape: {"type":"Pack","fields":{"o":<sub>,"h":<sub>,...}}.
+  // Each field's input is built terminating in a per-field PackPort; the Pack
+  // owns the ports and emits the Record into the shared `downstream`. Mirrors
+  // Aggregate's fan-in ownership (CompositeRoot holds the input heads + Pack).
+  NodeTypeRegistry::registerNodeType("Pack",
+    [](const rapidjson::Value& v, const std::string& defaultStreamKey,
+       const tree::Deps& deps, std::shared_ptr<INode> downstream)
+        -> std::shared_ptr<INode> {
+      if (!v.HasMember("fields") || !v["fields"].IsObject())
+        throw std::runtime_error("Pack: 'fields' must be an object");
+
+      const auto& fobj = v["fields"];
+      if (fobj.MemberCount() == 0)
+        throw std::runtime_error("Pack: 'fields' must not be empty");
+
+      std::vector<std::string> names;
+      names.reserve(fobj.MemberCount());
+      for (auto it = fobj.MemberBegin(); it != fobj.MemberEnd(); ++it)
+        names.push_back(it->name.GetString());
+
+      auto pack = std::make_shared<Pack>(names, downstream);
+
+      std::vector<std::shared_ptr<INode>> roots;
+      roots.reserve(fobj.MemberCount() + 1);
+      std::size_t idx = 0;
+      for (auto it = fobj.MemberBegin(); it != fobj.MemberEnd(); ++it, ++idx) {
+        auto port = std::make_shared<PackPort>(std::weak_ptr<Pack>(pack), idx);
+        pack->addPort(port);
+        roots.push_back(tree::buildOne(it->value, defaultStreamKey, deps, port));
+      }
+      roots.push_back(pack);
+
+      return std::make_shared<CompositeRoot>(std::move(roots));
+    });
+
+  // Field extracts one named field from a Record flowing through. Pipeline
+  // stage: {"type":"Field","name":"o"}. The inverse of Pack.
+  NodeTypeRegistry::registerNodeType("Field",
+    [](const rapidjson::Value& v, const std::string& /*defaultStreamKey*/,
+       const tree::Deps& /*deps*/, std::shared_ptr<INode> downstream)
+        -> std::shared_ptr<INode> {
+      const std::string name = strOr(v, "name", "");
+      if (name.empty())
+        throw std::runtime_error("Field: missing 'name'");
+      return std::make_shared<Field>(name, downstream);
     });
 }
 
