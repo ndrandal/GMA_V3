@@ -108,6 +108,64 @@ TEST_F(TreeBuilderTestFixture, TeeRejectsEmptyOutputs) {
     EXPECT_THROW(tree::buildNode(doc, "SYM", deps, terminal), std::runtime_error);
 }
 
+// ----- Pack / Field record nodes (ENC-643) -----
+
+TEST_F(TreeBuilderTestFixture, BuildsFieldFromJsonAndExtracts) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({"type":"Field","name":"h"})");
+    auto field = tree::buildNode(doc, "SYM", deps, terminal);
+    ASSERT_TRUE(field);
+
+    Record r;
+    recordSet(r, "o", 1.0);
+    recordSet(r, "h", 3.0);
+    field->onValue(StreamValue{"SYM", ArgType{r}});
+
+    ASSERT_EQ(terminal->received.size(), 1u);
+    EXPECT_DOUBLE_EQ(std::get<double>(terminal->received[0].value), 3.0);
+}
+
+TEST_F(TreeBuilderTestFixture, FieldRejectsMissingName) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({"type":"Field"})");
+    EXPECT_THROW(tree::buildNode(doc, "SYM", deps, terminal), std::runtime_error);
+}
+
+TEST_F(TreeBuilderTestFixture, BuildsPackFromJson) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({
+      "type":"Pack",
+      "fields":{
+        "a":{"type":"AtomicAccessor","field":"bid"},
+        "b":{"type":"AtomicAccessor","field":"ask"}
+      }
+    })");
+    auto pack = tree::buildNode(doc, "SYM", deps, terminal);
+    EXPECT_NE(pack, nullptr);
+}
+
+TEST_F(TreeBuilderTestFixture, PackRejectsMissingFields) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({"type":"Pack"})");
+    EXPECT_THROW(tree::buildNode(doc, "SYM", deps, terminal), std::runtime_error);
+}
+
+TEST_F(TreeBuilderTestFixture, PackRejectsEmptyFields) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({"type":"Pack","fields":{}})");
+    EXPECT_THROW(tree::buildNode(doc, "SYM", deps, terminal), std::runtime_error);
+}
+
 TEST_F(TreeBuilderTestFixture, BuildForRequestBuildsListener) {
     initDeps();
     auto terminal = std::make_shared<TerminalStub>();
