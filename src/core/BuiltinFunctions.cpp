@@ -320,6 +320,20 @@ void registerBuiltinFunctions() {
         return (!v.empty() && v.back() <= 0.5) ? 1.0 : 0.0;
     });
 
+    // ──── Conditional (value-level branching) ────
+
+    // "select"/"iff": (cond, a, b) -> a if cond is truthy (>0.5) else b. The
+    // value-level branch — the cheapest control-flow primitive (ENC-648). Pure
+    // data, so it works anywhere a reducer does; most useful inside an Expr via
+    // {"op":"fn","name":"select","args":[<cond>,<a>,<b>]}. Fewer than 3 inputs
+    // yields 0.0.
+    auto selectFn = [](const std::vector<double>& v) -> double {
+        if (v.size() < 3) return 0.0;
+        return (v[0] > 0.5) ? v[1] : v[2];
+    };
+    fm.registerFunction("select", selectFn);
+    fm.registerFunction("iff", selectFn);
+
     // ──── Financial derivations ────
 
     fm.registerFunction("zscore", [](const std::vector<double>& v) -> double {
