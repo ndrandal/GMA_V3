@@ -197,6 +197,30 @@ TEST_F(TreeBuilderTestFixture, ExprRejectsMalformedExpr) {
     EXPECT_THROW(tree::buildNode(doc, "SYM", deps, terminal), std::runtime_error);
 }
 
+// ----- Filter node (ENC-649) -----
+
+TEST_F(TreeBuilderTestFixture, BuildsFilterFromJsonAndGates) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({"type":"Filter","when":{"op":"gt","args":[{"ref":"value"},10]}})");
+    auto node = tree::buildNode(doc, "SYM", deps, terminal);
+    ASSERT_TRUE(node);
+
+    node->onValue(StreamValue{"SYM", 5.0});   // dropped
+    node->onValue(StreamValue{"SYM", 20.0});  // passed
+    ASSERT_EQ(terminal->received.size(), 1u);
+    EXPECT_DOUBLE_EQ(std::get<double>(terminal->received[0].value), 20.0);
+}
+
+TEST_F(TreeBuilderTestFixture, FilterRejectsMissingWhen) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({"type":"Filter"})");
+    EXPECT_THROW(tree::buildNode(doc, "SYM", deps, terminal), std::runtime_error);
+}
+
 TEST_F(TreeBuilderTestFixture, BuildForRequestBuildsListener) {
     initDeps();
     auto terminal = std::make_shared<TerminalStub>();

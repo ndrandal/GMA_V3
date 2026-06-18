@@ -21,6 +21,7 @@
 #include "gma/nodes/Pack.hpp"
 #include "gma/nodes/Field.hpp"
 #include "gma/nodes/Expr.hpp"
+#include "gma/nodes/Filter.hpp"
 
 // Runtime deps
 #include "gma/AtomicStore.hpp"
@@ -637,6 +638,19 @@ void registerBuiltinNodeTypes() {
         throw std::runtime_error("Expr: missing 'expr'");
       auto fn = gma::expr::compile(v["expr"]);
       return std::make_shared<ExprNode>(std::move(fn), downstream);
+    });
+
+  // Filter forwards each value unchanged iff a predicate expression over it is
+  // truthy. Shape: {"type":"Filter","when":<expression-tree>}. The predicate
+  // is compiled once (compile() throws on malformed -> build error).
+  NodeTypeRegistry::registerNodeType("Filter",
+    [](const rapidjson::Value& v, const std::string& /*defaultStreamKey*/,
+       const tree::Deps& /*deps*/, std::shared_ptr<INode> downstream)
+        -> std::shared_ptr<INode> {
+      if (!v.HasMember("when"))
+        throw std::runtime_error("Filter: missing 'when'");
+      auto pred = gma::expr::compile(v["when"]);
+      return std::make_shared<Filter>(std::move(pred), downstream);
     });
 }
 
