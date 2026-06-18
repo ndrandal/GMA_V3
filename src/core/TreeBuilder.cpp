@@ -100,6 +100,17 @@ private:
   std::vector<std::shared_ptr<gma::INode>> roots_;
 };
 
+// RefStub: the no-op head a `Ref` returns (ENC-647). A Ref has no local
+// upstream — its binding's producer feeds the Ref's downstream directly (via a
+// Tee) — so this stub never receives values. It exists only to satisfy the
+// builder contract (every buildOne returns an INode) and is kept alive by
+// whatever consumes the Ref position (e.g. an Aggregate's roots).
+class RefStub final : public gma::INode {
+public:
+  void onValue(const gma::StreamValue&) override {}
+  void shutdown() noexcept override {}
+};
+
 } // namespace
 
 //
@@ -683,6 +694,81 @@ void registerBuiltinNodeTypes() {
         def = tree::buildOne(v["default"], defaultStreamKey, deps, downstream);
 
       return std::make_shared<Switch>(std::move(sel), std::move(cases), std::move(def));
+    });
+
+  // Ref taps a named let-binding (ENC-647). It registers its downstream as a
+  // consumer of the binding in the active scope and returns a no-op stub — the
+  // binding's producer (built by the enclosing Let) fans its values into this
+  // downstream via a Tee. Errors if used outside a Let or naming an unknown
+  // binding.
+  NodeTypeRegistry::registerNodeType("Ref",
+    [](const rapidjson::Value& v, const std::string& /*defaultStreamKey*/,
+       const tree::Deps& deps, std::shared_ptr<INode> downstream)
+        -> std::shared_ptr<INode> {
+      const std::string name = strOr(v, "name", "");
+      if (name.empty())
+        throw std::runtime_error("Ref: missing 'name'");
+      if (!downstream)
+        throw std::runtime_error("Ref: '" + name + "' has no downstream consumer");
+
+      tree::BindingScope* s = deps.bindingScope;
+      while (s && !(s->bindings && s->bindings->HasMember(name.c_str())))
+        s = s->parent;
+      if (!s)
+        throw std::runtime_error("Ref: unknown binding '" + name + "'");
+
+      s->consumers[name].push_back(downstream);
+      return std::make_shared<RefStub>();
+    });
+
+  // Let defines named bindings reusable by Ref across its body, turning the
+  // tree into a reuse DAG. Shape: {"type":"Let","bindings":{name:<producer>},
+  // "body":<subtree-with-Refs>}. Two passes: (1) build the body under a fresh
+  // scope so Refs register their consumers; (2) for each referenced binding,
+  // build its producer ONCE feeding a Tee over its consumers (or the lone
+  // consumer directly). Unreferenced bindings are not built. Producers see the
+  // OUTER scope only, so sibling bindings can't reference each other — no
+  // cycles, preserving the bounded/total invariant.
+  NodeTypeRegistry::registerNodeType("Let",
+    [](const rapidjson::Value& v, const std::string& defaultStreamKey,
+       const tree::Deps& deps, std::shared_ptr<INode> downstream)
+        -> std::shared_ptr<INode> {
+      if (!v.HasMember("bindings") || !v["bindings"].IsObject())
+        throw std::runtime_error("Let: 'bindings' must be an object");
+      if (!v.HasMember("body") || !v["body"].IsObject())
+        throw std::runtime_error("Let: 'body' must be an object");
+
+      const auto& bindings = v["bindings"];
+
+      // Pass 1: build the body under a fresh scope; Refs register consumers.
+      tree::BindingScope scope;
+      scope.bindings = &bindings;
+      scope.parent   = deps.bindingScope;
+      tree::Deps bodyDeps = deps;
+      bodyDeps.bindingScope = &scope;
+      auto bodyHead = tree::buildOne(v["body"], defaultStreamKey, bodyDeps, downstream);
+
+      // Pass 2: build each referenced binding's producer once -> Tee/consumer.
+      std::vector<std::shared_ptr<INode>> roots;
+      for (auto& [name, consumers] : scope.consumers) {
+        if (consumers.empty()) continue;
+
+        std::shared_ptr<INode> sink;
+        if (consumers.size() == 1) {
+          sink = consumers.front();
+        } else {
+          auto tee = std::make_shared<Tee>(consumers);
+          roots.push_back(tee);  // own the Tee (a Listener producer holds it weakly)
+          sink = tee;
+        }
+
+        auto prodHead =
+          tree::buildOne(bindings[name.c_str()], defaultStreamKey, deps, sink);
+        roots.push_back(prodHead);
+      }
+
+      roots.push_back(bodyHead);
+      return std::make_shared<CompositeRoot>(std::move(roots));
     });
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -19,11 +20,28 @@ class Dispatcher;
 
 namespace tree {
 
+  // Build-time scope for let-bindings (ENC-647). A `Let` node installs a scope
+  // while building its body; each `Ref` resolves the binding name against the
+  // scope chain and registers its downstream as a consumer. After the body is
+  // built, the Let builds each referenced binding's producer once and fans it
+  // out (via Tee) to its consumers — turning the tree into a reuse DAG.
+  //
+  // Build-time only: producers and consumers are wired during buildOne and the
+  // scope is dead afterwards, so Ref is unsupported inside lazily-built
+  // subtrees (e.g. GroupSplit children).
+  struct BindingScope {
+    const rapidjson::Value* bindings { nullptr };   // the "bindings" object
+    BindingScope*           parent   { nullptr };   // enclosing scope, if any
+    // Referenced binding name -> the consumer nodes that should receive it.
+    std::map<std::string, std::vector<std::shared_ptr<INode>>> consumers;
+  };
+
   // Dependencies needed to build a tree
   struct Deps {
     AtomicStore*      store      { nullptr };   // for AtomicAccessor
     rt::ThreadPool*       pool       { nullptr };   // for Listener queues
     Dispatcher* dispatcher { nullptr };   // for Listener wiring
+    BindingScope*     bindingScope { nullptr }; // active let-binding scope (ENC-647)
   };
 
   // Result of buildForRequest – head plus the downstream chain.
