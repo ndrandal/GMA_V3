@@ -184,3 +184,28 @@ TEST(JsonValidatorRequireMemberTest, PassesOnCorrectType) {
     auto d = parseDoc("{\"foo\":42}");
     EXPECT_NO_THROW(JsonValidator::requireMember(d, "foo", kNumberType));
 }
+
+// --- Expr node payload (ENC-645): open-vocab walk accepts the expression
+//     tree (objects without "type"), and the depth cap bounds its size. ---
+
+TEST(JsonValidatorExprTest, AcceptsExprNodePayload) {
+    // The "expr" sub-tree's {op,args,ref,lit} objects carry no "type"; the
+    // open-vocabulary walk must accept them (they get depth/size checks only).
+    auto d = parseDoc(R"({
+      "type":"Expr",
+      "expr":{"op":"gt","args":[{"op":"add","args":[{"ref":"bid"},{"ref":"ask"}]},70]}
+    })");
+    EXPECT_NO_THROW(JsonValidator::validateTree(d));
+}
+
+TEST(JsonValidatorExprTest, RejectsOverDeepExpression) {
+    // A pathologically nested expression is bounded by MAX_TREE_DEPTH, keeping
+    // per-tick eval cost bounded (the total invariant).
+    std::string json = R"({"type":"Expr","expr":)";
+    for (int i = 0; i < 40; ++i) json += R"({"op":"neg","args":[)";
+    json += "1";
+    for (int i = 0; i < 40; ++i) json += "]}";
+    json += "}";
+    auto d = parseDoc(json);
+    EXPECT_THROW(JsonValidator::validateTree(d), std::runtime_error);
+}

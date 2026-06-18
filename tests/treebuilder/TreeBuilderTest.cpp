@@ -166,6 +166,37 @@ TEST_F(TreeBuilderTestFixture, PackRejectsEmptyFields) {
     EXPECT_THROW(tree::buildNode(doc, "SYM", deps, terminal), std::runtime_error);
 }
 
+// ----- Expr node (ENC-645) -----
+
+TEST_F(TreeBuilderTestFixture, BuildsExprFromJsonAndEvaluates) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({"type":"Expr","expr":{"op":"add","args":[{"ref":"value"},100]}})");
+    auto node = tree::buildNode(doc, "SYM", deps, terminal);
+    ASSERT_TRUE(node);
+
+    node->onValue(StreamValue{"SYM", 5.0});
+    ASSERT_EQ(terminal->received.size(), 1u);
+    EXPECT_DOUBLE_EQ(std::get<double>(terminal->received[0].value), 105.0);
+}
+
+TEST_F(TreeBuilderTestFixture, ExprRejectsMissingExpr) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({"type":"Expr"})");
+    EXPECT_THROW(tree::buildNode(doc, "SYM", deps, terminal), std::runtime_error);
+}
+
+TEST_F(TreeBuilderTestFixture, ExprRejectsMalformedExpr) {
+    initDeps();
+    auto terminal = std::make_shared<TerminalStub>();
+    rapidjson::Document doc;
+    doc.Parse(R"({"type":"Expr","expr":{"op":"bogus","args":[1]}})");
+    EXPECT_THROW(tree::buildNode(doc, "SYM", deps, terminal), std::runtime_error);
+}
+
 TEST_F(TreeBuilderTestFixture, BuildForRequestBuildsListener) {
     initDeps();
     auto terminal = std::make_shared<TerminalStub>();
