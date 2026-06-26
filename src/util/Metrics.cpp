@@ -1,8 +1,9 @@
-// src/util/Metrics.cpp (or wherever this lives)
+// src/util/Metrics.cpp
 //
-// NOTE:
-// MetricRegistry is now fully header-only in gma/Metrics.hpp.
-// This TU intentionally exists to keep build systems that expect a .cpp happy,
-// but it must NOT provide out-of-line definitions (ODR / duplicate symbol risk).
+// NOTE (ENC-788):
+// gma::util::MetricRegistry is now fully header-only and has exactly one
+// definition, in gma/util/Metrics.hpp. This TU intentionally exists only to
+// keep build systems that expect a .cpp happy; it must NOT provide any
+// out-of-line definitions (ODR / duplicate-symbol risk).
 
-#include "gma/Metrics.hpp"
+#include "gma/util/Metrics.hpp"
