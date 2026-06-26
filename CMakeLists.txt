@@ -6,6 +6,23 @@ option(GMA_BUILD_TESTS "Build unit tests in tests/" OFF)
 option(GMA_BUILD_BENCHMARKS "Build Google Benchmark suite in benchmarks/" OFF)
 option(GMA_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 
+# Microarchitecture (ENC-790 / H5): -march=native pins the binary to the exact
+# build CPU and SIGILLs on older hosts. Release/RelWithDebInfo therefore default
+# to a portable baseline (GMA_ARCH_BASELINE, x86-64-v2 ≈ any 2009+ x86_64 CPU);
+# -march=native is opt-in via GMA_NATIVE_ARCH. -O3 and LTO are kept regardless.
+option(GMA_NATIVE_ARCH
+  "Build Release with -march=native (non-portable: pins the binary to the build CPU; SIGILL on other hosts)"
+  OFF)
+set(GMA_ARCH_BASELINE "x86-64-v2" CACHE STRING
+  "Portable -march baseline used for Release on x86_64 when GMA_NATIVE_ARCH is OFF (empty string disables -march entirely)")
+
+# Sanitizers (ENC-801 / M15): opt-in, default off so a plain `cmake .. && make`
+# is byte-for-byte unaffected. When set, the flags are injected into compile AND
+# link for every target in this build (engine, connectors, server, tests, gtest).
+set(GMA_SANITIZE "off" CACHE STRING
+  "Enable a sanitizer for all targets: off|address|thread|undefined|address+undefined")
+set_property(CACHE GMA_SANITIZE PROPERTY STRINGS off address thread undefined address+undefined)
+
 # ---- C++ standard ----
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,6 +53,54 @@ if (OpenSSL_FOUND)
 else()
   message(STATUS "OpenSSL not found — wss:// feed support disabled (ws:// still works)")
 endif()
+
+# =======================
+# Sanitizers (opt-in; ENC-801 / M15)
+# =======================
+# Injected at directory scope BEFORE any target is defined, so every target
+# created below (including FetchContent's googletest/benchmark) is instrumented
+# in both compile and link. Default "off" => no flags => default build unchanged.
+if (NOT GMA_SANITIZE STREQUAL "off")
+  if (MSVC)
+    message(WARNING "GMA_SANITIZE=${GMA_SANITIZE} is not supported with this MSVC toolchain — ignoring")
+  else()
+    if (GMA_SANITIZE STREQUAL "address")
+      set(_GMA_SAN_FLAGS -fsanitize=address -fno-omit-frame-pointer)
+    elseif (GMA_SANITIZE STREQUAL "thread")
+      set(_GMA_SAN_FLAGS -fsanitize=thread -fno-omit-frame-pointer)
+    elseif (GMA_SANITIZE STREQUAL "undefined")
+      set(_GMA_SAN_FLAGS -fsanitize=undefined -fno-omit-frame-pointer)
+    elseif (GMA_SANITIZE STREQUAL "address+undefined")
+      set(_GMA_SAN_FLAGS -fsanitize=address,undefined -fno-omit-frame-pointer)
+    else()
+      message(FATAL_ERROR
+        "GMA_SANITIZE='${GMA_SANITIZE}' is invalid — use off|address|thread|undefined|address+undefined")
+    endif()
+    add_compile_options(${_GMA_SAN_FLAGS})
+    add_link_options(${_GMA_SAN_FLAGS})
+    message(STATUS "Sanitizer enabled for all targets: ${GMA_SANITIZE}")
+  endif()
+endif()
+
+# =======================
+# Warning flags helper (ENC-806 / L12)
+# =======================
+# Applies the standard warning set to a target. -Werror stays OFF unless the
+# opt-in GMA_WARNINGS_AS_ERRORS is set, so concurrent source edits never break
+# the central build just by emitting a warning.
+function(gma_apply_warnings tgt)
+  if (MSVC)
+    target_compile_options(${tgt} PRIVATE /W4)
+    if (GMA_WARNINGS_AS_ERRORS)
+      target_compile_options(${tgt} PRIVATE /WX)
+    endif()
+  else()
+    target_compile_options(${tgt} PRIVATE -Wall -Wextra -Wpedantic)
+    if (GMA_WARNINGS_AS_ERRORS)
+      target_compile_options(${tgt} PRIVATE -Werror)
+    endif()
+  endif()
+endfunction()
 
 # =======================
 # Boost (prefer normal install)
@@ -177,22 +242,13 @@ target_include_directories(gma_connector_synthetic PUBLIC
   "${CMAKE_SOURCE_DIR}/connectors/synthetic/include")
 target_link_libraries(gma_connector_synthetic PUBLIC gma_engine)
 
-# Warnings — apply to both libs
-if (MSVC)
-  target_compile_options(gma_engine           PRIVATE /W4)
-  target_compile_options(gma_connector_market PRIVATE /W4)
-  if (GMA_WARNINGS_AS_ERRORS)
-    target_compile_options(gma_engine           PRIVATE /WX)
-    target_compile_options(gma_connector_market PRIVATE /WX)
-  endif()
-else()
-  target_compile_options(gma_engine           PRIVATE -Wall -Wextra -Wpedantic)
-  target_compile_options(gma_connector_market PRIVATE -Wall -Wextra -Wpedantic)
-  if (GMA_WARNINGS_AS_ERRORS)
-    target_compile_options(gma_engine           PRIVATE -Werror)
-    target_compile_options(gma_connector_market PRIVATE -Werror)
-  endif()
-endif()
+# Warnings — apply to every first-party target (ENC-806 / L12). Previously only
+# gma_engine + gma_connector_market got -Wall/-Wextra; gma_connector_synthetic,
+# gma_server, gma_tests and the benchmarks were silent. gma_server/gma_tests/
+# benchmarks are wired at their definition sites below.
+gma_apply_warnings(gma_engine)
+gma_apply_warnings(gma_connector_market)
+gma_apply_warnings(gma_connector_synthetic)
 
 if (WIN32)
   add_definitions(-D_WIN32_WINNT=0x0A00 -DNOMINMAX)
@@ -208,8 +264,20 @@ if (CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDeb
     target_link_options(gma_engine           PUBLIC /LTCG)
     target_link_options(gma_connector_market PUBLIC /LTCG)
   else()
-    target_compile_options(gma_engine           PRIVATE -O3 -march=native)
-    target_compile_options(gma_connector_market PRIVATE -O3 -march=native)
+    # Microarchitecture (ENC-790 / H5). -O3 always; -march is portable by default.
+    set(GMA_RELEASE_ARCH_FLAGS "")
+    if (GMA_NATIVE_ARCH)
+      list(APPEND GMA_RELEASE_ARCH_FLAGS -march=native)
+      message(STATUS "Release: -march=native (GMA_NATIVE_ARCH=ON) — binary pinned to THIS CPU")
+    elseif (NOT GMA_ARCH_BASELINE STREQUAL "" AND
+            CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+      list(APPEND GMA_RELEASE_ARCH_FLAGS "-march=${GMA_ARCH_BASELINE}")
+      message(STATUS "Release: portable -march=${GMA_ARCH_BASELINE} (set GMA_NATIVE_ARCH=ON to target the build CPU)")
+    else()
+      message(STATUS "Release: no -march (portable default)")
+    endif()
+    target_compile_options(gma_engine           PRIVATE -O3 ${GMA_RELEASE_ARCH_FLAGS})
+    target_compile_options(gma_connector_market PRIVATE -O3 ${GMA_RELEASE_ARCH_FLAGS})
   endif()
 
   include(CheckIPOSupported)
@@ -244,6 +312,7 @@ if (EXISTS "${MAIN_SRC}")
     )
   endif()
   target_link_libraries(gma_server PRIVATE Threads::Threads RapidJSON::rapidjson)
+  gma_apply_warnings(gma_server)
 endif()
 
 # Tests (opt-in)
@@ -281,7 +350,20 @@ if (GMA_BUILD_TESTS)
     GTest::gtest_main
     gma_connector_synthetic
   )
-  add_test(NAME gma_tests COMMAND gma_tests)
+  gma_apply_warnings(gma_tests)
+
+  # CorpusTest data (ENC-807 / L17): copy the corpus next to the test binary and
+  # run the test from that directory, so CorpusTest can always locate
+  # corpus_requests.json (it otherwise GTEST_SKIPs / fails on the missing file).
+  add_custom_command(TARGET gma_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_SOURCE_DIR}/tests/treebuilder/corpus_requests.json"
+      "$<TARGET_FILE_DIR:gma_tests>/corpus_requests.json"
+    COMMENT "Copying corpus_requests.json next to gma_tests")
+
+  add_test(NAME gma_tests
+    COMMAND gma_tests
+    WORKING_DIRECTORY "$<TARGET_FILE_DIR:gma_tests>")
 endif()
 
 # Benchmarks (opt-in)
@@ -318,6 +400,7 @@ if (GMA_BUILD_BENCHMARKS)
       RapidJSON::rapidjson
       benchmark::benchmark
     )
+    gma_apply_warnings(${NAME})
   endfunction()
 
   gma_add_benchmark(bench_atomic_functions  "${CMAKE_SOURCE_DIR}/benchmarks/AtomicFunctionsBench.cpp")

@@ -1,0 +1,81 @@
+# GMA_V3 CI (ENC-801 / M15)
+#
+# Deps mirror the Dockerfile build stage: boost / rapidjson / openssl come from
+# apt; googletest is fetched by CMake (FetchContent) at configure time, so the
+# runner needs network + git (both present on ubuntu-latest).
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & Test (Debug)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build \
+            libboost-system-dev libboost-thread-dev \
+            libssl-dev rapidjson-dev
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DGMA_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  sanitizers:
+    name: Sanitizers (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # ASan+UBSan catches memory/UB bugs; TSan catches data races in the
+        # threadpool / dispatcher hot paths. Run as separate builds since ASan
+        # and TSan are mutually exclusive.
+        sanitizer: [address+undefined, thread]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build \
+            libboost-system-dev libboost-thread-dev \
+            libssl-dev rapidjson-dev
+
+      - name: Configure (${{ matrix.sanitizer }})
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DGMA_BUILD_TESTS=ON
+          -DGMA_SANITIZE=${{ matrix.sanitizer }}
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        env:
+          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --test-dir build --output-on-failure
