@@ -1,4 +1,5 @@
 #include "gma/book/OrderBookManager.hpp"
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <unordered_set>
@@ -57,9 +58,18 @@ bool OrderBookManager::validatePrice_(const std::string& symbol, double px) cons
     if (px == 0.0) return false;  // zero price is never valid
     if (!allowNegativePrices_ && px < 0.0) return false;
     const double t = getTickSize(symbol);
-    double q = px / t;
-    double r = std::fabs(q - std::round(q));
-    return r < 1e-8;
+    if (t <= 0.0) return false;
+    const double q = px / t;
+    // L10: explicitly reject prices whose tick index overflows int64 instead of
+    // letting quantizeTicks() silently fold them to 0 (a phantom price-0 order).
+    constexpr double kMaxTicks = static_cast<double>(std::numeric_limits<int64_t>::max());
+    if (q > kMaxTicks || q < -kMaxTicks) return false;
+    // L10: on-grid check with a RELATIVE tolerance. A fixed absolute epsilon
+    // (1e-8) false-rejects legitimately large prices, whose representable
+    // spacing in double exceeds 1e-8. Scale the tolerance by the magnitude.
+    const double r = std::fabs(q - std::round(q));
+    const double tol = 1e-8 * std::max(1.0, std::fabs(q));
+    return r <= tol;
 }
 
 // ---------- Feed state / Sequencing ----------
@@ -157,11 +167,28 @@ void OrderBookManager::maybePublishDelta_(const std::string& symbol,
     for (auto& kv : handlersCopy) kv.second(d);
 }
 
+// Per-symbol lock accessor (M6). Lazily creates a stable mutex per symbol.
+std::mutex& OrderBookManager::symbolLock_(const std::string& symbol) {
+    std::lock_guard<std::mutex> lk(symbolLocksMx_);
+    auto& slot = symbolLocks_[symbol];
+    if (!slot) slot = std::make_unique<std::mutex>();
+    return *slot;
+}
+
 // before/after wrapper that computes level & TOB changes
 template <typename Fn>
 bool OrderBookManager::mutateWithDelta_(const std::string& symbol,
                                         const std::vector<std::pair<Side,Price>>& candidates,
                                         Fn&& mutator) {
+    // M6: serialize the entire before/mutate/after window per symbol so two
+    // strands mutating the same symbol cannot interleave their TOB probes,
+    // level deltas, or pubSeq_ assignment. Held across maybePublishDelta_ as
+    // well, which keeps pubSeq_ monotonic w.r.t. mutation order. Lock ordering
+    // is symbolLock_ -> OrderBook::m_, so there is no deadlock with the book's
+    // internal lock. (Delta handlers must not synchronously re-enter a mutation
+    // on the same symbol — they don't today.)
+    std::scoped_lock symLk(symbolLock_(symbol));
+
     OrderBook& b = book(symbol);
 
     // Pre-TOB

@@ -76,7 +76,7 @@ private:
 
   // ---- Message handling ----
   void handleMessage(const std::string& text);
-  void dispatchEvent(feed::FeedEvent& evt);
+  void dispatchEvent(feed::FeedEvent& evt, bool dropBookMutations);
 
   // ---- ASIO plumbing ----
   boost::asio::io_context& ioc_;

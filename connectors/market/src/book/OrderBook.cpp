@@ -122,25 +122,33 @@ bool OrderBook::applyPriority(const OrderKey& key, uint64_t newPriority) {
 }
 
 // --------- TOB / queries ---------
+// L8: TOB/snapshot readers fall back to the aggregated (level-only) ladders
+// when the per-order ladder is empty, so a source delivering aggregated L2
+// updates (applyLevelSummary / applySnapshotAggregated) is no longer dead
+// state. The fallback is guarded — per-order data always takes precedence.
 std::optional<Price> OrderBook::bestBid() const {
     std::scoped_lock lk(m_);
-    if (bids_.empty()) return std::nullopt;
-    return bids_.begin()->first;
+    if (!bids_.empty()) return bids_.begin()->first;
+    if (!bidsAgg_.empty()) return bidsAgg_.begin()->first;
+    return std::nullopt;
 }
 std::optional<Price> OrderBook::bestAsk() const {
     std::scoped_lock lk(m_);
-    if (asks_.empty()) return std::nullopt;
-    return asks_.begin()->first;
+    if (!asks_.empty()) return asks_.begin()->first;
+    if (!asksAgg_.empty()) return asksAgg_.begin()->first;
+    return std::nullopt;
 }
 uint64_t OrderBook::bestBidSize() const {
     std::scoped_lock lk(m_);
-    if (bids_.empty()) return 0ULL;
-    return bids_.begin()->second.totalSize;
+    if (!bids_.empty()) return bids_.begin()->second.totalSize;
+    if (!bidsAgg_.empty()) return bidsAgg_.begin()->second.totalSize;
+    return 0ULL;
 }
 uint64_t OrderBook::bestAskSize() const {
     std::scoped_lock lk(m_);
-    if (asks_.empty()) return 0ULL;
-    return asks_.begin()->second.totalSize;
+    if (!asks_.empty()) return asks_.begin()->second.totalSize;
+    if (!asksAgg_.empty()) return asksAgg_.begin()->second.totalSize;
+    return 0ULL;
 }
 uint64_t OrderBook::levelSize(Side s, Price price) const {
     std::scoped_lock lk(m_);
@@ -175,15 +183,25 @@ void OrderBook::forEachLevel(Side side, size_t n,
     std::vector<std::pair<Price, uint64_t>> out;
     {
         std::scoped_lock lk(m_);
+        // L8: fall back to the aggregated ladder when the per-order ladder for
+        // this side is empty (guarded — per-order takes precedence).
         if (side == Side::Bid) {
             size_t i = 0;
-            for (auto it = bids_.begin(); it != bids_.end() && i < n; ++it, ++i) {
-                out.emplace_back(it->first, it->second.totalSize);
+            if (!bids_.empty()) {
+                for (auto it = bids_.begin(); it != bids_.end() && i < n; ++it, ++i)
+                    out.emplace_back(it->first, it->second.totalSize);
+            } else {
+                for (auto it = bidsAgg_.begin(); it != bidsAgg_.end() && i < n; ++it, ++i)
+                    out.emplace_back(it->first, it->second.totalSize);
             }
         } else {
             size_t i = 0;
-            for (auto it = asks_.begin(); it != asks_.end() && i < n; ++it, ++i) {
-                out.emplace_back(it->first, it->second.totalSize);
+            if (!asks_.empty()) {
+                for (auto it = asks_.begin(); it != asks_.end() && i < n; ++it, ++i)
+                    out.emplace_back(it->first, it->second.totalSize);
+            } else {
+                for (auto it = asksAgg_.begin(); it != asksAgg_.end() && i < n; ++it, ++i)
+                    out.emplace_back(it->first, it->second.totalSize);
             }
         }
     }

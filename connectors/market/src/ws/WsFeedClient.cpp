@@ -321,13 +321,38 @@ void WsFeedClient::fail(beast::error_code ec, const char* where) {
 // ---------------------------------------------------------------------------
 void WsFeedClient::handleMessage(const std::string& text) {
   auto events = adapter_->translate(text);
+
+  // M7: per-message gap detection. A single wire frame may expand into several
+  // FeedEvents (e.g. replace -> delete+add), so evaluate the frame's sequence
+  // exactly once — on the first order-book event, which carries the resolved
+  // symbol plus the optional wire seq. If onSeq reports a gap/stale state, drop
+  // this frame's book mutations (subsequent frames are auto-gated by the
+  // manager until a snapshot resyncs). Conservative: events with no seq leave
+  // dropBook=false, so behavior is unchanged for sequence-less feeds (ITCH).
+  bool dropBook = false;
+  if (obManager_) {
+    for (auto& evt : events) {
+      const bool decided = std::visit([&](auto& e) -> bool {
+        using T = std::decay_t<decltype(e)>;
+        if constexpr (std::is_same_v<T, feed::ObAddEvent>    ||
+                      std::is_same_v<T, feed::ObUpdateEvent> ||
+                      std::is_same_v<T, feed::ObDeleteEvent> ||
+                      std::is_same_v<T, feed::ObTradeEvent>) {
+          if (e.seq) { dropBook = !obManager_->onSeq(e.symbol, *e.seq); return true; }
+        }
+        return false;
+      }, evt);
+      if (decided) break;
+    }
+  }
+
   for (auto& evt : events) {
-    dispatchEvent(evt);
+    dispatchEvent(evt, dropBook);
   }
 }
 
-void WsFeedClient::dispatchEvent(feed::FeedEvent& evt) {
-  std::visit([this](auto& e) {
+void WsFeedClient::dispatchEvent(feed::FeedEvent& evt, bool dropBookMutations) {
+  std::visit([this, dropBookMutations](auto& e) {
     using T = std::decay_t<decltype(e)>;
 
     if constexpr (std::is_same_v<T, feed::TickEvent>) {
@@ -339,22 +364,26 @@ void WsFeedClient::dispatchEvent(feed::FeedEvent& evt) {
       }
     }
     else if constexpr (std::is_same_v<T, feed::ObAddEvent>) {
-      if (obManager_) {
+      if (obManager_ && !dropBookMutations) {
         obManager_->onAdd(e.symbol, e.orderId, e.side, e.price, e.size, e.priority);
       }
     }
     else if constexpr (std::is_same_v<T, feed::ObUpdateEvent>) {
-      if (obManager_) {
+      if (obManager_ && !dropBookMutations) {
         obManager_->onUpdate(e.symbol, e.orderId, FeedScope{}, e.newPrice, e.newSize);
       }
     }
     else if constexpr (std::is_same_v<T, feed::ObDeleteEvent>) {
-      if (obManager_) {
+      if (obManager_ && !dropBookMutations) {
         obManager_->onDelete(e.symbol, e.orderId, FeedScope{});
       }
     }
     else if constexpr (std::is_same_v<T, feed::ObTradeEvent>) {
-      if (obManager_) {
+      // C1/M1: a print-only (bookNeutral) trade must NOT consume the book —
+      // executions already mutate it via explicit add/update/delete, and ITCH
+      // `trade` prints are hidden executions. Such trades carry their TA signal
+      // through the separate TickEvent, so they are simply not applied here.
+      if (obManager_ && !dropBookMutations && !e.bookNeutral) {
         obManager_->onTrade(e.symbol, e.price, e.size, e.aggressor);
       }
     }
