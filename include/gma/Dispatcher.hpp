@@ -54,6 +54,14 @@ public:
 
   // Generic event ingress. Invokes every registered computer, then fans the
   // raw payload fields out to direct-field subscribers.
+  //
+  // CONCURRENCY CONTRACT (ENC-791/M11): onTick() may be called from multiple
+  // ingress threads concurrently. The per-type computer cache is filled under a
+  // lock, but IEventComputer::compute() runs OUTSIDE that lock, so the same
+  // cached computer instance can have compute() entered concurrently for the
+  // same event type. IEventComputer implementations (which live in connectors/)
+  // MUST therefore make compute() safe to call concurrently — either stateless
+  // or internally synchronised. The Dispatcher adds no further serialisation.
   void onTick(const Event& tick);
 
   // Public hook that IEventComputer implementations call to deliver a computed
@@ -64,6 +72,18 @@ public:
                        double value);
 
 private:
+  // Recompute FunctionMap builtins over `history` and publish them.
+  //
+  // ATOMIC-KEY CONTRACT (ENC-792/M9): builtin atomics live in a FLAT per-symbol
+  // namespace keyed by bare function name (mean, sum, stddev, …) — the same key
+  // shape Listeners bind to and AtomicAccessor reads from the AtomicStore, and
+  // the shape MarketTA writes. `field` is therefore deliberately NOT folded into
+  // the stored key: a symbol is assumed to have a single primary value field
+  // driving its builtin atomics. If two fields of one symbol both flow through
+  // here, they share this namespace (last tick wins). Namespacing the key by
+  // field would silently break every Listener / AtomicAccessor binding, so the
+  // single-primary-field assumption is documented and enforced by key shape
+  // rather than changed. `field` is retained in the signature for diagnostics.
   void computeAndStoreAtomics(const std::string& symbol,
                               const std::string& field,
                               const std::vector<double>& history);
@@ -84,7 +104,11 @@ private:
   // Computers added explicitly via addComputer(). Filtered by eventType() on
   // every onTick. Kept separate from the registry-driven cache so test code
   // can inject computers without touching the global EventComputerRegistry.
+  // Guarded by _computersMutex: addComputer() may append concurrently with
+  // onTick() iterating (ENC-791/M8). Reads dominate, so a shared_mutex; onTick
+  // snapshots the raw pointers under a shared lock and computes outside it.
   std::vector<std::unique_ptr<engine::IEventComputer>> _computers;
+  mutable std::shared_mutex _computersMutex;
 
   // Per-type cache of computers built from EventComputerRegistry. Populated
   // lazily on first event of a given type — every `onTick` for an unseen

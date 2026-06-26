@@ -10,12 +10,25 @@ public:
     static void validateRequest(const rapidjson::Document& doc);
     static void validateNode(const rapidjson::Value& v);
 
-    // Throw if v[name] is missing or not of expectedType.
+    // Throw if v[name] is missing or not of expectedType. Booleans are a
+    // special case: RapidJSON tags true/false with the distinct kTrueType /
+    // kFalseType, so an exact GetType() compare against either would reject the
+    // other. When a bool is expected (caller passes kTrueType OR kFalseType),
+    // accept any boolean value (ENC-804/L1).
     static void requireMember(const rapidjson::Value& v,
                               const char* name,
                               rapidjson::Type expectedType)
     {
-        if (!v.HasMember(name) || v[name].GetType() != expectedType) {
+        if (!v.HasMember(name)) {
+            throw std::runtime_error(
+                std::string("JSON node missing or wrong-type for field '") +
+                name + "'");
+        }
+        const rapidjson::Value& m = v[name];
+        const bool wantBool = (expectedType == rapidjson::kTrueType ||
+                               expectedType == rapidjson::kFalseType);
+        const bool ok = wantBool ? m.IsBool() : (m.GetType() == expectedType);
+        if (!ok) {
             throw std::runtime_error(
                 std::string("JSON node missing or wrong-type for field '") +
                 name + "'");

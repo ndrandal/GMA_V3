@@ -10,20 +10,37 @@
 namespace gma::expr {
 namespace {
 
-Compiled compileNode(const rapidjson::Value& v, std::set<std::string>* refs);
+// Recursion guard for compile-time tree walking. Matches JsonValidator's
+// MAX_TREE_DEPTH=32 convention so a deeply-nested Expr can't blow the stack
+// during compilation (ENC-804/L2). buildTree/buildNode skip JsonValidator, so
+// the cap is enforced here rather than relied upon upstream.
+constexpr int MAX_EXPR_DEPTH = 32;
+
+// Denominator guard for div/mod. Matches BuiltinFunctions.cpp's EPSILON (1e-6)
+// so a near-zero denominator yields 0.0 instead of inf, preserving the
+// "no NaN/inf propagation" invariant documented on Expr.hpp (ENC-804/L3).
+constexpr double EPSILON = 1e-6;
+
+Compiled compileNode(const rapidjson::Value& v, std::set<std::string>* refs,
+                     int depth);
 
 std::vector<Compiled> compileArgs(const rapidjson::Value& v,
-                                  std::set<std::string>* refs) {
+                                  std::set<std::string>* refs, int depth) {
   if (!v.HasMember("args") || !v["args"].IsArray())
     throw std::runtime_error("expr: operator requires an 'args' array");
   std::vector<Compiled> out;
   out.reserve(v["args"].Size());
   for (const auto& a : v["args"].GetArray())
-    out.push_back(compileNode(a, refs));
+    out.push_back(compileNode(a, refs, depth + 1));
   return out;
 }
 
-Compiled compileNode(const rapidjson::Value& v, std::set<std::string>* refs) {
+Compiled compileNode(const rapidjson::Value& v, std::set<std::string>* refs,
+                     int depth) {
+  if (depth > MAX_EXPR_DEPTH)
+    throw std::runtime_error("expr: expression exceeds maximum depth of " +
+                             std::to_string(MAX_EXPR_DEPTH));
+
   // Bare literals.
   if (v.IsBool())   { double c = v.GetBool() ? 1.0 : 0.0; return [c](const Env&) { return c; }; }
   if (v.IsNumber()) { double c = v.GetDouble();           return [c](const Env&) { return c; }; }
@@ -65,7 +82,7 @@ Compiled compileNode(const rapidjson::Value& v, std::set<std::string>* refs) {
     } catch (...) {
       throw std::runtime_error("expr: unknown fn '" + fnName + "'");
     }
-    auto args = compileArgs(v, refs);
+    auto args = compileArgs(v, refs, depth);
     return [fn, args](const Env& e) {
       std::vector<double> xs;
       xs.reserve(args.size());
@@ -74,7 +91,7 @@ Compiled compileNode(const rapidjson::Value& v, std::set<std::string>* refs) {
     };
   }
 
-  auto args = compileArgs(v, refs);
+  auto args = compileArgs(v, refs, depth);
   const auto needN = [&](std::size_t n) {
     if (args.size() != n)
       throw std::runtime_error("expr: '" + op + "' requires " + std::to_string(n) + " args");
@@ -94,8 +111,8 @@ Compiled compileNode(const rapidjson::Value& v, std::set<std::string>* refs) {
 
   // --- binary ---
   if (op == "sub") { needN(2); return [args](const Env& e) { return args[0](e) - args[1](e); }; }
-  if (op == "div") { needN(2); return [args](const Env& e) { double d = args[1](e); return d == 0.0 ? 0.0 : args[0](e) / d; }; }
-  if (op == "mod") { needN(2); return [args](const Env& e) { double d = args[1](e); return d == 0.0 ? 0.0 : std::fmod(args[0](e), d); }; }
+  if (op == "div") { needN(2); return [args](const Env& e) { double d = args[1](e); return std::abs(d) > EPSILON ? args[0](e) / d : 0.0; }; }
+  if (op == "mod") { needN(2); return [args](const Env& e) { double d = args[1](e); return std::abs(d) > EPSILON ? std::fmod(args[0](e), d) : 0.0; }; }
   if (op == "gt")  { needN(2); return [args](const Env& e) { return args[0](e) >  args[1](e) ? 1.0 : 0.0; }; }
   if (op == "lt")  { needN(2); return [args](const Env& e) { return args[0](e) <  args[1](e) ? 1.0 : 0.0; }; }
   if (op == "gte") { needN(2); return [args](const Env& e) { return args[0](e) >= args[1](e) ? 1.0 : 0.0; }; }
@@ -114,7 +131,7 @@ Compiled compileNode(const rapidjson::Value& v, std::set<std::string>* refs) {
 } // namespace
 
 Compiled compile(const rapidjson::Value& spec, std::set<std::string>* refs) {
-  return compileNode(spec, refs);
+  return compileNode(spec, refs, 0);
 }
 
 } // namespace gma::expr

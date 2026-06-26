@@ -8,7 +8,12 @@
 using namespace gma;
 
 void Dispatcher::addComputer(std::unique_ptr<engine::IEventComputer> c) {
-  if (c) _computers.push_back(std::move(c));
+  if (!c) return;
+  // Guard the append: onTick() may be iterating _computers from an ingress
+  // thread. Without the lock this is a data race plus a potential
+  // iterator-invalidating realloc (ENC-791/M8).
+  std::unique_lock<std::shared_mutex> lock(_computersMutex);
+  _computers.push_back(std::move(c));
 }
 
 Dispatcher::Dispatcher(rt::ThreadPool* threadPool,
@@ -66,15 +71,28 @@ void Dispatcher::onTick(const Event& tick) {
     typedComputers.reserve(it->second.size());
     for (auto& c : it->second) typedComputers.push_back(c.get());
   }
+  // NOTE (ENC-791/M11): compute() runs outside _computerCacheMx, so the same
+  // cached instance can be entered concurrently by parallel ingress threads.
+  // IEventComputer implementations must be concurrency-safe — see the contract
+  // on Dispatcher::onTick() in the header.
   for (auto* c : typedComputers) {
     if (c) c->compute(tick, ctx);
   }
 
   // Computers added directly via addComputer() — kept for tests and code
-  // paths that want to inject without the global registry.
-  for (auto& c : _computers) {
-    if (!c) continue;
-    if (c->eventType() != tick.type) continue;
+  // paths that want to inject without the global registry. Snapshot the
+  // matching raw pointers under a shared lock (addComputer() only ever
+  // appends, so the pointers stay valid), then compute outside the lock so a
+  // computer's compute() can re-enter the dispatcher safely (ENC-791/M8).
+  std::vector<engine::IEventComputer*> directComputers;
+  {
+    std::shared_lock<std::shared_mutex> lock(_computersMutex);
+    directComputers.reserve(_computers.size());
+    for (auto& c : _computers) {
+      if (c && c->eventType() == tick.type) directComputers.push_back(c.get());
+    }
+  }
+  for (auto* c : directComputers) {
     c->compute(tick, ctx);
   }
 
@@ -170,19 +188,36 @@ void Dispatcher::computeAndStoreAtomics(const std::string& symbol,
                                               const std::string& /*field*/,
                                               const std::vector<double>& history)
 {
+  // `field` is intentionally unused — builtin atomics share a flat per-symbol
+  // namespace keyed by bare function name (single-primary-field contract; see
+  // the declaration in Dispatcher.hpp, ENC-792/M9).
   auto& fmap = FunctionMap::instance();
 
+  // Snapshot this symbol's subscribers once. If nothing is subscribed there is
+  // no listener to notify and no atomic worth materialising, so bail before
+  // touching FunctionMap at all (ENC-792/M10). The copy is bounded by this
+  // symbol's subscriptions and is required because we must not hold
+  // _listenerMutex while invoking onValue()/post() below (re-entrant
+  // (un)registerListener would deadlock on the unique_lock).
   std::map<std::string, std::vector<std::shared_ptr<INode>>> symListeners;
   {
     std::shared_lock<std::shared_mutex> lock(_listenerMutex);
     auto sit = _listeners.find(symbol);
-    if (sit != _listeners.end()) {
-      symListeners = sit->second;
-    }
+    if (sit == _listeners.end()) return;
+    symListeners = sit->second;
   }
+  if (symListeners.empty()) return;
 
+  // Compute ONLY the builtins that have a subscriber for this symbol. The old
+  // path recomputed all ~50 builtins (some O(N log N)) over the full history on
+  // every field tick and set() each into the store regardless of subscription;
+  // the subscription check now precedes the (potentially expensive) compute
+  // (ENC-792/M10). Behaviour for subscribed functions is unchanged.
   fmap.forEach([&](const std::string& fnName, const Func& fn) {
     if (!fn) return;
+
+    auto fit = symListeners.find(fnName);
+    if (fit == symListeners.end()) return;  // not subscribed -> skip compute
 
     double result = 0.0;
     try {
@@ -198,9 +233,6 @@ void Dispatcher::computeAndStoreAtomics(const std::string& symbol,
     if (_store) {
       _store->set(symbol, fnName, result);
     }
-
-    auto fit = symListeners.find(fnName);
-    if (fit == symListeners.end()) return;
 
     for (auto& listener : fit->second) {
       if (_threadPool) {

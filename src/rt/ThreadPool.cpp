@@ -64,7 +64,16 @@ void ThreadPool::workerLoop() {
       gma::util::logger().log(gma::util::LogLevel::Error,
         "ThreadPool: unknown task exception");
     }
-    inFlight_.fetch_sub(1, std::memory_order_release);
+    // Decrement under mx_ so the change is ordered against drain()'s predicate
+    // check: a waiter in drain() either observes inFlight_==0 before parking, or
+    // parks (releasing mx_) before this critical section runs and is then woken
+    // by the notify below. Decrementing outside mx_ races the predicate eval and
+    // loses the wakeup (the bug this fixes — ENC-787). notify after unlocking so
+    // the woken thread doesn't immediately re-block on a still-held mx_.
+    {
+      std::lock_guard<std::mutex> lk(mx_);
+      inFlight_.fetch_sub(1, std::memory_order_acq_rel);
+    }
     idleCv_.notify_all();
   }
 }

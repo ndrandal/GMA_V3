@@ -107,15 +107,21 @@ inline std::string keyDebugString(const RequestKey& k) {
 // std::hash specialization so unordered_map<RequestKey, ...> works.
 // Salts on the variant index so int(5) and string("5") hash to
 // different buckets — catching the obvious silent-collision bug.
+//
+// The salt is two distinct constants XOR-mixed in (ENC-804/L7). The old
+// `idx << 32` was UB where size_t is 32-bit (shift >= bit-width) and left the
+// int branch (idx==0) effectively unsalted; per-branch constants are portable
+// and salt both alternatives.
 namespace std {
 template <>
 struct hash<gma::server::RequestKey> {
   std::size_t operator()(const gma::server::RequestKey& k) const noexcept {
-    const std::size_t idx = static_cast<std::size_t>(k.index());
-    if (idx == 0) {
-      return std::hash<int>{}(std::get<int>(k)) ^ (idx << 32);
+    if (k.index() == 0) {
+      return std::hash<int>{}(std::get<int>(k)) ^
+             static_cast<std::size_t>(0x9e3779b97f4a7c15ULL);
     }
-    return std::hash<std::string>{}(std::get<std::string>(k)) ^ ((idx + 1) << 32);
+    return std::hash<std::string>{}(std::get<std::string>(k)) ^
+           static_cast<std::size_t>(0xc2b2ae3d27d4eb4fULL);
   }
 };
 }  // namespace std
