@@ -64,7 +64,14 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
     }
 
     if (!ifs.is_open()) {
-        GTEST_SKIP() << "corpus_requests.json not found — skipping corpus test";
+        // ENC-807 (L17): a missing corpus must NOT silently green the suite.
+        // CMake copies corpus_requests.json next to the test binary (cwd), so a
+        // miss here is a real build/packaging failure, not a skip.
+        FAIL() << "corpus_requests.json not found next to the test binary "
+                  "(cwd) — the corpus must be present for this test to run. "
+                  "Searched: corpus_requests.json, "
+                  "../tests/treebuilder/corpus_requests.json, "
+                  "tests/treebuilder/corpus_requests.json";
         return;
     }
 

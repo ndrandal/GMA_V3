@@ -52,20 +52,41 @@ TEST_F(TreeBuilderTestFixture, BuildForRequestRejectsEmptyJson) {
     EXPECT_THROW(tree::buildForRequest(doc, deps, terminal), std::runtime_error);
 }
 
-TEST_F(TreeBuilderTestFixture, BuildForRequestRejectsMissingId) {
+// ENC-807 (L19): the old "RejectsMissingId"/"RejectsMissingTree" tests were
+// misnamed — buildForRequest has no top-level `id`/`tree` notion at all; it
+// requires `streamKey` and `field`, and both old payloads merely tripped the
+// missing-`streamKey` check first. These rewritten tests isolate each REAL
+// required key (with the OTHER present) and assert the error names the right
+// one, so they actually exercise the validation they claim to.
+TEST_F(TreeBuilderTestFixture, BuildForRequestRejectsMissingStreamKey) {
     initDeps();
     auto terminal = std::make_shared<TerminalStub>();
     rapidjson::Document doc;
-    doc.Parse(R"({"tree":{"type":"Listener","streamKey":"SYM","field":"price"}})");
-    EXPECT_THROW(tree::buildForRequest(doc, deps, terminal), std::runtime_error);
+    // `field` present, `streamKey` absent -> must reject on streamKey.
+    doc.Parse(R"({"field":"price"})");
+    try {
+        (void)tree::buildForRequest(doc, deps, terminal);
+        FAIL() << "expected throw for missing streamKey";
+    } catch (const std::runtime_error& ex) {
+        EXPECT_NE(std::string(ex.what()).find("streamKey"), std::string::npos)
+            << "error must name the missing 'streamKey'; got: " << ex.what();
+    }
 }
 
-TEST_F(TreeBuilderTestFixture, BuildForRequestRejectsMissingTree) {
+TEST_F(TreeBuilderTestFixture, BuildForRequestRejectsMissingField) {
     initDeps();
     auto terminal = std::make_shared<TerminalStub>();
     rapidjson::Document doc;
-    doc.Parse(R"({"id":"1"})");
-    EXPECT_THROW(tree::buildForRequest(doc, deps, terminal), std::runtime_error);
+    // `streamKey` present, `field` absent -> must reject on field (proves the
+    // streamKey check is satisfied and we reach the field check).
+    doc.Parse(R"({"streamKey":"SYM"})");
+    try {
+        (void)tree::buildForRequest(doc, deps, terminal);
+        FAIL() << "expected throw for missing field";
+    } catch (const std::runtime_error& ex) {
+        EXPECT_NE(std::string(ex.what()).find("field"), std::string::npos)
+            << "error must name the missing 'field'; got: " << ex.what();
+    }
 }
 
 // ----- Tee fan-out node (ENC-646) -----

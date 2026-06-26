@@ -125,11 +125,7 @@ TEST(WebSocketE2ETest, SubscribeAndReceiveUpdate) {
     R"({"type":"subscribe","requests":[{"key":42,"streamKey":"E2E","field":"px"}]})";
   stream.write(asio::buffer(req));
 
-  // Give the server a moment to wire the listener.
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-  // Inject an event via the Dispatcher; listener should fire and the
-  // server pushes an update frame back to the client.
+  // The event to inject once the subscription is confirmed live.
   auto doc = std::make_shared<rapidjson::Document>();
   doc->SetObject();
   doc->AddMember("px", 123.5, doc->GetAllocator());
@@ -137,13 +133,14 @@ TEST(WebSocketE2ETest, SubscribeAndReceiveUpdate) {
   ev.type = "tick";
   ev.symbol = "E2E";
   ev.payload = std::move(doc);
-  srv.dispatcher->onTick(ev);
 
-  // Server emits a "subscribed" ack first, then "update" frames as the
-  // listener fires. Read up to a few frames within a bounded timeout
-  // looking for the update.
+  // Deterministic readiness barrier (replaces a fixed sleep, L18): the server
+  // emits the "subscribed" ack only AFTER buildForRequest has registered the
+  // Listener with the Dispatcher (ClientSession.cpp). So we read frames until
+  // the ack arrives, THEN inject — guaranteeing the listener is wired and the
+  // update must follow. A single watchdog unblocks any read past the deadline.
   std::atomic<bool> done{false};
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
   std::thread readerTimeout([&]{
     while (!done.load()) {
       if (std::chrono::steady_clock::now() >= deadline) {
@@ -154,23 +151,33 @@ TEST(WebSocketE2ETest, SubscribeAndReceiveUpdate) {
     }
   });
 
+  bool acked = false;
   std::string updatePayload;
-  for (int i = 0; i < 5 && updatePayload.empty(); ++i) {
+  for (int i = 0; i < 10 && updatePayload.empty(); ++i) {
     beast::flat_buffer buf;
     try {
       stream.read(buf);
     } catch (...) { break; }
     std::string frame = beast::buffers_to_string(buf.data());
-    rapidjson::Document doc;
-    doc.Parse(frame.c_str());
-    if (!doc.HasParseError() && doc.IsObject() &&
-        doc.HasMember("type") && doc["type"].IsString() &&
-        std::string(doc["type"].GetString()) == "update") {
+    rapidjson::Document fd;
+    fd.Parse(frame.c_str());
+    if (fd.HasParseError() || !fd.IsObject() ||
+        !fd.HasMember("type") || !fd["type"].IsString()) {
+      continue;
+    }
+    const std::string type = fd["type"].GetString();
+    if (type == "subscribed" && !acked) {
+      acked = true;
+      // Listener is now registered — deterministic to fire an update.
+      srv.dispatcher->onTick(ev);
+    } else if (type == "update") {
       updatePayload = std::move(frame);
     }
   }
   done.store(true);
   if (readerTimeout.joinable()) readerTimeout.join();
+
+  ASSERT_TRUE(acked) << "never received the 'subscribed' ack";
 
   ASSERT_FALSE(updatePayload.empty()) << "no update frame received within 2s";
 
