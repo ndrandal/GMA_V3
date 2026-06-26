@@ -24,9 +24,10 @@ cmake --build . -j$(nproc)
 ./tools/compile.sh
 
 # Run server
-./build/gma_server                 # defaults (wsPort=4000, feedPort=9001)
+./build/gma_server                 # compiled defaults (wsPort=8080, feedPort=9001)
 ./build/gma_server 9002            # custom wsPort
-./build/gma_server 9002 gma.conf   # custom wsPort + INI config
+./build/gma_server 9002 gma.conf   # custom wsPort + INI config (gma.conf sets wsPort=4000,
+                                   #   but argv[1]=9002 wins over the file)
 ./build/gma_server 9002 gma.conf 9005  # also override feedPort
 
 # Run tests
@@ -60,7 +61,9 @@ include/gma/              # Engine public headers (libgma_engine)
   FunctionRegistry.hpp    # registerBuiltinFunctions()
   NodeRegistry.hpp        # registerBuiltinNodeTypes()
   TreeBuilder.hpp         # JSON → node DAG
-  SourceProfile.hpp       # Field-alias map (lives in engine for Config use)
+  # (NOTE: there is no engine-level SourceProfile.hpp — field-alias mapping
+  #  moved into the market connector as gma::market::MarketFieldMap (ENC-35);
+  #  see connectors/market/include/gma/market/MarketFieldMap.hpp)
 
 src/                      # Engine implementations (mirrors include/ layout)
   main.cpp                # Composition root — boots engine, wires connectors
@@ -125,10 +128,51 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture including 
 
 ## Configuration
 
-Default runtime config at `src/util/gma.conf` (INI key=value):
-- `wsPort = 4000`, `feedPort = 9001` (CLI overrides available; see Build & Run)
-- `threadPoolSize = 4`
-- TA defaults: SMA `{5, 20}`, EMA `{12, 26}`, RSI 14, MACD `{12, 26, 9}`, Bollinger `{n=20, k=2}`
-- `taHistoryMax`, `maxSymbols`, `maxFieldsPerSymbol` bound memory
+Two layers, and they intentionally differ — keep them straight:
 
-CLI override order: `argv[1]=wsPort`, `argv[2]=configFile`, `argv[3]=feedPort`. Values from argv win over the config file.
+1. **Compiled-in defaults** (`include/gma/util/Config.hpp`) — what
+   `./gma_server` uses when **no** config file is passed.
+2. **Shipped INI** (`src/util/gma.conf`) — an example config; it overrides some
+   compiled defaults when you actually pass it as `argv[2]`.
+
+| Key | Compiled default (`Config.hpp`) | `gma.conf` value |
+|---|---|---|
+| `wsPort` | **8080** | 4000 |
+| `feedPort` | 9001 | 9001 |
+| `threadPoolSize` | 0 (= hardware_concurrency) | 4 |
+| `taSMA` (SMA periods) | `{5, 20}` | `5,10,20,50` |
+| `taEMA` (EMA periods) | `{12, 26}` | `9,21,50` |
+| `taRSI` | 14 | 14 |
+| `taATR` | 14 | 14 |
+| `taMomentum` (momentum/ROC) | 10 | 10 |
+| `taVolAvg` (volume avg) | 20 | 20 |
+| `taMACD_fast` / `taMACD_slow` / `taMACD_signal` | 12 / 26 / 9 | 12 / 26 / 9 |
+| `taBBands_n` / `taBBands_stdK` | 20 / 2.0 | 20 / 2.0 |
+| `taHistoryMax` | 1000 | 1000 |
+| `metricsEnabled` / `metricsIntervalSec` | false / 15 | true / 15 |
+| `logLevel` | `info` | `info` |
+
+> ⚠️ The compiled SMA/EMA periods (`{5,20}` / `{12,26}`) are **not** what
+> `gma.conf` ships (`5,10,20,50` / `9,21,50`). Whichever you load wins; don't
+> assume one from the other.
+
+Other engine keys parsed by `src/util/Config.cpp` (defaults from `Config.hpp`):
+
+- **Memory bounds:** `maxSymbols` (10000), `maxFieldsPerSymbol` (200).
+- **Order book:** `allowNegativePrices` (false) — allow negative prices/yields.
+- **Ingress (ENC-31, the current model):** `ingress.N.kind` plus per-entry
+  sub-keys (`ingress.N.port`, `ingress.N.url`, `ingress.N.adapter`,
+  `ingress.N.symbols`, …). The engine instantiates each entry by kind
+  (`market.feedserver`, `market.wsclient`).
+- **Legacy feed keys (auto-translated into `ingress[]` with a deprecation
+  warn):** `feedUrl`, `feedSymbols`, and `feed.N.{url,adapter,symbols}`.
+- **forum-driven ingress:** `forumUrl`, `forumTenantId`, `forumAuthToken` —
+  when `forumUrl` is set, ingress is pulled from forum instead of the static
+  INI list.
+- **Connector-namespaced config** (handled by `ConfigNamespaceRegistry`, not the
+  engine directly): `market.source.*` → `MarketFieldMap` (legacy bare `source.*`
+  is a one-release alias). See `docs/feed-adapters.md`.
+
+CLI override order: `argv[1]=wsPort`, `argv[2]=configFile`, `argv[3]=feedPort`.
+Values from argv win over the config file; the config file wins over the
+compiled defaults.

@@ -77,29 +77,77 @@ ws::stream<tcp::socket> connect(asio::io_context& clientIoc, unsigned short port
 }
 
 // Read one frame with a bounded wall-clock timeout. Returns empty on timeout.
-// Uses a polling-cancel pattern so the call returns *as soon as* the frame
-// arrives — no fixed timeout floor.
+// Driven entirely on THIS thread via run_for — no second thread touches the
+// socket, so there is no read/close data race (TSan-clean). The client
+// io_context is otherwise idle (only the server harness runs its own).
 std::string readFrameBounded(ws::stream<tcp::socket>& stream,
                              std::chrono::milliseconds timeout) {
-  std::atomic<bool> done{false};
-  std::string out;
-  auto deadline = std::chrono::steady_clock::now() + timeout;
-  std::thread bomb([&]{
-    while (!done.load()) {
-      if (std::chrono::steady_clock::now() >= deadline) {
-        try { stream.next_layer().close(); } catch (...) {}
-        return;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-  });
+  auto& ioc = static_cast<asio::io_context&>(stream.get_executor().context());
   beast::flat_buffer buf;
-  try {
-    stream.read(buf);
-    out = beast::buffers_to_string(buf.data());
-  } catch (...) {}
-  done.store(true);
-  if (bomb.joinable()) bomb.join();
+  std::string out;
+  bool completed = false;
+  stream.async_read(buf, [&](beast::error_code ec, std::size_t) {
+    completed = true;
+    if (!ec) out = beast::buffers_to_string(buf.data());
+  });
+  ioc.restart();
+  ioc.run_for(timeout);
+  if (!completed) {
+    // Timed out with a read still pending: cancel it and drain so the handler
+    // (holding references to these locals) runs before we return.
+    beast::error_code ec;
+    stream.next_layer().cancel(ec);
+    ioc.restart();
+    ioc.run_for(std::chrono::milliseconds(200));
+  }
+  return out;
+}
+
+// Read frames under a SINGLE watchdog (so an intermediate frame never trips a
+// per-read close), returning the first frame whose "type" == wantType, or "" on
+// timeout. Used as a deterministic readiness/observation barrier in place of
+// fixed sleeps (L18): the "subscribed" ack means the Listener is registered;
+// the "canceled" frame means the subscription is torn down.
+std::string readUntilType(ws::stream<tcp::socket>& stream,
+                          const char* wantType,
+                          std::chrono::milliseconds budget) {
+  // Single-threaded bounded read loop (see readFrameBounded): each frame is read
+  // via async_read + run_for against the shared deadline, so no second thread
+  // ever closes the socket out from under an in-flight read (TSan-clean).
+  auto& ioc = static_cast<asio::io_context&>(stream.get_executor().context());
+  auto deadline = std::chrono::steady_clock::now() + budget;
+  std::string out;
+  for (;;) {
+    auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) break;
+    auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    beast::flat_buffer buf;
+    std::string frame;
+    bool completed = false, ok = false;
+    stream.async_read(buf, [&](beast::error_code ec, std::size_t) {
+      completed = true;
+      if (!ec) { frame = beast::buffers_to_string(buf.data()); ok = true; }
+    });
+    ioc.restart();
+    ioc.run_for(remaining);
+    if (!completed) {                 // budget elapsed with read pending
+      beast::error_code ec;
+      stream.next_layer().cancel(ec);
+      ioc.restart();
+      ioc.run_for(std::chrono::milliseconds(200));
+      break;
+    }
+    if (!ok) break;                   // connection closed/errored
+    rapidjson::Document d;
+    d.Parse(frame.c_str());
+    if (!d.HasParseError() && d.IsObject() && d.HasMember("type") &&
+        d["type"].IsString() &&
+        std::string(d["type"].GetString()) == wantType) {
+      out = std::move(frame);
+      break;
+    }
+  }
   return out;
 }
 
@@ -328,7 +376,10 @@ TEST(ClientSessionTest, SubscribeWithStringIdEchoesRequestId) {
     R"({"type":"subscribe","requests":[{"id":"r-NEXO-test","streamKey":"STRID","field":"px"}]})";
   stream.write(asio::buffer(req));
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  // Deterministic readiness (L18): the ack guarantees the listener is wired,
+  // so the injected tick must produce an update — no fixed sleep needed.
+  std::string ackPayload = readUntilType(stream, "subscribed", std::chrono::seconds(2));
+  ASSERT_FALSE(ackPayload.empty()) << "no 'subscribed' ack received";
 
   auto ev = std::make_shared<rapidjson::Document>();
   ev->SetObject();
@@ -339,19 +390,7 @@ TEST(ClientSessionTest, SubscribeWithStringIdEchoesRequestId) {
   tick.payload = std::move(ev);
   srv.dispatcher->onTick(tick);
 
-  std::string ackPayload, updatePayload;
-  for (int i = 0; i < 8 && (ackPayload.empty() || updatePayload.empty()); ++i) {
-    auto frame = readFrameBounded(stream, std::chrono::milliseconds(500));
-    if (frame.empty()) break;
-    rapidjson::Document doc;
-    doc.Parse(frame.c_str());
-    if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("type")) continue;
-    const std::string t = doc["type"].GetString();
-    if (t == "subscribed" && ackPayload.empty()) ackPayload = frame;
-    else if (t == "update" && updatePayload.empty()) updatePayload = frame;
-  }
-
-  ASSERT_FALSE(ackPayload.empty()) << "no 'subscribed' ack received";
+  std::string updatePayload = readUntilType(stream, "update", std::chrono::seconds(2));
   ASSERT_FALSE(updatePayload.empty()) << "no 'update' frame received";
 
   rapidjson::Document ack; ack.Parse(ackPayload.c_str());
@@ -387,7 +426,12 @@ TEST(ClientSessionTest, MixedIntAndStringSubsCoexist) {
   stream.write(asio::buffer(
     R"({"type":"subscribe","requests":[{"id":"alpha","streamKey":"MIX","field":"qty"}]})"));
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  // Deterministic readiness (L18): both subscriptions must be acked before the
+  // tick so each routes to a live listener. Two subscribes -> two acks.
+  ASSERT_FALSE(readUntilType(stream, "subscribed", std::chrono::seconds(2)).empty())
+      << "first subscribe never acked";
+  ASSERT_FALSE(readUntilType(stream, "subscribed", std::chrono::seconds(2)).empty())
+      << "second subscribe never acked";
 
   auto payload = std::make_shared<rapidjson::Document>();
   payload->SetObject();
@@ -439,9 +483,11 @@ TEST(ClientSessionTest, CancelByIdsRemovesStringKeyedSub) {
   stream.write(asio::buffer(
     R"({"type":"subscribe","requests":[{"id":"foo","streamKey":"CANCEL","field":"px"}]})"));
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  // Deterministic readiness (L18): wait for the ack so the listener is live.
+  ASSERT_FALSE(readUntilType(stream, "subscribed", std::chrono::seconds(2)).empty())
+      << "subscribe never acked";
 
-  // Drain ack + at least one update to confirm the sub is live.
+  // Confirm the sub is live by firing a tick and observing an update.
   auto ev1 = std::make_shared<rapidjson::Document>();
   ev1->SetObject();
   ev1->AddMember("px", 1.0, ev1->GetAllocator());
@@ -462,15 +508,12 @@ TEST(ClientSessionTest, CancelByIdsRemovesStringKeyedSub) {
   }
   ASSERT_TRUE(sawPreCancelUpdate) << "string-id sub never fired even before cancel";
 
-  // Cancel by ids array.
+  // Cancel by ids array. The server emits a "canceled" frame AFTER it removes
+  // and shuts down the subscription (ClientSession::handleCancel), so waiting
+  // for it is a deterministic barrier (L18) — no fixed sleep/drain needed.
   stream.write(asio::buffer(R"({"type":"cancel","ids":["foo"]})"));
-  std::this_thread::sleep_for(std::chrono::milliseconds(80));
-
-  // Drain any in-flight ack frames so the next read window is clean.
-  for (int i = 0; i < 4; ++i) {
-    auto frame = readFrameBounded(stream, std::chrono::milliseconds(80));
-    if (frame.empty()) break;
-  }
+  ASSERT_FALSE(readUntilType(stream, "canceled", std::chrono::seconds(2)).empty())
+      << "cancel was never acknowledged with a 'canceled' frame";
 
   // Fire another tick — no update frame should follow.
   auto ev2 = std::make_shared<rapidjson::Document>();

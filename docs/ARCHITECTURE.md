@@ -132,8 +132,8 @@ All live under `include/gma/engine/`. Most are header-only static singletons wit
 | `NodeTypeRegistry` | type name → `NodeBuilderFn(spec, defaultSymbol, Deps, downstream) → shared_ptr<INode>` | `TreeBuilder::buildOne` + `JsonValidator::validateNode` |
 | `AtomicProviderRegistry` | namespace (e.g. `"ob"`) → `double(symbol, fullKey)` | `AtomicAccessor` when a store lookup misses |
 | `FunctionMap` | fn name (e.g. `"mean"`) → `double(vector<double>)` | `TreeBuilder`'s worker builder |
-| `IngressRegistry` | kind (e.g. `"market-tcp-feed"`) → `IngressFactory(io, dispatcher, cfg)` | Reserved for future config-driven ingress creation |
-| `ConfigNamespaceRegistry` | prefix (e.g. `"source"`) → reader function | Reserved for namespaced connector config |
+| `IngressRegistry` | kind (e.g. `"market.feedserver"`, `"market.wsclient"`) → ingress factory | **Live (ENC-31)** — the composition root instantiates each `cfg.ingress[]` entry by kind |
+| `ConfigNamespaceRegistry` | prefix (e.g. `"market"`) → reader function | **Live (ENC-35)** — populates connector config (e.g. `market.source.*` → `MarketFieldMap`) on `dispatchPendingKeys()` |
 
 **What's actually used today by the hot path:** `NodeTypeRegistry`, `AtomicProviderRegistry`, `FunctionMap`, and the `Dispatcher::DefaultComputerFactory` hook. The other registries are scaffolding — they work, have unit tests, and are ready to replace direct wiring when we pull more config/construction through them.
 
@@ -186,12 +186,19 @@ public:
 
 ### What `MarketConnector::registerWith` actually does (~100 lines)
 
-- `installDefaults()` (idempotent re-install) — the TA tick-computer factory
+- Registers the TA tick-computer factory (with the connector-owned
+  `MarketFieldMap`) so each `Dispatcher` gets a fresh `MarketTickComputer`
+- Registers the `market` / `source` config namespaces on `ConfigNamespaceRegistry`,
+  which populate the `MarketFieldMap` from `market.source.*` keys
 - Constructs `OrderBookManager` + `FunctionalSnapshotSource` + `ob::Provider`
-- Registers `"ob"` namespace with `AtomicProviderRegistry` so `AtomicAccessor` can fetch OB-derived keys (`ob.bestBid`, `ob.spread`, …)
-- Constructs and starts `FeedServer` on `cfg.feedPort` (TCP market-JSON ingest)
-- For each entry in `cfg.feeds`, constructs an `ItchAdapter` and `WsFeedClient`, starts it
-- Registers shutdown steps: `"ob-provider-clear"`, `"feed-stop"`, `"feed-ws-stop"` (one per client)
+- Registers `"ob"` namespace with `AtomicProviderRegistry` so `AtomicAccessor` can fetch OB-derived keys (`ob.best.bid.price`, `ob.spread`, …)
+- **Registers ingress factories** on `IngressRegistry` — `market.feedserver`
+  (TCP market-JSON ingest) and `market.wsclient` (external WS feed + adapter).
+  **It does not construct or start any feed itself.** The composition root reads
+  `cfg.ingress[]`, looks each entry's `kind` up in `IngressRegistry`, and drives
+  the matching factory's `start()`/`stop()` centrally (ENC-31). Adding an
+  ingress kind is a factory registration + an `ingress.N.*` INI edit — never a
+  `main.cpp` change, and there is no per-connector `feed-stop` shutdown step.
 
 ## 6. Adding a new connector (cookbook)
 
@@ -272,23 +279,37 @@ Built-in node types (all registered by `registerBuiltinNodeTypes()`):
 
 ## 8. JSON protocols
 
-### WebSocket (port `cfg.wsPort`, default 4000) — `ClientSession`
+### WebSocket (port `cfg.wsPort`) — `ClientSession`
 
-Subscribe:
+> **Port default:** the compiled-in default `wsPort` is **8080**
+> (`include/gma/util/Config.hpp`). The shipped `src/util/gma.conf` overrides it
+> to **4000**, so `./gma_server <wsPort> gma.conf` listens on 4000 while
+> `./gma_server` with no config file listens on 8080. See §"Configuration".
+
+Subscribe (each request lives in a top-level `requests` array):
 ```json
-{"key": 1, "symbol": "AAPL", "field": "lastPrice", "pipeline": [{"type":"Worker","fn":"mean"}]}
+{"type":"subscribe","requests":[
+  {"key": 1, "streamKey": "AAPL", "field": "lastPrice",
+   "pipeline": [{"type":"Worker","fn":"mean"}]}
+]}
 ```
-- Integer `key` identifies the subscription (not a string `id`).
-- `pipeline` overrides `node` if both present; pipeline is built in reverse order.
-- `symbol` is the (neutral) stream key; `field` is the triggering event field.
+- `streamKey` (string) is **required** — there is **no `symbol` fallback**
+  (ENC-50). A request missing `streamKey` is rejected with
+  `{"type":"error","where":"subscribe","message":"request missing 'streamKey' string"}`.
+- The per-request identifier is `key` (int) **or** `id` (int|string), not both.
+  `pipeline` overrides `node` if both present; pipeline is built in reverse order.
+- `field` is the triggering event field.
 
-Server replies:
+Server replies (the id field mirrors the input — `key` for int subs,
+`requestId` for string subs):
 ```json
 {"type": "subscribed", "key": 1}
-{"type": "update",     "key": 1, "symbol": "AAPL", "value": 187.34}
+{"type": "update",     "key": 1, "streamKey": "AAPL", "value": 187.34}
 ```
 
-The JSON `symbol` field name was kept deliberately (backwards compat) even though the engine is stream-neutral.
+The wire key is `streamKey` everywhere; the engine is stream-neutral and the
+internal `Event::symbol` field is just an opaque stream key (see §3). No
+`symbol` alias is accepted on the wire.
 
 ### TCP feed (port `cfg.feedPort`, default 9001) — `FeedServer` (market connector)
 
@@ -328,10 +349,18 @@ The entire test binary (`gma_tests`) is one executable; `ctest` runs it. Organiz
 
 Minor architectural debts that are deliberately unresolved — none block adding new connectors:
 
-- **`include/gma/SourceProfile.hpp` lives in engine, not market.** `util::Config` has a `sourceProfile` member (priceFields/volumeFields/bidFields/askFields), so moving it to market would cascade. Cosmetic only.
+- **Source field mapping is connector-owned (ENC-35).** The old engine-level
+  `include/gma/SourceProfile.hpp` and the `util::Config::sourceProfile` member
+  are **gone**. The replacement is `gma::market::MarketFieldMap`
+  (`connectors/market/include/gma/market/MarketFieldMap.hpp`:
+  `name`/`priceFields`/`volumeFields`/`bidFields`/`askFields`/`timestampField`/
+  `taEnabled`), owned by `MarketConnector` and populated from the
+  `market.source.*` config namespace via `ConfigNamespaceRegistry` (the legacy
+  bare `source.*` prefix is a one-release deprecation alias). The engine no
+  longer knows about market-flavored fields.
 - **JSON wire type name `"SymbolSplit"`** was preserved for backward compatibility when the class was renamed to `GroupSplit`. The string literal is correct and intentional; don't "fix" it.
 - **No CI check yet** for the zero-core-changes invariant. The synthetic connector + its test prove it works today, but nothing prevents a future commit from re-introducing an engine → connector dependency. Plan §6 sketches a grep-based check.
-- **`EventComputerRegistry`, `IngressRegistry`, `ConfigNamespaceRegistry`** are scaffolded but not yet on the hot path (dispatcher uses the `DefaultComputerFactory` hook; config parsing is still monolithic). Wiring them up is a future simplification, not a correctness issue.
+- **`IngressRegistry` (ENC-31) and `ConfigNamespaceRegistry` (ENC-35) are now live** — ingress sources are constructed from `cfg.ingress[]` by kind, and connector config (e.g. `market.source.*`) flows through registered namespace readers. `EventComputerRegistry` is the remaining registry still being pulled fully onto the hot path; wiring it up is a future simplification, not a correctness issue.
 
 ## 12. Key files
 

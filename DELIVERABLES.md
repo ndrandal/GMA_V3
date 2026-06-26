@@ -1,5 +1,21 @@
 # GMA_V3 Overhaul — 6 Deliverables
 
+> ⚠️ **HISTORICAL RECORD — DO NOT TREAT AS A LIVE BUG LIST.**
+> This is the *original* overhaul audit and its remediation plan, captured at
+> the start of the GMA_V3 rework. **Every headline bug listed below has since
+> been fixed in the current code**, and the audit cites file paths and types
+> that **no longer exist** — e.g. `src/core/AtomicFunctions.cpp`,
+> `src/core/MarketDispatcher.cpp`, `gma/Config.hpp`/`gma/Logger.hpp` include
+> shapes, the duplicate `ClientConnection`, and a C++17 CMake standard. The
+> live system builds clean (g++ 16, `-Wall -Wextra -Wpedantic`), all tests
+> pass, the engine/connector split is enforced, feed code lives under
+> `connectors/market/`, and dispatch is the engine `Dispatcher` (there is no
+> `MarketDispatcher`). Deliverables 7–9 are marked ✅ COMPLETE inline; D1–D6
+> are likewise resolved. **Read this only as a record of where the project came
+> from — for the current state of the code see `docs/ARCHITECTURE.md`,
+> `CLAUDE.md`, and the 2026-06-26 review in `docs/CODE_REVIEW_2026-06-26.md`.**
+> Do not chase any item here as if it were an open defect.
+
 > Full audit of every source file. Issues ranked by severity. Each deliverable is a self-contained body of work that can be tackled independently.
 
 ---

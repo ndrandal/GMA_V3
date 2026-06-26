@@ -1,11 +1,13 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
 
 #include <boost/asio/steady_timer.hpp>
+#include <boost/system/error_code.hpp>
 
 #include "gma/engine/IConnector.hpp"
 #include "gma/engine/IEventComputer.hpp"
@@ -43,6 +45,10 @@ private:
   std::unique_ptr<boost::asio::steady_timer> _timer;
   Dispatcher*                           _dispatcher { nullptr };
   std::uint64_t                         _counter { 0 };
+  // L4/ENC-805: the connector owns the recurring timer handler; the handler
+  // captures a weak_ptr to itself (not a strong one), so there is no
+  // self-referential shared_ptr cycle — it is released when the connector dies.
+  std::shared_ptr<std::function<void(const boost::system::error_code&)>> _tickHandler;
 };
 
 // The computer is also useful in isolation (unit tests), so it's public.

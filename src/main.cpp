@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include <boost/asio/signal_set.hpp>
+
 #include "gma/engine/IConnector.hpp"
 
 // -------- Engine --------
@@ -30,16 +32,6 @@
 // -------- Forum-driven ingress --------
 #include "gma/forum/ConnectorsClient.hpp"
 
-// ---------------------------
-// Globals
-// ---------------------------
-static std::atomic<gma::rt::ShutdownCoordinator*> g_shutdown{nullptr};
-
-static void handleSignal(int) {
-  auto* p = g_shutdown.load(std::memory_order_acquire);
-  if (p) p->stop();
-}
-
 static unsigned short parsePort(const char* str, unsigned short fallback) {
   try {
     unsigned long p = std::stoul(str);
@@ -57,12 +49,9 @@ int main(int argc, char* argv[]) {
   using namespace gma::util;
 
   // Shutdown coordinator — declared early so it outlives servers.
+  // Signal handling is wired below via boost::asio::signal_set, once the
+  // io_context exists (async-signal-safe — see "0) Signals" near ioc).
   gma::rt::ShutdownCoordinator shutdown;
-  g_shutdown.store(&shutdown, std::memory_order_release);
-
-  // 0) Signals -> graceful stop
-  std::signal(SIGINT,  handleSignal);
-  std::signal(SIGTERM, handleSignal);
 
   // 1) Config
   //    argv[1] = wsPort (optional)
@@ -133,6 +122,18 @@ int main(int argc, char* argv[]) {
 
   // 7) ASIO + engine WebSocket server
   boost::asio::io_context ioc;
+
+  // 0) Signals -> graceful stop, delivered as a normal io_context completion
+  //    handler. Async-signal-safe: the OS signal only marks the signal_set;
+  //    ShutdownCoordinator::stop() (mutexes, logging, strand dispatch — none
+  //    async-signal-safe) then runs from ioc.run()'s thread, a normal context.
+  //    stop() is idempotent (internal CAS), so the post-run shutdown.stop()
+  //    below is a harmless second call when a signal triggered the first.
+  boost::asio::signal_set signals(ioc, SIGINT, SIGTERM);
+  signals.async_wait([&shutdown](const boost::system::error_code& ec, int /*signo*/) {
+    if (!ec) shutdown.stop();
+  });
+
   gma::ExecutionContext exec(store.get(), gma::gThreadPool.get());
 
   gma::WebSocketServer ws(ioc, &exec, dispatcher.get(), wsPort);
@@ -190,6 +191,22 @@ int main(int argc, char* argv[]) {
             LogLevel::Info,
             "forum.connectors.ingress_replaced",
             {{"count", std::to_string(cfg.ingress.size())}, {"forumUrl", forumUrl}});
+
+        // Fail-fast per spec AC-6: a forum pull that parses cleanly but yields
+        // zero ingress entries (forum returned [] or only rows that
+        // parseConnectorsJson skipped — non-itch protocol / missing endpoint)
+        // would otherwise boot a server with no data source, silently. Treat an
+        // empty post-pull ingress as fatal, exactly like a transport failure.
+        if (cfg.ingress.empty()) {
+          logger().log(
+              LogLevel::Error,
+              "forum.connectors.empty_ingress",
+              {{"forumUrl", forumUrl},
+               {"detail",
+                "forum returned no usable connectors; refusing to boot with "
+                "empty ingress (AC-6)"}});
+          std::exit(1);
+        }
       } catch (const std::exception& ex) {
         logger().log(
             LogLevel::Error,
@@ -261,7 +278,6 @@ int main(int argc, char* argv[]) {
   }
 
   shutdown.stop();
-  g_shutdown.store(nullptr, std::memory_order_release);
   logger().log(LogLevel::Info, "stopped", {});
   return EXIT_SUCCESS;
 }

@@ -3,6 +3,7 @@
 #include "gma/feed/IFeedAdapter.hpp"
 #include "gma/book/OrderBook.hpp"   // Side
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -52,6 +53,12 @@ private:
         Side        side;
         double      price;
     };
+
+    /// Hard cap on tracked orders (M4 / ENC-797). Bounds memory against a feed
+    /// that adds orders without ever deleting them; when exceeded the oldest
+    /// map bucket entry is evicted on the next add. ~1M entries keeps the map
+    /// well under ~100 MB while comfortably covering any sane live session.
+    static constexpr std::size_t kMaxTrackedOrders = 1'000'000;
     std::unordered_map<uint64_t, OrderState> orders_;
 };
 

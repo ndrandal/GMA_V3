@@ -1,0 +1,62 @@
+# .dockerignore (ENC-790 / H6)
+#
+# The Docker build context is this repo root. Without this file, host build
+# artifacts get copied into the image — most damagingly build*/CMakeCache.txt,
+# which hard-codes absolute host paths and makes the in-image `cmake` fail.
+# Keep the context to source + build inputs only; the image fetches its own
+# deps via apt (boost/rapidjson/openssl) + FetchContent (googletest).
+
+# CMake / build output (the actual H6 breakage)
+build/
+build*/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+install_manifest.txt
+compile_commands.json
+*.ninja
+.ninja_deps
+.ninja_log
+
+# Compiled artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+
+# VCS / CI / editor cruft
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+*.code-workspace
+
+# Visual Studio / MSBuild project files
+*.vcxproj
+*.vcxproj.*
+*.sln
+ALL_BUILD.*
+ZERO_CHECK.*
+
+# Vendored deps — not needed; the image installs boost/rapidjson/openssl via apt
+third_party/
+
+# Docs / specs — not build inputs
+docs/
+specs/
+*.md
+LICENSE
+
+# Local runtime / logs
+.run/
+*.log
+*.tmp

@@ -180,8 +180,10 @@ history (parameters from `Config.ta*`):
 - `ema_<n>` (e.g. `ema_12`, `ema_26`)
 - `rsi_<n>` (e.g. `rsi_14`)
 - `atr_<n>`, `momentum_<n>`, `roc_<n>`, `volume_avg_<n>`
-- `macd.line`, `macd.signal`, `macd.histogram`
-- `bb.upper`, `bb.middle`, `bb.lower`, `bb.width`
+- `macd_line`, `macd_signal`, `macd_histogram` (underscored — the engine
+  emits no dotted `macd.*` keys)
+- `bollinger_upper`, `bollinger_lower` (only these two — the engine emits
+  no `bollinger_middle`/`bollinger_width` and no `bb.*` keys)
 - `volatility_rank`
 
 All bare keys are **Listener-subscribable**.

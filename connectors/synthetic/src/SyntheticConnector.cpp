@@ -61,8 +61,11 @@ void SyntheticConnector::start() {
   auto  counter      = std::make_shared<std::uint64_t>(0);
   auto* dispatcher   = _dispatcher;
 
-  auto selfRef = std::make_shared<std::function<void(const boost::system::error_code&)>>();
-  *selfRef = [timer, streamKey, period, maxTicks, counter, dispatcher, selfRef]
+  // The connector owns the handler (_tickHandler); the lambda captures a
+  // weak_ptr to it so the handler does not keep itself alive (L4/ENC-805).
+  _tickHandler = std::make_shared<std::function<void(const boost::system::error_code&)>>();
+  std::weak_ptr<std::function<void(const boost::system::error_code&)>> weakSelf = _tickHandler;
+  *_tickHandler = [timer, streamKey, period, maxTicks, counter, dispatcher, weakSelf]
              (const boost::system::error_code& ec) {
     if (ec) return;
     if (maxTicks > 0 && *counter >= static_cast<std::uint64_t>(maxTicks)) return;
@@ -80,17 +83,22 @@ void SyntheticConnector::start() {
     ev.payload = std::move(doc);
     dispatcher->onTick(ev);
 
-    timer->expires_after(period);
-    timer->async_wait(*selfRef);
+    // Re-arm only while the connector (and thus the handler) is still alive.
+    if (auto self = weakSelf.lock()) {
+      timer->expires_after(period);
+      timer->async_wait(*self);
+    }
   };
 
   timer->expires_after(period);
-  timer->async_wait(*selfRef);
+  timer->async_wait(*_tickHandler);
 }
 
 void SyntheticConnector::stop() noexcept {
   if (!_timer) return;
   try { _timer->cancel(); } catch (...) {}
+  // Drop the recurring handler so its captured state is released promptly.
+  _tickHandler.reset();
 }
 
 } // namespace gma::synthetic

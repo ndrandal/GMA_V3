@@ -8,6 +8,7 @@
 #include <utility>
 
 #include <atomic>
+#include <chrono>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -144,6 +145,18 @@ void MarketConnector::registerWith(engine::EngineRegistries& reg) {
       snap.meta.epoch = ds.epoch;
       snap.meta.bidLevels = snap.bids.levels.size();
       snap.meta.askLevels = snap.asks.levels.size();
+      // last_change_ms: DepthSnapshot carries no per-book change timestamp, so
+      // stamp the capture instant as the best available "as-of" time. This
+      // makes ob.meta.last_change_ms a real, monotonic-ish value instead of 0.
+      snap.meta.lastChangeMs =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+              .count();
+      // is_stale: no staleness/heartbeat signal is exposed by DepthSnapshot or
+      // any OrderBookManager public query within this lane's allowlist, so it
+      // stays false. Deriving real staleness needs feed-liveness state from the
+      // order-book layer (out of allowlist) — see ENC-786 L9.
+      snap.meta.stale = false;
       return snap;
     },
     [obManager](const std::string& symbol) -> double {

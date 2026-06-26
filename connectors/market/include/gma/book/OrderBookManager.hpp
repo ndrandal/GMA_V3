@@ -8,6 +8,7 @@
 #include <optional>
 #include <list>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <sstream>
 
@@ -150,6 +151,17 @@ private:
                             const std::vector<LevelDelta>& levels,
                             std::optional<std::pair<Price,uint64_t>> newBid,
                             std::optional<std::pair<Price,uint64_t>> newAsk);
+
+    // Per-symbol serialization for the whole before/mutate/after window (M6).
+    // Spans pre-TOB read -> mutate -> post-TOB probe -> pubSeq assignment so two
+    // strands mutating the same symbol cannot interleave and corrupt the emitted
+    // LevelDelta/TOB deltas or pubSeq_ ordering. Ordering is always
+    // symbolLock_ -> OrderBook::m_ (never the reverse), so it cannot deadlock
+    // against the book's internal lock. unique_ptr keeps each mutex's address
+    // stable across map rehash (std::mutex is non-movable).
+    mutable std::mutex symbolLocksMx_;
+    std::unordered_map<std::string, std::unique_ptr<std::mutex>> symbolLocks_;
+    std::mutex& symbolLock_(const std::string& symbol);
 
     // Wrap a mutation with before/after probes and auto-publish delta
     template <typename Fn>

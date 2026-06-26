@@ -144,6 +144,13 @@ TEST(MarketFieldMapTest, CustomPriceFieldTriggersTA) {
     EXPECT_DOUBLE_EQ(std::get<double>(*vol), 1.5);
 }
 
+// ENC-807 (L19): the previous version's only assertion
+// (store.get("ETH","lastPrice").has_value()) was satisfied entirely by the
+// DEFAULT registry computer firing on "lastPrice" — it proved nothing about the
+// custom map. This rewrite drives the CUSTOM MarketTickComputer in isolation
+// (no default computer in the loop) and proves both directions: it no-ops when
+// the mapped price field is absent, and it writes when the mapped field is
+// present.
 TEST(MarketFieldMapTest, CustomFieldMapIgnoresUnmappedPayload) {
     registerBuiltinFunctions();
     rt::ThreadPool pool(1);
@@ -152,20 +159,35 @@ TEST(MarketFieldMapTest, CustomFieldMapIgnoresUnmappedPayload) {
 
     market::MarketFieldMap fm;
     fm.priceFields = {"trade_px"};
-    auto md = makeDispatcherWithFieldMap(pool, store, cfg, std::move(fm));
+    MarketTickComputer computer(cfg, std::move(fm));
 
-    // Custom field-map's price key is "trade_px"; payload only has "lastPrice".
-    // The custom computer no-ops. The default registry computer DOES fire on
-    // "lastPrice" → so we verify the *custom* computer didn't write by
-    // checking a custom-map-only side effect: with the custom map, the volume
-    // field "volume" wouldn't match (default volumeFields = "volume", "vol",
-    // "qty", "size"). Use a tick payload that only the *default* computer
-    // recognizes and confirm the default-fired result.
-    md->onTick(makeTick("ETH", {{"lastPrice", 3000.0}, {"volume", 10.0}}));
+    Dispatcher dummy(&pool, &store, cfg);
+    engine::ComputeContext ctx{&store, &dummy, &pool};
+
+    // (1) Payload lacks the mapped price field "trade_px" — the custom computer
+    // must extract no price and write NOTHING for this symbol.
+    {
+        Event ev = makeTick("ETH_ISO", {{"lastPrice", 3000.0}, {"volume", 10.0}});
+        ev.type = "tick";
+        computer.compute(ev, ctx);
+    }
+    EXPECT_FALSE(store.get("ETH_ISO", "lastPrice").has_value())
+        << "custom map (price='trade_px') must ignore an unmapped payload";
+    EXPECT_FALSE(store.get("ETH_ISO", "mean").has_value());
+
+    // (2) Same computer, now WITH the mapped field present — it must write,
+    // proving the no-op above was due to the unmapped payload, not a dead path.
+    {
+        Event ev = makeTick("ETH_ISO", {{"trade_px", 3000.0}});
+        ev.type = "tick";
+        computer.compute(ev, ctx);
+    }
     pool.shutdown();
 
-    // Default-registry computer fires on "lastPrice" — value present.
-    EXPECT_TRUE(store.get("ETH", "lastPrice").has_value());
+    auto last = store.get("ETH_ISO", "lastPrice");
+    ASSERT_TRUE(last.has_value())
+        << "custom map must fire when its mapped price field IS present";
+    EXPECT_DOUBLE_EQ(std::get<double>(*last), 3000.0);
 }
 
 TEST(MarketFieldMapTest, CustomFieldMapPriorityOrder) {

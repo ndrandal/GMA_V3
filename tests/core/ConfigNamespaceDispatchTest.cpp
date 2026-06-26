@@ -8,14 +8,19 @@
 
 #include <gtest/gtest.h>
 #include <atomic>
-#include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <string>
+#include <unistd.h>
 
 namespace {
 
+// L14/ENC-806: use mkstemp instead of the unsafe tmpnam (TOCTOU temp-file race).
 std::string writeTempIni(const std::string& body) {
-  std::string path = std::tmpnam(nullptr);
+  char tmpl[] = "/tmp/gma_enc30_XXXXXX";
+  int fd = ::mkstemp(tmpl);
+  if (fd >= 0) ::close(fd);
+  std::string path = tmpl;
   std::ofstream f(path);
   f << body;
   f.close();

@@ -166,7 +166,12 @@ double imbalanceLevels(const Snapshot& s, Range r) {
   double askQty = 0.0;
 
   const int lo = std::max(1, r.a);
-  const int hi = r.b;
+  // Clamp the upper bound to the deepest populated side so a degenerate range
+  // (e.g. ob.imbalance.levels.1-2000000000) can't spin billions of empty
+  // iterations — mirrors the clamping in rangeIdxReduce / vwapLevels.
+  const int maxDepth = static_cast<int>(
+      std::max(s.bids.levels.size(), s.asks.levels.size()));
+  const int hi = std::min(r.b, maxDepth);
 
   for (int i = lo - 1; i < hi; ++i) {
     if (i < static_cast<int>(s.bids.levels.size()))

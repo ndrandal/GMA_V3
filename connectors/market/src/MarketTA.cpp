@@ -116,6 +116,15 @@ std::vector<std::pair<std::string, ArgType>> computeAllAtomicValues(
     // whereas emaOverSeries() seeds with series[size-period] and iterates from
     // there. Both are valid EMA implementations; this one includes all history
     // while emaOverSeries() only uses the last `period` data points.
+    //
+    // L6 (ENC-804): computeAllAtomicValues is stateless — it recomputes from
+    // the symbol's retained window each tick rather than carrying a running EMA
+    // across ticks. The seed (hist[0], the oldest retained sample) is therefore
+    // deterministic for a given window, but the result is window-dependent:
+    // ema_N / macd_* are only a true carried EMA when taHistoryMax >> period.
+    // A stateful incremental EMA (ema_next) would require per-symbol carried
+    // state in MarketTickComputer and is intentionally avoided here to keep the
+    // computation stateless and MACD seeding deterministic.
     auto ema = [&](size_t period) -> double {
         if (n < period) return std::numeric_limits<double>::quiet_NaN();
         double k = 2.0 / (period + 1);
@@ -154,8 +163,17 @@ std::vector<std::pair<std::string, ArgType>> computeAllAtomicValues(
         }
         double avgGain = gain / static_cast<double>(rsiP);
         double avgLoss = loss / static_cast<double>(rsiP);
-        double rs = avgGain / (avgLoss > EPSILON ? avgLoss : EPSILON);
-        results.emplace_back("rsi_" + std::to_string(cfg.taRSI), 100.0 - (100.0 / (1.0 + rs)));
+        double rsiVal;
+        if (avgGain <= EPSILON && avgLoss <= EPSILON) {
+            // L5: a perfectly flat window has neither gains nor losses. RSI is
+            // undefined here (0/0); report the neutral midpoint 50 rather than a
+            // misleading 0 (which the old `rs = 0/EPSILON` path produced).
+            rsiVal = 50.0;
+        } else {
+            double rs = avgGain / (avgLoss > EPSILON ? avgLoss : EPSILON);
+            rsiVal = 100.0 - (100.0 / (1.0 + rs));
+        }
+        results.emplace_back("rsi_" + std::to_string(cfg.taRSI), rsiVal);
     }
 
     // MACD
@@ -166,6 +184,10 @@ std::vector<std::pair<std::string, ArgType>> computeAllAtomicValues(
         const double kFast = 2.0 / (macdFast + 1);
         const double kSlow = 2.0 / (macdSlow + 1);
 
+        // L6: deterministic, window-dependent seeding (see the ema lambda note).
+        // Both EMAs seed from hist[0] (oldest retained sample) and iterate the
+        // retained window; values converge to a true carried MACD only when the
+        // window (taHistoryMax) is much larger than macdSlow.
         double emaFastVal = hist[0].price;
         double emaSlowVal = hist[0].price;
 
@@ -345,12 +367,11 @@ void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx)
     tsNs = doc[_fieldMap.timestampField.c_str()].GetUint64();
   }
 
-  if (bid > 0.0) ctx.store->set(tick.symbol, "bid", bid);
-  if (ask > 0.0) ctx.store->set(tick.symbol, "ask", ask);
-  if (bid > 0.0 && ask > 0.0) ctx.store->set(tick.symbol, "spread", ask - bid);
-  if (tsNs > 0) ctx.store->set(tick.symbol, "timestamp", std::to_string(tsNs));
-
   // Update symbol history under lock; snapshot into contiguous vec for TA.
+  // M3: the symbol-count cap is enforced HERE, before any per-symbol atomic is
+  // written below. A brand-new symbol that exceeds _maxSymbols is dropped
+  // outright so it cannot leak bid/ask/spread/timestamp atomics into the store
+  // (which would grow AtomicStore unboundedly despite the cap).
   std::vector<TickEntry> histVec;
   {
     std::unique_lock<std::shared_mutex> lock(_histMutex);
@@ -363,6 +384,12 @@ void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx)
     if (hist.size() > _maxHistory) hist.pop_front();
     histVec.assign(hist.begin(), hist.end());
   }
+
+  // Symbol admitted — now safe to publish the base atomics.
+  if (bid > 0.0) ctx.store->set(tick.symbol, "bid", bid);
+  if (ask > 0.0) ctx.store->set(tick.symbol, "ask", ask);
+  if (bid > 0.0 && ask > 0.0) ctx.store->set(tick.symbol, "spread", ask - bid);
+  if (tsNs > 0) ctx.store->set(tick.symbol, "timestamp", std::to_string(tsNs));
 
   // Run TA suite or fall back to lightweight base metrics.
   std::vector<std::pair<std::string, ArgType>> taResults;

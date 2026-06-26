@@ -1,6 +1,13 @@
 # Writing Feed Adapters
 
-This guide covers everything needed to integrate a new data source into GMA through the feed adapter interface. By the end you'll have a working adapter, a matching `SourceProfile`, and a test suite.
+This guide covers everything needed to integrate a new data source into GMA through the feed adapter interface. By the end you'll have a working adapter, a matching `MarketFieldMap`, and a test suite.
+
+> **Paths moved (ENC-31/ENC-35).** Feed code is **connector-owned** — it lives
+> under `connectors/market/{include,src}/gma/...`, not at engine level. Field
+> mapping is `gma::market::MarketFieldMap` (there is no engine `SourceProfile`),
+> and adapters are wired through the **ingress factory + INI** model, not by
+> editing `main.cpp`. The code snippets below keep the historic `include/gma/...`
+> / `src/...` shapes for brevity, but real files go under `connectors/market/`.
 
 ## Overview
 
@@ -10,7 +17,7 @@ An adapter is a single class that implements `IFeedAdapter`. It receives raw wir
 Your data source  ──raw messages──▸  YourAdapter::translate()  ──FeedEvents──▸  GMA engine
 ```
 
-No changes to the core engine are required. No recompilation of existing code. Just a new class, a config tweak, and a one-line wiring change in `main.cpp`.
+No changes to the core engine are required. No recompilation of existing code. Just a new class, a config tweak, and an ingress factory registration + INI entry (no `main.cpp` change — see Step 6).
 
 ## Step 1: Understand your source's wire format
 
@@ -33,7 +40,7 @@ Not every source will have all of these. A price-only feed (no order book) only 
 ### Header
 
 ```cpp
-// include/gma/feed/BinanceAdapter.hpp
+// connectors/market/include/gma/feed/BinanceAdapter.hpp
 #pragma once
 #include "gma/feed/IFeedAdapter.hpp"
 #include <unordered_map>
@@ -60,7 +67,7 @@ private:
 ### Implementation
 
 ```cpp
-// src/feed/BinanceAdapter.cpp
+// connectors/market/src/feed/BinanceAdapter.cpp
 #include "gma/feed/BinanceAdapter.hpp"
 
 #include <rapidjson/document.h>
@@ -121,12 +128,12 @@ TickEvent makeTickEvent(const std::string& symbol, double price, double volume) 
 }
 ```
 
-The `TickEvent::payload` is a RapidJSON Document. MarketDispatcher extracts price and volume from it using the `SourceProfile` field aliases. The payload can contain any additional numeric fields — clients can subscribe to them by name.
+The `TickEvent::payload` is a RapidJSON Document. The `MarketTickComputer` extracts price and volume from it using the `MarketFieldMap` field aliases. The payload can contain any additional numeric fields — clients can subscribe to them by name.
 
-**Key point:** The field names in the payload must match either the `SourceProfile` aliases (for TA to fire) or the field names that clients subscribe to (for raw-field listeners). If your source calls the price field `"last_trade_price"`, you have two choices:
+**Key point:** The field names in the payload must match either the `MarketFieldMap` aliases (for TA to fire) or the field names that clients subscribe to (for raw-field listeners). If your source calls the price field `"last_trade_price"`, you have two choices:
 
-- **Option A:** Normalize it in the adapter — `AddMember("lastPrice", ...)` — and use the default `SourceProfile`
-- **Option B:** Keep the source's field name — `AddMember("last_trade_price", ...)` — and configure `SourceProfile.priceFields = {"last_trade_price"}`
+- **Option A:** Normalize it in the adapter — `AddMember("lastPrice", ...)` — and use the default `MarketFieldMap`
+- **Option B:** Keep the source's field name — `AddMember("last_trade_price", ...)` — and configure `market.source.priceFields = last_trade_price`
 
 Option A is simpler when you control the adapter. Option B is better when you want the adapter to be a transparent pass-through.
 
@@ -245,43 +252,49 @@ uint64_t syntheticId = std::hash<double>{}(price) ^ std::hash<std::string>{}(sym
 
 Or use `OrderBookManager::onLevelSummary()` via an `ObAddEvent` with a well-known ID scheme. The key constraint is that `orderId` must be consistent across updates — the same price level must always use the same ID.
 
-## Step 5: Configure the SourceProfile
+## Step 5: Configure the MarketFieldMap
 
-If your adapter normalizes field names in the `TickEvent` payload to match the defaults (`lastPrice`, `volume`), you're done — the default `SourceProfile` works.
+If your adapter normalizes field names in the `TickEvent` payload to match the defaults (`lastPrice`, `volume`), you're done — the default `MarketFieldMap` works.
 
-If your adapter passes through the source's native field names, configure the profile in the config file:
+If your adapter passes through the source's native field names, configure the field map in the config file under the `market.source.*` namespace (the bare `source.*` prefix is a one-release deprecation alias):
 
 ```ini
 # For a crypto feed that sends "p" for price and "q" for quantity
-source.name = binance
-source.priceFields = p,price,lastPrice
-source.volumeFields = q,volume,qty
+market.source.name = binance
+market.source.priceFields = p,price,lastPrice
+market.source.volumeFields = q,volume,qty
 ```
 
-Or set it programmatically before constructing `MarketDispatcher`:
-
-```cpp
-cfg.sourceProfile.name = "binance";
-cfg.sourceProfile.priceFields = {"p", "price", "lastPrice"};
-cfg.sourceProfile.volumeFields = {"q", "volume", "qty"};
-```
+These keys are routed by `ConfigNamespaceRegistry` into the connector-owned
+`MarketFieldMap` during `dispatchPendingKeys()` (after each connector's
+`registerWith`). There is no programmatic `Config` member to set — the mapping
+lives in the market connector, not the engine `Config`.
 
 The field lists are tried in order. Put your source's primary field name first, then add fallbacks for flexibility.
 
-## Step 6: Wire it into main.cpp
+## Step 6: Wire it via the ingress factory + INI
 
-```cpp
-#include "gma/feed/BinanceAdapter.hpp"
+Adapters are **not** wired in `main.cpp` (ENC-31). The `market.wsclient` ingress
+factory in `connectors/market/src/MarketConnector.cpp` constructs a
+`WsFeedClient` and selects the adapter by the `ingress.N.adapter` key. To add a
+new adapter:
 
-// In the feed client setup section:
-auto adapter = std::make_unique<gma::feed::BinanceAdapter>();
-feedClient = std::make_shared<gma::ws::WsFeedClient>(
-    ioc, dispatcher.get(), obManager.get(),
-    feedUrl, std::move(adapter), cfg.feedSymbols);
-feedClient->start();
+1. Teach the `market.wsclient` factory to build your adapter when
+   `params["adapter"] == "binance"` (the factory already owns the
+   `WsFeedClient` + `OrderBookManager` wiring).
+2. Add an INI entry — no recompilation of the composition root:
+
+```ini
+ingress.0.kind    = market.wsclient
+ingress.0.url     = wss://stream.binance.com:9443/ws
+ingress.0.adapter = binance
+ingress.0.symbols = BTCUSDT,ETHUSDT
 ```
 
-The adapter is moved into `WsFeedClient` via `unique_ptr` — the client owns its lifetime.
+The composition root reads `cfg.ingress[]`, resolves each `kind` through
+`IngressRegistry`, and drives the ingress source's `start()`/`stop()` centrally.
+The adapter is owned (via `unique_ptr`) by the `WsFeedClient` the factory
+constructs.
 
 ## Step 7: Write tests
 
@@ -346,14 +359,14 @@ Before shipping a new adapter:
 - [ ] Trades emit both `ObTradeEvent` and `TickEvent` (so both the book and TA update)
 - [ ] `ObTickSizeEvent` is emitted before any order events for a symbol
 - [ ] Stateful protocol logic (order tracking, sequence gaps) is tested with multi-message sequences
-- [ ] `SourceProfile` is configured if field names differ from defaults
+- [ ] `MarketFieldMap` is configured (via `market.source.*`) if field names differ from defaults
 - [ ] Tests exist for happy path, error cases, and stateful lifecycle
 - [ ] The adapter compiles and all tests pass: `ctest --output-on-failure`
 
 ## Reference: IFeedAdapter interface
 
 ```cpp
-// include/gma/feed/IFeedAdapter.hpp
+// connectors/market/include/gma/feed/IFeedAdapter.hpp
 namespace gma::feed {
 
 class IFeedAdapter {
@@ -371,7 +384,7 @@ public:
 ## Reference: FeedEvent types
 
 ```cpp
-// include/gma/feed/FeedEvent.hpp
+// connectors/market/include/gma/feed/FeedEvent.hpp
 namespace gma::feed {
 
 struct TickEvent        { string symbol; shared_ptr<rapidjson::Document> payload; uint64_t timestampNs=0; };
@@ -391,4 +404,4 @@ using FeedEvent = variant<TickEvent, ObAddEvent, ObUpdateEvent, ObDeleteEvent,
 
 | Adapter | Source | Stateful | File |
 |---------|--------|----------|------|
-| `ItchAdapter` | NASDAQ ITCH JSON | Yes (order tracking, symbol mapping) | `src/feed/ItchAdapter.cpp` |
+| `ItchAdapter` | NASDAQ ITCH JSON | Yes (order tracking, symbol mapping) | `connectors/market/src/feed/ItchAdapter.cpp` |

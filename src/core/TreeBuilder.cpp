@@ -311,10 +311,13 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   if (!headRes) {
     // Propagate the ENC-101 reject (and any future Listener::Create
     // pre-flight errors) up through ClientSession's
-    // try { TreeBuilder } catch (std::exception&) {
-    //   sendError("validate", ex.what());
-    // } chain at src/server/ClientSession.cpp:456 — which produces a
-    // {"type":"error","where":"validate","message":...} WS response.
+    // try { buildForRequest(...) } catch (std::exception&) {
+    //   sendError("build", ex.what());
+    // } chain (the catch wrapping the buildForRequest call in
+    // ClientSession::handleSubscribe) — which produces a
+    // {"type":"error","where":"build","message":...} WS response.
+    // (The separate "validate" catch only wraps JsonValidator::validateTree
+    // on the pipeline/stages/node sub-trees, not this build step.)
     throw std::runtime_error(headRes.error().message);
   }
   auto head = std::move(headRes.value());

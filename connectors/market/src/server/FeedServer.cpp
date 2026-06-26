@@ -2,6 +2,7 @@
 
 #include <boost/asio/strand.hpp>
 #include <boost/asio/buffer.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/beast/core.hpp>
 
@@ -36,6 +37,15 @@ public:
   {}
 
   void start() { resetIdleTimer(); doRead(); }
+
+  // M5: close() touches the (non-thread-safe) socket_ + idleTimer_, which are
+  // only safe to touch from this session's strand. Callers running off-strand
+  // (e.g. FeedServer::stop on the caller's thread) must route through here so
+  // the work is posted to the strand with a live shared_ptr held across it.
+  void closeOnStrand() {
+    auto self = shared_from_this();
+    boost::asio::post(socket_.get_executor(), [self]{ self->close(); });
+  }
 
   void close() {
     boost::system::error_code ec;
@@ -211,6 +221,18 @@ private:
       return;
     }
 
+    // M7: per-message gap detection. If the producer stamps a monotonic "seq",
+    // gate this message through OrderBookManager::onSeq before applying it; a
+    // detected gap marks the symbol stale (subsequent messages are auto-gated
+    // until a snapshot resyncs). Conservative: producers that send no "seq"
+    // field are unaffected (no behavior change).
+    if (doc.HasMember("seq") && doc["seq"].IsUint64()) {
+      if (!obManager_->onSeq(symbol, doc["seq"].GetUint64())) {
+        GMA_METRIC_HIT("feed.ob_seq_gap");
+        return;
+      }
+    }
+
     if (action == "ticksize") {
       if (!doc.HasMember("tickSize") || !doc["tickSize"].IsNumber()) {
         GMA_METRIC_HIT("feed.ob_bad");
@@ -344,9 +366,9 @@ FeedServer::FeedServer(boost::asio::io_context& ioc,
                        unsigned short port)
   : ioc_(ioc),
     acceptor_(ioc),
+    port_(port),
     dispatcher_(dispatcher),
-    obManager_(obManager),
-    port_(port)
+    obManager_(obManager)
 {
   // Constructor is intentionally side-effect-free — no bind, no listen.
   // run() opens the socket so callers can construct ahead of start (per
@@ -388,7 +410,7 @@ void FeedServer::stop() {
     sessions_.clear();
   }
   for (auto& s : copy) {
-    s->close();
+    s->closeOnStrand();
   }
 }
 

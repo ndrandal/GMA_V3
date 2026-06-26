@@ -22,7 +22,13 @@ TEST(IntervalTest, PeriodicInvocation) {
     auto stub = std::make_shared<IStubNode>();
     auto interval = std::make_shared<Interval>(10ms, stub, &pool);
     interval->start();
-    std::this_thread::sleep_for(55ms);
+    // L18: poll-with-timeout for the expected count instead of asserting after
+    // a single fixed sleep. A 10ms interval reaches 3 fires in ~30ms; the
+    // generous 2s ceiling makes this robust under load without ever sleeping
+    // longer than necessary on a fast machine.
+    auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (stub->count.load() < 3 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(2ms);
     int cnt = stub->count.load();
     EXPECT_GE(cnt, 3) << "Expected at least 3 invocations, got " << cnt;
     interval->shutdown();
@@ -62,7 +68,12 @@ TEST(IntervalTest, MultipleIntervalsIndependently) {
     auto i2 = std::make_shared<Interval>(20ms, stub2, &pool);
     i1->start();
     i2->start();
-    std::this_thread::sleep_for(80ms);
+    // L18: poll-with-timeout for both expected counts rather than a single
+    // fixed sleep (10ms/20ms intervals reach 3/2 fires in ~40ms; 2s ceiling).
+    auto deadline = std::chrono::steady_clock::now() + 2s;
+    while ((stub1->count.load() < 3 || stub2->count.load() < 2) &&
+           std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(2ms);
     EXPECT_GE(stub1->count.load(), 3) << "i1 should fire more frequently";
     EXPECT_GE(stub2->count.load(), 2) << "i2 should fire at least twice";
     i1->shutdown();

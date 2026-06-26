@@ -29,6 +29,9 @@ struct ObAddEvent {
     double      price;
     uint64_t    size;
     uint64_t    priority = 0;
+    // Optional per-message wire sequence for gap detection (OrderBookManager
+    // ::onSeq). Empty when the source carries no sequence — no behavior change.
+    std::optional<uint64_t> seq;
 };
 
 /// Update an existing order (price and/or size).
@@ -37,12 +40,14 @@ struct ObUpdateEvent {
     uint64_t                 orderId;
     std::optional<double>    newPrice;
     std::optional<uint64_t>  newSize;
+    std::optional<uint64_t>  seq;   // optional per-message sequence (gap detect)
 };
 
 /// Delete an order from the book.
 struct ObDeleteEvent {
     std::string symbol;
     uint64_t    orderId;
+    std::optional<uint64_t> seq;   // optional per-message sequence (gap detect)
 };
 
 /// A trade executed on the venue.
@@ -52,6 +57,12 @@ struct ObTradeEvent {
     uint64_t    size;
     Aggressor   aggressor = Aggressor::Unknown;
     uint64_t    timestampNs = 0;   // nanoseconds since epoch (0 = not provided)
+    // Print-only flag: when true this trade is a TA/print signal ONLY and must
+    // NOT consume resting liquidity. Executions already mutate the book via an
+    // explicit add/update/delete, and ITCH `trade` prints are non-displayable
+    // hidden executions — in both cases consuming the book would double-count.
+    bool        bookNeutral = false;
+    std::optional<uint64_t> seq;   // optional per-message sequence (gap detect)
 };
 
 /// Set the tick size for a symbol.
