@@ -53,7 +53,7 @@ ClientSession::ClientSession(tcp::socket socket,
   , exec_(exec)
   , dispatcher_(dispatcher)
 , ws_(std::move(socket))
-, strand_(static_cast<boost::asio::io_context&>(ws_.get_executor().context()).get_executor())
+, strand_(ws_.get_executor())
 {}
 
 void ClientSession::run() {
@@ -155,12 +155,23 @@ void ClientSession::close() {
     // idempotent
     if (!self->open_.exchange(false)) return;
 
-    // Best-effort shutdown of active requests/trees
+    // Best-effort shutdown of active requests/trees. Shut down EVERY node in
+    // each pipeline (head shutdown() does not propagate down the chain), or
+    // mid-pipeline timer nodes (Interval/TumblingWindow/BucketTime) leak their
+    // timer threads forever. Head shutdown() is idempotent, so re-running it
+    // here when the head also appears in its keepAlive chain is harmless.
     {
       std::lock_guard<std::mutex> lk(self->reqMu_);
       for (auto& kv : self->active_) {
         if (kv.second) {
           try { kv.second->shutdown(); } catch (...) {}
+        }
+      }
+      for (auto& kv : self->chains_) {
+        for (auto& node : kv.second) {
+          if (node) {
+            try { node->shutdown(); } catch (...) {}
+          }
         }
       }
       self->active_.clear();
@@ -486,10 +497,20 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
 
       {
         std::lock_guard<std::mutex> lk(reqMu_);
-        // Replace any existing request with the same key.
+        // Replace any existing request with the same key. Shut down the old
+        // head AND every node in its keepAlive chain before discarding it —
+        // otherwise a replaced mid-pipeline timer node leaks its timer thread.
         auto it = active_.find(key);
         if (it != active_.end() && it->second) {
           it->second->shutdown();
+        }
+        auto cit = chains_.find(key);
+        if (cit != chains_.end()) {
+          for (auto& node : cit->second) {
+            if (node) {
+              try { node->shutdown(); } catch (...) {}
+            }
+          }
         }
         active_[key] = built.head;
         chains_[key] = std::move(built.keepAlive);
@@ -562,6 +583,7 @@ void ClientSession::handleCancel(const ::rapidjson::Document& doc) {
 
   for (auto& key : toCancel) {
     std::shared_ptr<gma::INode> root;
+    std::vector<std::shared_ptr<gma::INode>> chainVec;
     {
       std::lock_guard<std::mutex> lk(reqMu_);
       auto it = active_.find(key);
@@ -569,10 +591,22 @@ void ClientSession::handleCancel(const ::rapidjson::Document& doc) {
         root = std::move(it->second);
         active_.erase(it);
       }
-      chains_.erase(key);
+      auto cit = chains_.find(key);
+      if (cit != chains_.end()) {
+        chainVec = std::move(cit->second);
+        chains_.erase(cit);
+      }
     }
 
+    // Shut down the head AND every node in the keepAlive chain (outside the
+    // lock) — head shutdown() does not propagate down a linear pipeline, so
+    // without this mid-pipeline timer nodes leak their timer threads.
     if (root) root->shutdown();
+    for (auto& node : chainVec) {
+      if (node) {
+        try { node->shutdown(); } catch (...) {}
+      }
+    }
 
     ::rapidjson::StringBuffer sb;
     ::rapidjson::Writer<::rapidjson::StringBuffer> w(sb);

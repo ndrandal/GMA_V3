@@ -63,7 +63,11 @@ private:
   Dispatcher* dispatcher_{nullptr};
 
   Ws ws_;
-  boost::asio::strand<boost::asio::io_context::executor_type> strand_;
+  // Serialize all async stream ops on the stream's OWN executor (the
+  // per-connection strand the socket was accepted on). Beast's keep-alive
+  // ping / idle-timeout timers also run on this executor, so binding our
+  // reads/writes to it keeps control frames and user writes on one strand.
+  Ws::executor_type strand_;
   boost::beast::flat_buffer buffer_;
 
   std::atomic<bool> open_{false};
