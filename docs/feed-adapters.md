@@ -20,9 +20,15 @@ External Feed (WebSocket/TCP)
           │ vector<FeedEvent>
           ▼
    ┌──────────────────┐
-   │  dispatchEvent()  │  ← routes events to MarketDispatcher + OrderBookManager
+   │  dispatchEvent()  │  ← routes events to the engine `Dispatcher` + `OrderBookManager`
    └──────────────────┘
 ```
+
+> **Paths moved (ENC-31/ENC-35).** Feed code is **connector-owned**: it lives
+> under `connectors/market/{include,src}/gma/...`, not at engine level. There is
+> **no `MarketDispatcher`** — `WsFeedClient::dispatchEvent` writes order-book
+> events into `OrderBookManager` and tick events into the engine `Dispatcher`
+> (`Dispatcher::onTick`), which runs the `MarketTickComputer`.
 
 `WsFeedClient` handles connection management. The adapter handles protocol logic. Neither knows about the other's internals.
 
@@ -40,14 +46,17 @@ Every adapter produces a sequence of these canonical events per raw message:
 | `ObTickSizeEvent` | Set tick size for a symbol | `symbol`, `tickSize` |
 | `ObResetEvent` | Reset/new epoch for a symbol's book | `symbol`, `epoch` |
 
-Defined in `include/gma/feed/FeedEvent.hpp`.
+Defined in `connectors/market/include/gma/feed/FeedEvent.hpp`.
 
-## Source Profiles
+## Field mapping (`MarketFieldMap`)
 
-`SourceProfile` (in `include/gma/SourceProfile.hpp`) configures how `MarketDispatcher` extracts price and volume from tick payloads. Each field list is tried in order; the first match wins.
+`gma::market::MarketFieldMap` (in
+`connectors/market/include/gma/market/MarketFieldMap.hpp`) configures how the
+`MarketTickComputer` extracts price/volume/bid/ask/timestamp from tick payloads.
+Each field list is tried in order; the first match wins.
 
 ```cpp
-struct SourceProfile {
+struct MarketFieldMap {
     std::string name = "default";
     std::vector<std::string> priceFields  = {"lastPrice", "price", "last", "px"};
     std::vector<std::string> volumeFields = {"volume", "vol", "qty", "size"};
@@ -58,16 +67,21 @@ struct SourceProfile {
 };
 ```
 
-Set via the `sourceProfile` member in `Config`. The defaults match NASDAQ-style feeds and are backward compatible.
+> **ENC-35:** this replaced the old engine-level `gma::SourceProfile` /
+> `Config::sourceProfile` member. The engine no longer knows about
+> market-flavored fields — the market connector owns the struct and populates it
+> from the `market.source.*` config namespace through `ConfigNamespaceRegistry`.
 
 ### Example: Coinbase
 
-A Coinbase feed sends `"price"` and `"last_size"` instead of `"lastPrice"` and `"volume"`:
+A Coinbase feed sends `"price"` and `"last_size"` instead of `"lastPrice"` and
+`"volume"`. Configure it under the `market.source.*` namespace (the bare
+`source.*` prefix still works as a one-release deprecation alias):
 
 ```ini
-source.name = coinbase
-source.priceFields = price
-source.volumeFields = last_size,size
+market.source.name = coinbase
+market.source.priceFields = price
+market.source.volumeFields = last_size,size
 ```
 
 No code changes required — just config.
@@ -77,7 +91,7 @@ No code changes required — just config.
 Implement `IFeedAdapter::translate()`:
 
 ```cpp
-// include/gma/feed/CoinbaseAdapter.hpp
+// connectors/market/include/gma/feed/CoinbaseAdapter.hpp
 #pragma once
 #include "gma/feed/IFeedAdapter.hpp"
 
@@ -94,7 +108,7 @@ private:
 ```
 
 ```cpp
-// src/feed/CoinbaseAdapter.cpp
+// connectors/market/src/feed/CoinbaseAdapter.cpp
 #include "gma/feed/CoinbaseAdapter.hpp"
 #include <rapidjson/document.h>
 
@@ -132,14 +146,22 @@ std::vector<FeedEvent> CoinbaseAdapter::translate(const std::string& rawMessage)
 } // namespace gma::feed
 ```
 
-Wire it up in `main.cpp`:
+Wire it up **via the ingress factory + INI** (ENC-31) — *not* by editing
+`main.cpp`. The `market.wsclient` factory in
+`connectors/market/src/MarketConnector.cpp` constructs a `WsFeedClient` with the
+adapter named by the `ingress.N.adapter` key, so adding a `coinbase` adapter
+means teaching that factory the new adapter name and adding an INI entry:
 
-```cpp
-auto adapter = std::make_unique<gma::feed::CoinbaseAdapter>();
-feedClient = std::make_shared<gma::ws::WsFeedClient>(
-    ioc, dispatcher.get(), obManager.get(),
-    feedUrl, std::move(adapter), cfg.feedSymbols);
+```ini
+ingress.0.kind    = market.wsclient
+ingress.0.url     = wss://ws-feed.exchange.coinbase.com
+ingress.0.adapter = coinbase
+ingress.0.symbols = BTC-USD,ETH-USD
 ```
+
+The composition root reads `cfg.ingress[]`, looks the `kind` up in
+`IngressRegistry`, and drives the ingress source's lifecycle centrally. There is
+no hand-wired `WsFeedClient` construction in `main.cpp`.
 
 ## Existing Adapters
 
@@ -172,16 +194,16 @@ This is GMA's own protocol — it's already source-agnostic. External vendor fee
 
 | File | Purpose |
 |------|---------|
-| `include/gma/feed/IFeedAdapter.hpp` | Adapter interface |
-| `include/gma/feed/FeedEvent.hpp` | Canonical event types |
-| `include/gma/feed/ItchAdapter.hpp` | ITCH adapter header |
-| `src/feed/ItchAdapter.cpp` | ITCH adapter implementation |
-| `include/gma/SourceProfile.hpp` | Configurable field mapping |
-| `include/gma/ws/WsFeedClient.hpp` | WebSocket transport (adapter-agnostic) |
-| `src/ws/WsFeedClient.cpp` | Transport implementation + event dispatch |
-| `tests/feed/ItchAdapterTest.cpp` | ITCH adapter unit tests (21 tests) |
-| `tests/feed/SourceProfileTest.cpp` | SourceProfile + MarketDispatcher field mapping tests (10 tests) |
-| `tests/feed/FeedEventDispatchTest.cpp` | FeedEvent variant type tests (13 tests) |
+| `connectors/market/include/gma/feed/IFeedAdapter.hpp` | Adapter interface |
+| `connectors/market/include/gma/feed/FeedEvent.hpp` | Canonical event types |
+| `connectors/market/include/gma/feed/ItchAdapter.hpp` | ITCH adapter header |
+| `connectors/market/src/feed/ItchAdapter.cpp` | ITCH adapter implementation |
+| `connectors/market/include/gma/market/MarketFieldMap.hpp` | Configurable field mapping (replaces `SourceProfile`) |
+| `connectors/market/include/gma/ws/WsFeedClient.hpp` | WebSocket transport (adapter-agnostic) |
+| `connectors/market/src/ws/WsFeedClient.cpp` | Transport implementation + event dispatch |
+| `tests/feed/ItchAdapterTest.cpp` | ITCH adapter unit tests |
+| `tests/connectors/MarketFieldMapTest.cpp` | `MarketFieldMap` field-mapping tests |
+| `tests/feed/FeedEventDispatchTest.cpp` | FeedEvent variant type tests |
 
 ## Testing
 
@@ -202,9 +224,9 @@ Exercises every ITCH message type through `ItchAdapter::translate()`:
 - **Invalid input** — malformed JSON, missing type field, unknown type
 - **Full lifecycle** — stateful test: directory → add → partial fill → partial cancel → replace → full fill → verify cleanup
 
-### SourceProfileTest (10 tests)
+### MarketFieldMapTest (`tests/connectors/MarketFieldMapTest.cpp`)
 
-Verifies that MarketDispatcher respects `SourceProfile` field mappings:
+Verifies that the `MarketTickComputer` respects `MarketFieldMap` field mappings:
 
 - **Default profile** — `lastPrice` triggers TA, `price` fallback works
 - **Custom profile** — non-standard field names (e.g., `last_trade_price`, `last_trade_volume`) trigger TA correctly
@@ -233,7 +255,7 @@ Validates the `FeedEvent` variant types:
 cd build && ctest --output-on-failure
 
 # Just feed adapter tests
-./gma_tests --gtest_filter="ItchAdapter*:SourceProfile*:FeedEvent*"
+./gma_tests --gtest_filter="ItchAdapter*:MarketFieldMap*:FeedEvent*"
 
 # Just one suite
 ./gma_tests --gtest_filter="ItchAdapterTest.*"

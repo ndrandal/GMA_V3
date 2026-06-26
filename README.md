@@ -1,176 +1,215 @@
 # GMA_V3
 
-**Version:** 3.0  
-**Author:** Nicholas Randall  
+**Version:** 3.0
+**Author:** Nicholas Randall
 **License:** Proprietary (All rights reserved) – see [LICENSE](./LICENSE)
 
 ---
 
 ## Overview
 
-**GMA_V3** is a high-performance C++20 library and accompanying WebSocket server designed for real-time, atomic market‐analysis computations. By accepting JSON‐encoded request trees, it executes nested statistical and technical‐indicator operations asynchronously and streams results back to clients with minimal latency.
+**GMA_V3** is a high-performance **C++20** WebSocket server and library for
+real-time, atomic market-analysis computations over streaming data. Clients
+connect over WebSocket, submit JSON-encoded **request trees**, and the node
+pipeline runs nested statistical / technical-indicator math on the live feed,
+pushing results back as values change.
 
-Key highlights:
-
-- **Atomic Computation Model**: Each operation (e.g., `mean`, `RSI`, `VWAP`) is encapsulated as an independent node, enabling fine-grained pipelining and reuse.  
-- **Composable Request Trees**: Clients compose arbitrary nested trees of operations, allowing expressions such as "EMA of a 5‐period SMA" or "volatility rank of last 20 closes."  
-- **Lock-Free Data Structures**: Internally uses ring buffers and wait-free queues to minimize contention under heavy load.  
-- **Configurable Threading**: A dynamic thread pool balances throughput and resource usage, adapting to server load.  
-- **WebSocket Interface**: Zero-configuration startup; clients connect over WS, send requests, and subscribe to continuous updates.
-
----
-
-## Design Principles
-
-1. **Separation of Concerns**  
-   - _Core Engine vs. Transport_: The computation engine (tree builder, execution context, function map) is decoupled from the WebSocket transport. This clear boundary ensures maintainability and allows swapping in alternative transports (e.g., REST or gRPC) in the future.
-
-2. **Single Responsibility**  
-   - _Modular Nodes_: Each statistical or mathematical function is implemented in its own `Node` class. This adheres to the SRP from SOLID, making unit testing, extension, and replacement straightforward.
-
-3. **Open/Closed Extensibility**  
-   - _Pluggable FunctionMap_: New atomic functions can be registered at runtime without modifying existing code, thanks to a registry‐based design. This encourages plugin-style extensions for custom analytics.
-
-4. **Performance-Driven Architecture**  
-   - _Lock-Free Buffers_: History and dispatch queues leverage ring buffers to avoid blocking in hot code paths, ensuring sub‐microsecond enqueuing and dequeuing under contention.  
-   - _Cache Locality_: Data structures are laid out to optimize CPU cache usage, minimizing pointer chasing during deep tree evaluation.
-
-5. **Asynchronous & Reactive**  
-   - _Event‐Driven Dispatch_: The engine reacts to incoming data updates, propagating changes through the computation graph and notifying clients only on actual value changes. This push model conserves CPU and network bandwidth.
-
-6. **Configurability & Observability**  
-   - _Runtime Settings_: Buffer sizes, thread counts, and log levels are all tunable via a single `Config.hpp`.  
-   - _Structured Logging_: Built‐in logger supports hierarchical contexts and can integrate with external tracing systems for end‐to‐end observability.
-
-7. **Robust JSON Validation**  
-   - _Schema Enforcement_: Input requests are validated against a strict JSON schema, preventing malformed or malicious payloads from entering the core engine.
-
-8. **Test-First Reliability**  
-   - _Comprehensive GTest Suite_: Every module—from node implementations to dispatcher logic—is covered by unit tests. Integration tests simulate full request‐response cycles to guard against regressions.
-
----
-
-## Repository Structure
+The codebase is split into a **domain-agnostic core engine** plus **pluggable
+connectors**. The engine knows nothing about markets; the market connector
+contributes order-book and technical-analysis capabilities. Adding a new data
+source (crypto, FIX, sensor feed, …) means writing a new connector — no engine
+changes.
 
 ```
-├── CMakeLists.txt          # Root build configuration
-├── LICENSE                 # Proprietary, all-rights-reserved licence
-├── .gitignore              # Ignored files and directories
-├── include/                # Public headers (API)  
-│   └── gma/                # Namespace folder
-│       ├── AtomicFunctions.hpp
-│       ├── AtomicStore.hpp
-│       ├── Config.hpp
-│       ├── ExecutionContext.hpp
-│       ├── FunctionMap.hpp
-│       ├── JsonValidator.hpp
-│       ├── Logger.hpp
-│       ├── MarketDispatcher.hpp
-│       ├── RequestRegistry.hpp
-│       └── server/         # WebSocket server API headers
-│           ├── WebSocketServer.hpp
-│           └── ClientSession.hpp
-├── src/                    # Implementation details  
-│   ├── core/               # Engine components
-│   ├── nodes/              # Specific function node logic
-│   ├── server/             # Transport layer (WebSocket)
-│   └── main.cpp            # Server entry point
-└── tests/                  # GTest test suites (requires BUILD_TESTS=ON)
-    ├── core/               # Core engine tests
-    ├── nodes/              # Node behavior tests
-    ├── integration/        # End-to-end scenarios
-    └── ...
+  data feed ──▶ ingress (FeedServer / WsFeedClient + adapter)
+                     │  Event{ streamKey, payload, type="tick" }
+                     ▼
+              Dispatcher ──▶ MarketTickComputer ──▶ AtomicStore / OrderBook
+                     │
+                     ▼
+   WS clients ──▶ ClientSession ──▶ TreeBuilder ──▶ node pipeline ──▶ Responder ──▶ WS
+```
+
+> For the deeper picture (event lifecycle, connector contract, registries, how
+> to add a connector), read **[CLAUDE.md](./CLAUDE.md)** and
+> **[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)** — those are the
+> authoritative references; this README is the quick start.
+
+Key properties:
+
+- **Atomic computation model** — each operation (`mean`, `rsi_14`, `sma_5`, an
+  `AtomicAccessor` on an `ob.*` key, …) is an independent node, enabling
+  fine-grained pipelining and reuse.
+- **Composable request trees** — clients compose nested pipelines of nodes
+  (Listener → Worker/Aggregate/AtomicAccessor → Responder).
+- **Engine / connector split** — `libgma_engine` is source-agnostic;
+  `libgma_connector_market` adds OB + TA + feed adapters. CMake include-scoping
+  enforces that the engine never depends on connector headers.
+- **WebSocket interface** — clients connect, subscribe, and receive continuous
+  value updates.
+
+---
+
+## Repository structure
+
+```
+├── CMakeLists.txt              # Root build (engine + connectors + server + tests)
+├── LICENSE                     # Proprietary, all-rights-reserved licence
+├── include/gma/                # Engine public headers (libgma_engine)
+│   ├── engine/                 # IConnector, EngineRegistries, registries
+│   ├── nodes/                  # INode, Listener, Worker, Aggregate, Interval, ...
+│   ├── server/                 # WebSocketServer, ClientSession, RequestKey
+│   ├── ws/                     # WsBridge, WSResponder
+│   ├── rt/                     # ThreadPool, SPSCQueue
+│   ├── runtime/                # ShutdownCoordinator
+│   ├── util/                   # Config, Logger, Metrics
+│   ├── Dispatcher.hpp  Event.hpp  AtomicStore.hpp  FunctionMap.hpp  TreeBuilder.hpp
+│   └── ...
+├── src/                        # Engine implementations (mirrors include/)
+│   ├── core/                   # Dispatcher, TreeBuilder, Expr, builtins
+│   ├── nodes/  server/  ws/  rt/  util/
+│   ├── util/gma.conf           # Example INI runtime config
+│   └── main.cpp                # Composition root — boots engine, registers connectors
+├── connectors/
+│   ├── market/                 # libgma_connector_market (OB, TA, ITCH, FeedServer, WsFeedClient)
+│   │   ├── include/gma/        # market/, book/, ob/, ta/, feed/, ws/, server/
+│   │   └── src/
+│   └── synthetic/              # demo connector (linked into tests only)
+├── tests/                      # GoogleTest suites (one gma_tests binary)
+└── docs/                       # ARCHITECTURE.md, atomic-keys.md, feed-adapters.md, ...
 ```
 
 ---
 
-## Prerequisites & Dependencies
+## Prerequisites
 
-- **CMake ≥ 3.15**  
-- **C++20‐compatible compiler** (GCC 10+, Clang 12+, MSVC 2019+)  
-- **Boost.Asio** (header-only or compiled)  
-- **GoogleTest** (optional; for tests)  
+- **CMake ≥ 3.20**
+- **C++20 compiler** (GCC 12+, Clang 14+ — clang++ is preferred by `tools/compile.sh`)
+- **Boost.Asio / Beast** — networking + WebSocket
+- **RapidJSON** — JSON parsing
+- **GoogleTest** (only when `GMA_BUILD_TESTS=ON`)
 - **Python 3** (utility scripts)
 
-Dependencies can be installed via OS package managers or built from source. The `THIRD_PARTY_DIR` CMake variable lets you specify custom library locations.
+Third-party deps are vendored under `third_party/` (override with
+`-DTHIRD_PARTY_ROOT=...`).
 
 ---
 
-## Build & Installation
+## Build
 
 ```bash
-# Clone and enter
-git clone https://github.com/yourusername/GMA_V3.git
-cd GMA_V3
+# Release
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
 
-# Create build directory
-mkdir build && cd build
+# Debug + tests
+cmake -B build -DCMAKE_BUILD_TYPE=Debug -DGMA_BUILD_TESTS=ON
+cmake --build build -j$(nproc)
 
-# Configure (Release + Tests)
-cmake ..   -DCMAKE_BUILD_TYPE=Release   -DBoost_DIR=/path/to/boost   -DBUILD_TESTS=ON
-
-# Build
-cmake --build . -- -j$(nproc)
+# Or use the helper (prefers clang++)
+./tools/compile.sh
 ```
 
-Artifacts:
-- `gma-server` (WebSocket server)
-- Test binaries under `tests/`
+CMake targets: `libgma_engine.a`, `libgma_connector_market.a`,
+`libgma_connector_synthetic.a`, the **`gma_server`** binary, and `gma_tests`.
 
 ---
 
-## Usage Example
+## Run
 
 ```bash
-# Start server (defaults to port 9002)
-./gma-server
+# Compiled defaults: wsPort=8080, feedPort=9001 (no config file loaded)
+./build/gma_server
+
+# argv[1]=wsPort, argv[2]=configFile, argv[3]=feedPort (argv wins over the file)
+./build/gma_server 9002
+./build/gma_server 9002 gma.conf        # load the example INI (it sets wsPort=4000,
+                                        #   but argv[1]=9002 overrides it)
+./build/gma_server 9002 gma.conf 9005   # also override feedPort
 ```
 
-Client JSON sample:
+> **Port note:** the **compiled-in** default `wsPort` is **8080**
+> (`include/gma/util/Config.hpp`). The shipped `src/util/gma.conf` *overrides*
+> it to **4000**, so the port you get depends on whether you pass that file.
 
-```json
-{
-  "clientId": "trader-42",
-  "requests": [
-    {
-      "seriesId": "AAPL",
-      "operations": [
-        { "type": "lastPrice" },
-        { "type": "mean", "period": 10 }
-      ]
-    }
-  ]
-}
-```
+### Configuration
 
-Server pushes updates whenever computed values change, supporting thousands of concurrent streams with minimal overhead.
+Runtime config is an **INI `key=value` file** (see `src/util/gma.conf`) parsed by
+`src/util/Config.cpp` — there is no compile-time config struct to edit. Keys
+include `wsPort`, `feedPort`, `threadPoolSize`, `logLevel`,
+`metricsEnabled`/`metricsIntervalSec`, the TA periods
+(`taSMA`, `taEMA`, `taRSI`, `taATR`, `taMomentum`, `taVolAvg`, `taMACD_*`,
+`taBBands_*`), memory bounds (`taHistoryMax`, `maxSymbols`,
+`maxFieldsPerSymbol`), `allowNegativePrices`, the `ingress.N.*` ingress entries,
+and the `market.source.*` field-map namespace. See **[CLAUDE.md](./CLAUDE.md) →
+Configuration** for the full table (including compiled-default vs `gma.conf`
+values) and **[docs/feed-adapters.md](./docs/feed-adapters.md)** for the source
+field map.
 
 ---
 
-## Configuration
+## WebSocket protocol
 
-Modify `include/gma/Config.hpp` to tune:
+Clients send a `subscribe` message whose `requests` array each carries a
+**`streamKey`** (string, required — there is **no `symbol` alias**, ENC-50), a
+**`field`** to trigger on, a per-request id (`key` int **or** `id` int|string,
+not both), and an optional `pipeline`/`node` sub-tree.
 
-```cpp
-struct Config {
-  static constexpr size_t ListenerQueueMax   = 1000;
-  static constexpr size_t HistoryMaxSize     = 2048;
-  static constexpr size_t ThreadPoolSize     =    8;
-};
+```jsonc
+// int-keyed subscribe
+{ "type": "subscribe", "requests": [
+  { "key": 1, "streamKey": "NEXO", "field": "lastPrice",
+    "pipeline": [ { "type": "Worker", "fn": "mean" } ] }
+] }
+// → { "type": "subscribed", "key": 1 }
+// → { "type": "update", "key": 1, "streamKey": "NEXO", "value": 24.83 }
 ```
 
-Adjusting these parameters lets you balance memory, latency, and throughput for your deployment environment.
+```jsonc
+// string-id subscribe (mirrored back as "requestId")
+{ "type": "subscribe", "requests": [
+  { "id": "r-NEXO-open", "streamKey": "NEXO", "field": "lastPrice" }
+] }
+// → { "type": "update", "requestId": "r-NEXO-open", "streamKey": "NEXO", "value": 24.83 }
+```
+
+Errors come back as `{"type":"error","where":"<stage>","message":"..."}` where
+`<stage>` is `parse` / `type` / `subscribe` / `validate` / `build`.
+
+Two atomic-key namespaces exist — **bare** keys (`lastPrice`, `bid`, `sma_5`,
+`rsi_14`, `macd_line`, `bollinger_upper`, …) are Listener-subscribable, while
+**`ob.*`** keys (`ob.best.bid.price`, `ob.spread`, …) are **pipeline-only** (read
+via an `AtomicAccessor`, never a direct Listener). The push-vs-pull rule, the
+canonical `ob.*`-in-a-chart pattern, and the exact emitted key names are in
+**[docs/atomic-keys.md](./docs/atomic-keys.md)**.
+
+### TCP feed (market connector, default port 9001)
+
+The market connector's `FeedServer` accepts GMA's own line-delimited JSON:
+
+```jsonc
+{"symbol":"AAPL","lastPrice":187.42,"volume":350,"bid":187.40,"ask":187.43}
+{"type":"ob","action":"add","symbol":"AAPL","id":1,"side":"bid","price":187.40,"size":100}
+{"type":"control","action":"reset","symbol":"AAPL"}
+```
+
+External vendor feeds (e.g. NASDAQ ITCH) are ingested over `WsFeedClient` + a
+feed adapter — see **[docs/feed-adapters.md](./docs/feed-adapters.md)** and
+**[docs/writing-adapters.md](./docs/writing-adapters.md)**.
 
 ---
 
-## Testing & Validation
+## Testing
 
 ```bash
-# From build dir
-ctest --output-on-failure
+cmake -B build -DGMA_BUILD_TESTS=ON && cmake --build build -j$(nproc)
+cd build && ctest --output-on-failure
+
+# A single suite
+./gma_tests --gtest_filter="ItchAdapterTest.*"
 ```
 
-Each test suite outputs detailed diagnostics on failure, ensuring new contributions maintain correctness and performance guarantees.
+All tests build into one `gma_tests` executable.
 
 ---
 
@@ -178,8 +217,8 @@ Each test suite outputs detailed diagnostics on failure, ensuring new contributi
 
 This code is **proprietary**:
 
-> Copyright © 2025 Nicholas Randall  
-> All rights reserved.  
+> Copyright © 2025 Nicholas Randall
+> All rights reserved.
 > Personal, non-commercial viewing only; all other rights reserved.
 
-For licensing inquiries or commercial agreements, contact **Nicholas Randall** at <your.email@example.com> or via GitHub [yourusername](https://github.com/yourusername).
+For licensing inquiries, contact **Nicholas Randall**.
