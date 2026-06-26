@@ -77,29 +77,29 @@ ws::stream<tcp::socket> connect(asio::io_context& clientIoc, unsigned short port
 }
 
 // Read one frame with a bounded wall-clock timeout. Returns empty on timeout.
-// Uses a polling-cancel pattern so the call returns *as soon as* the frame
-// arrives — no fixed timeout floor.
+// Driven entirely on THIS thread via run_for — no second thread touches the
+// socket, so there is no read/close data race (TSan-clean). The client
+// io_context is otherwise idle (only the server harness runs its own).
 std::string readFrameBounded(ws::stream<tcp::socket>& stream,
                              std::chrono::milliseconds timeout) {
-  std::atomic<bool> done{false};
-  std::string out;
-  auto deadline = std::chrono::steady_clock::now() + timeout;
-  std::thread bomb([&]{
-    while (!done.load()) {
-      if (std::chrono::steady_clock::now() >= deadline) {
-        try { stream.next_layer().close(); } catch (...) {}
-        return;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-  });
+  auto& ioc = static_cast<asio::io_context&>(stream.get_executor().context());
   beast::flat_buffer buf;
-  try {
-    stream.read(buf);
-    out = beast::buffers_to_string(buf.data());
-  } catch (...) {}
-  done.store(true);
-  if (bomb.joinable()) bomb.join();
+  std::string out;
+  bool completed = false;
+  stream.async_read(buf, [&](beast::error_code ec, std::size_t) {
+    completed = true;
+    if (!ec) out = beast::buffers_to_string(buf.data());
+  });
+  ioc.restart();
+  ioc.run_for(timeout);
+  if (!completed) {
+    // Timed out with a read still pending: cancel it and drain so the handler
+    // (holding references to these locals) runs before we return.
+    beast::error_code ec;
+    stream.next_layer().cancel(ec);
+    ioc.restart();
+    ioc.run_for(std::chrono::milliseconds(200));
+  }
   return out;
 }
 
@@ -111,22 +111,34 @@ std::string readFrameBounded(ws::stream<tcp::socket>& stream,
 std::string readUntilType(ws::stream<tcp::socket>& stream,
                           const char* wantType,
                           std::chrono::milliseconds budget) {
-  std::atomic<bool> done{false};
-  std::string out;
+  // Single-threaded bounded read loop (see readFrameBounded): each frame is read
+  // via async_read + run_for against the shared deadline, so no second thread
+  // ever closes the socket out from under an in-flight read (TSan-clean).
+  auto& ioc = static_cast<asio::io_context&>(stream.get_executor().context());
   auto deadline = std::chrono::steady_clock::now() + budget;
-  std::thread bomb([&]{
-    while (!done.load()) {
-      if (std::chrono::steady_clock::now() >= deadline) {
-        try { stream.next_layer().close(); } catch (...) {}
-        return;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-  });
+  std::string out;
   for (;;) {
+    auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) break;
+    auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
     beast::flat_buffer buf;
-    try { stream.read(buf); } catch (...) { break; }
-    std::string frame = beast::buffers_to_string(buf.data());
+    std::string frame;
+    bool completed = false, ok = false;
+    stream.async_read(buf, [&](beast::error_code ec, std::size_t) {
+      completed = true;
+      if (!ec) { frame = beast::buffers_to_string(buf.data()); ok = true; }
+    });
+    ioc.restart();
+    ioc.run_for(remaining);
+    if (!completed) {                 // budget elapsed with read pending
+      beast::error_code ec;
+      stream.next_layer().cancel(ec);
+      ioc.restart();
+      ioc.run_for(std::chrono::milliseconds(200));
+      break;
+    }
+    if (!ok) break;                   // connection closed/errored
     rapidjson::Document d;
     d.Parse(frame.c_str());
     if (!d.HasParseError() && d.IsObject() && d.HasMember("type") &&
@@ -136,8 +148,6 @@ std::string readUntilType(ws::stream<tcp::socket>& stream,
       break;
     }
   }
-  done.store(true);
-  if (bomb.joinable()) bomb.join();
   return out;
 }
 

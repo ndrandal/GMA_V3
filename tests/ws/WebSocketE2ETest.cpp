@@ -138,27 +138,33 @@ TEST(WebSocketE2ETest, SubscribeAndReceiveUpdate) {
   // emits the "subscribed" ack only AFTER buildForRequest has registered the
   // Listener with the Dispatcher (ClientSession.cpp). So we read frames until
   // the ack arrives, THEN inject — guaranteeing the listener is wired and the
-  // update must follow. A single watchdog unblocks any read past the deadline.
-  std::atomic<bool> done{false};
+  // update must follow. Reads are bounded on THIS thread via run_for (no second
+  // thread closes the socket mid-read), so the barrier is also TSan-clean.
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-  std::thread readerTimeout([&]{
-    while (!done.load()) {
-      if (std::chrono::steady_clock::now() >= deadline) {
-        try { stream.next_layer().close(); } catch (...) {}
-        return;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-  });
-
   bool acked = false;
   std::string updatePayload;
-  for (int i = 0; i < 10 && updatePayload.empty(); ++i) {
+  while (updatePayload.empty()) {
+    auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) break;
+    auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
     beast::flat_buffer buf;
-    try {
-      stream.read(buf);
-    } catch (...) { break; }
-    std::string frame = beast::buffers_to_string(buf.data());
+    std::string frame;
+    bool completed = false, ok = false;
+    stream.async_read(buf, [&](beast::error_code ec, std::size_t) {
+      completed = true;
+      if (!ec) { frame = beast::buffers_to_string(buf.data()); ok = true; }
+    });
+    clientIoc.restart();
+    clientIoc.run_for(remaining);
+    if (!completed) {                 // deadline hit with read pending
+      beast::error_code ec;
+      stream.next_layer().cancel(ec);
+      clientIoc.restart();
+      clientIoc.run_for(std::chrono::milliseconds(200));
+      break;
+    }
+    if (!ok) break;                   // connection closed/errored
     rapidjson::Document fd;
     fd.Parse(frame.c_str());
     if (fd.HasParseError() || !fd.IsObject() ||
@@ -174,8 +180,6 @@ TEST(WebSocketE2ETest, SubscribeAndReceiveUpdate) {
       updatePayload = std::move(frame);
     }
   }
-  done.store(true);
-  if (readerTimeout.joinable()) readerTimeout.join();
 
   ASSERT_TRUE(acked) << "never received the 'subscribed' ack";
 
