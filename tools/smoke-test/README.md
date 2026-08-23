@@ -6,15 +6,18 @@ all pipeline patterns, and verifies data flows through the full stack.
 ## Prerequisites
 
 - Node.js 18+
-- `ws` package: `npm install ws` (run from this directory)
+- dependencies installed with `npm ci` (run from this directory)
 - GMA server running and receiving feed data
 
 ## Install
 
 ```bash
 cd tools/smoke-test
-npm install ws
+npm ci
 ```
+
+`node_modules/` is **not** tracked in git (ENC-878); `npm ci` installs the exact
+versions pinned in `package-lock.json`.
 
 ## Usage
 
