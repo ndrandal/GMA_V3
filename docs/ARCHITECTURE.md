@@ -108,7 +108,7 @@ Where events come from, end-to-end, using the market connector as the example:
                            Responder → sendFn
                                   │
                                   ▼
-                        ClientSession.sendText
+                       ClientSession.sendUpdate
                                   │
                                   ▼
                             async_write → WS
@@ -310,6 +310,39 @@ Server replies (the id field mirrors the input — `key` for int subs,
 The wire key is `streamKey` everywhere; the engine is stream-neutral and the
 internal `Event::symbol` field is just an opaque stream key (see §3). No
 `symbol` alias is accepted on the wire.
+
+**Outbound flow control — `update` frames are lossy under backlog (ENC-996).**
+`ClientSession` keeps one outbound queue per session, and frames on it are of
+two kinds:
+
+| kind | frames | policy |
+|---|---|---|
+| lossless | `subscribed`, `canceled`, `error` | never dropped, never reordered |
+| coalescable | `update` | latest-value-wins once the queue is a backlog |
+
+Once the queue exceeds `COALESCE_WATERMARK` (256 frames), a new `update` for a
+`(subscription, streamKey)` pair that already has one pending **replaces** it
+rather than queueing behind it. Below the watermark the queue is a plain
+lossless FIFO, so a consumer that keeps up receives every value.
+
+Consequences for clients:
+- **Intermediate values can vanish.** A client that must see every tick (running
+  client-side aggregation, event replay, sequence-critical logic) cannot rely on
+  the `update` stream when it falls behind — do the aggregation server-side with
+  a pipeline node instead. Chart rendering is unaffected: the newest sample is
+  always delivered.
+- **Order is preserved.** Coalescing replaces the *newest* pending frame for a
+  key, so surviving values still arrive in production order, and the final value
+  of a burst is always delivered.
+- **The connection is not dropped.** The pre-ENC-996 policy closed the session
+  at 4096 queued frames (`ws.outbox_overflow`), so a replay faster than the
+  browser could render disconnected the browser. `MAX_OUTBOX_SIZE` is now a
+  memory bound that sheds updates; only a queue of *entirely* lossless protocol
+  frames can still force a close.
+
+Operator signals: `ws.outbox_backpressure` (one Info line the first time a
+session degrades) and the counters `ws.outbox_coalesced` / `ws.outbox_shed` /
+`ws.outbox_overflow`.
 
 ### TCP feed (port `cfg.feedPort`, default 9001) — `FeedServer` (market connector)
 

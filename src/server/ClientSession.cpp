@@ -208,37 +208,142 @@ void ClientSession::close() {
 // ------------------------------
 // Outbound sending (thread-safe)
 // ------------------------------
-void ClientSession::sendText(const std::string& s) {
+void ClientSession::sendText(std::string s) {
   if (!open_.load()) return;
 
   auto self = shared_from_this();
-  boost::asio::dispatch(strand_, [self, s]() {
-    if (!self->open_.load()) return;
+  boost::asio::dispatch(strand_, [self, p = std::move(s)]() mutable {
+    self->enqueue(std::move(p), nullptr);
+  });
+}
 
-    // Backpressure: if a slow/dead client lets the queue grow too large,
-    // close the connection rather than exhausting server memory.
-    if (self->outbox_.size() >= MAX_OUTBOX_SIZE) {
-      gma::util::logger().log(gma::util::LogLevel::Warn,
-                              "ws.outbox_overflow",
-                              {{"sessionId", std::to_string(self->sessionId_)},
-                               {"queueSize", std::to_string(self->outbox_.size())}});
-      self->close();
+void ClientSession::sendUpdate(std::string payload,
+                               std::uint64_t subId,
+                               const std::string& streamKey) {
+  if (!open_.load()) return;
+
+  auto self = shared_from_this();
+  boost::asio::dispatch(strand_,
+    [self, p = std::move(payload), subId, sk = streamKey]() mutable {
+      CoalesceKeyView ck{subId, sk};
+      self->enqueue(std::move(p), &ck);
+    });
+}
+
+// Must be called on-strand.
+void ClientSession::enqueue(std::string payload, const CoalesceKeyView* ckey) {
+  if (!open_.load()) return;
+
+  // ---- 1. Coalesce-latest --------------------------------------------------
+  // A pending frame for the same (subscription, streamKey) is superseded by
+  // this one, so overwrite it in place instead of appending — but only once the
+  // queue is a genuine backlog. Below the watermark every frame is delivered,
+  // so a consumer that is keeping up loses nothing.
+  if (ckey && outbox_.size() >= COALESCE_WATERMARK) {
+    // coalesceIndex_ always points at the NEWEST pending frame for a key (it is
+    // re-pointed on every append), so replacing it keeps the queue in value
+    // order: older frames for the same key sit ahead of it and still go out
+    // first.
+    auto it = coalesceIndex_.find(*ckey);
+    if (it != coalesceIndex_.end()) {
+      const std::uint64_t seq          = it->second;
+      const std::uint64_t firstMutable = outboxHeadSeq_ + (writing_ ? 1u : 0u);
+      if (seq >= firstMutable && seq < outboxHeadSeq_ + outbox_.size()) {
+        outbox_[static_cast<std::size_t>(seq - outboxHeadSeq_)].payload = std::move(payload);
+        GMA_METRIC_HIT("ws.outbox_coalesced");
+        if (!backpressureLogged_) {
+          backpressureLogged_ = true;
+          gma::util::logger().log(gma::util::LogLevel::Info,
+                                  "ws.outbox_backpressure",
+                                  {{"sessionId", std::to_string(sessionId_)},
+                                   {"queueSize", std::to_string(outbox_.size())},
+                                   {"policy", "coalesce-latest"}});
+        }
+        return;
+      }
+      // Either stale (already drained) or the frame currently in flight —
+      // Beast holds a buffer pointing straight into that payload string, so it
+      // must never be mutated. Fall through and append; the index is re-pointed
+      // at the new frame below.
+    }
+  }
+
+  // ---- 2. Hard memory bound ----------------------------------------------
+  if (outbox_.size() >= MAX_OUTBOX_SIZE) {
+    if (ckey) {
+      // The client is hopelessly behind and already has a pending frame for
+      // (nearly) every stream. Drop the newest update instead of the session.
+      GMA_METRIC_HIT("ws.outbox_shed");
       return;
     }
-
-    self->outbox_.push_back(s);
-    if (!self->writing_) {
-      self->writing_ = true;
-      self->startWrite();
+    // Lossless frame: make room by shedding the oldest update.
+    if (!evictOldestCoalescable()) {
+      // Nothing shedable — the queue is pure protocol traffic, which really is
+      // unbounded memory growth. Keep the original protection.
+      gma::util::logger().log(gma::util::LogLevel::Warn,
+                              "ws.outbox_overflow",
+                              {{"sessionId", std::to_string(sessionId_)},
+                               {"queueSize", std::to_string(outbox_.size())}});
+      GMA_METRIC_HIT("ws.outbox_overflow");
+      close();
+      return;
     }
-  });
+  }
+
+  // ---- 3. Append ---------------------------------------------------------
+  const std::uint64_t seq = outboxHeadSeq_ + outbox_.size();
+  OutFrame f;
+  f.payload = std::move(payload);
+  if (ckey) {
+    f.key.sub = ckey->sub;
+    f.key.streamKey.assign(ckey->streamKey);
+  }
+  outbox_.push_back(std::move(f));
+  if (ckey) coalesceIndex_[outbox_.back().key] = seq;
+
+  if (!writing_) {
+    writing_ = true;
+    startWrite();
+  }
+}
+
+// Must be called on-strand.
+bool ClientSession::evictOldestCoalescable() {
+  // Never touch outbox_.front() while a write is in flight.
+  const std::size_t start = writing_ ? 1u : 0u;
+  for (std::size_t i = start; i < outbox_.size(); ++i) {
+    if (!outbox_[i].coalescable()) continue;
+    outbox_.erase(outbox_.begin() + static_cast<std::ptrdiff_t>(i));
+    // Erasing from the middle shifts every later frame down one slot, so the
+    // recorded sequence numbers are stale. This path only fires when the queue
+    // is full of protocol frames (rare, and never the value hot path), so a
+    // full rebuild is cheaper to reason about than patching the index.
+    reindexOutbox();
+    GMA_METRIC_HIT("ws.outbox_shed");
+    return true;
+  }
+  return false;
+}
+
+// Must be called on-strand.
+void ClientSession::reindexOutbox() {
+  coalesceIndex_.clear();
+  for (std::size_t i = 0; i < outbox_.size(); ++i) {
+    // Ascending order: if two frames share a key (in-flight + queued), the
+    // newer one wins, which is exactly the coalescing target we want.
+    if (outbox_[i].coalescable()) {
+      coalesceIndex_[outbox_[i].key] = outboxHeadSeq_ + i;
+    }
+  }
 }
 
 void ClientSession::startWrite() {
   // This function must be called on-strand.
   if (!open_.load()) {
     writing_ = false;
+    outboxHeadSeq_ += outbox_.size();
     outbox_.clear();
+    coalesceIndex_.clear();
     return;
   }
 
@@ -251,7 +356,7 @@ void ClientSession::startWrite() {
 
   ws_.text(true);
   ws_.async_write(
-    boost::asio::buffer(outbox_.front()),
+    boost::asio::buffer(outbox_.front().payload),
     boost::asio::bind_executor(
       strand_,
       [self](beast::error_code ec, std::size_t bytes) {
@@ -272,7 +377,20 @@ void ClientSession::onWrite(beast::error_code ec, std::size_t) {
     return;
   }
 
-  if (!outbox_.empty()) outbox_.pop_front();
+  if (!outbox_.empty()) {
+    const OutFrame& front = outbox_.front();
+    if (front.coalescable()) {
+      // Only drop the index entry if it still points at THIS frame: a newer
+      // frame for the same key may have been appended while this one was in
+      // flight, and that mapping must survive.
+      auto it = coalesceIndex_.find(CoalesceKeyView{front.key.sub, front.key.streamKey});
+      if (it != coalesceIndex_.end() && it->second == outboxHeadSeq_) {
+        coalesceIndex_.erase(it);
+      }
+    }
+    outbox_.pop_front();
+    ++outboxHeadSeq_;
+  }
 
   // Continue draining queue.
   startWrite();
@@ -400,9 +518,16 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     // Callback from Responder -> send update message over this WS session.
     // Capture weak_ptr to avoid reference cycle:
     //   ClientSession → chains_ → Responder → sendFn → ClientSession
+    //
+    // subId is this subscription *instance*'s coalescing identity (ENC-996).
+    // A re-subscribe on the same request key gets a fresh id, so a straggling
+    // frame from the shut-down Responder can never overwrite a new one.
+    // handleSubscribe runs on-strand (called from onRead), so the bump is
+    // unsynchronised by design.
+    const std::uint64_t subId = nextSubId_++;
     auto weak = weak_from_this();
-    auto sendFn = [weak](const gma::server::RequestKey& reqKey,
-                         const gma::StreamValue& sv) {
+    auto sendFn = [weak, subId](const gma::server::RequestKey& reqKey,
+                                const gma::StreamValue& sv) {
       try {
         auto self = weak.lock();
         if (!self) return;
@@ -418,7 +543,10 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
         w.EndObject();
 
         GMA_METRIC_HIT("ws.msg_out");
-        self->sendText(sb.GetString());
+        // Value updates are last-value-wins: queue them on the coalescable
+        // path, keyed by (subscription instance, streamKey) so a fan-out
+        // subscription's streams never supersede each other.
+        self->sendUpdate(sb.GetString(), subId, sv.symbol);
       } catch (const std::exception& ex) {
         gma::util::logger().log(gma::util::LogLevel::Error,
           "ws.sendFn exception",
