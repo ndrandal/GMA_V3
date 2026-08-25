@@ -7,6 +7,7 @@
 #include <boost/beast/core.hpp>
 
 #include <deque>
+#include <string>
 #include <utility>
 
 // Project headers (adjust paths if needed)
@@ -382,17 +383,25 @@ void FeedServer::run() {
   boost::system::error_code ec;
   tcp::endpoint ep{tcp::v4(), port_};
 
+  // ENC-1006: carry the operation + port in the exception so a failed bind
+  // surfaces as an actionable message rather than a bare errno string.
+  const unsigned short port = port_;
+  auto fail = [port](const boost::system::error_code& e, const char* op) {
+    throw boost::system::system_error(
+        e, std::string("feed server: ") + op + " 0.0.0.0:" + std::to_string(port));
+  };
+
   acceptor_.open(ep.protocol(), ec);
-  if (ec) throw boost::system::system_error(ec);
+  if (ec) fail(ec, "open");
 
   acceptor_.set_option(boost::asio::socket_base::reuse_address(true), ec);
-  if (ec) throw boost::system::system_error(ec);
+  if (ec) fail(ec, "set_option(reuse_address) on");
 
   acceptor_.bind(ep, ec);
-  if (ec) throw boost::system::system_error(ec);
+  if (ec) fail(ec, "bind");
 
   acceptor_.listen(boost::asio::socket_base::max_listen_connections, ec);
-  if (ec) throw boost::system::system_error(ec);
+  if (ec) fail(ec, "listen on");
 
   doAccept();
 }
