@@ -4,6 +4,7 @@
 #include <boost/asio/strand.hpp>
 #include <boost/beast/core.hpp>
 
+#include <string>
 #include <utility>
 
 // Project headers (adjust paths if your tree differs)
@@ -27,18 +28,26 @@ WebSocketServer::WebSocketServer(boost::asio::io_context& ioc,
 {
   boost::system::error_code ec;
 
+  // ENC-1006: every failure carries the operation and the port it was
+  // attempted on, so the message that reaches the operator is actionable
+  // ("bind 0.0.0.0:4000") instead of a bare "Address already in use".
+  auto fail = [port](const boost::system::error_code& e, const char* op) {
+    throw boost::system::system_error(
+        e, std::string("websocket server: ") + op + " 0.0.0.0:" + std::to_string(port));
+  };
+
   tcp::endpoint ep{tcp::v4(), port};
   acceptor_.open(ep.protocol(), ec);
-  if (ec) throw boost::system::system_error(ec);
+  if (ec) fail(ec, "open");
 
   acceptor_.set_option(boost::asio::socket_base::reuse_address(true), ec);
-  if (ec) throw boost::system::system_error(ec);
+  if (ec) fail(ec, "set_option(reuse_address) on");
 
   acceptor_.bind(ep, ec);
-  if (ec) throw boost::system::system_error(ec);
+  if (ec) fail(ec, "bind");
 
   acceptor_.listen(boost::asio::socket_base::max_listen_connections, ec);
-  if (ec) throw boost::system::system_error(ec);
+  if (ec) fail(ec, "listen on");
 }
 
 void WebSocketServer::run() {

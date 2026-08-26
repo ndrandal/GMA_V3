@@ -364,6 +364,20 @@ if (GMA_BUILD_TESTS)
   add_test(NAME gma_tests
     COMMAND gma_tests
     WORKING_DIRECTORY "$<TARGET_FILE_DIR:gma_tests>")
+
+  # ENC-1006: an occupied wsPort/feedPort must produce a clean non-zero exit,
+  # not std::terminate. This drives the real gma_server binary, so it lives as
+  # a script test rather than a gtest case.
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if (TARGET gma_server AND Python3_Interpreter_FOUND)
+    add_test(NAME gma_port_conflict
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/scripts/port_conflict_test.py"
+              "$<TARGET_FILE:gma_server>")
+    set_tests_properties(gma_port_conflict PROPERTIES TIMEOUT 120)
+  elseif (NOT Python3_Interpreter_FOUND)
+    message(STATUS "gma_port_conflict test skipped: no Python3 interpreter")
+  endif()
 endif()
 
 # Benchmarks (opt-in)

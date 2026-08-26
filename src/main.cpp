@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <boost/asio/signal_set.hpp>
+#include <boost/system/system_error.hpp>
 
 #include "gma/engine/IConnector.hpp"
 
@@ -43,9 +44,11 @@ static unsigned short parsePort(const char* str, unsigned short fallback) {
 }
 
 // ---------------------------
-// main
+// runServer — the real entry point. Wrapped by main() below, which turns any
+// escaping exception into a clean, non-zero exit instead of std::terminate
+// (ENC-1006).
 // ---------------------------
-int main(int argc, char* argv[]) {
+static int runServer(int argc, char* argv[]) {
   using namespace gma::util;
 
   // Shutdown coordinator — declared early so it outlives servers.
@@ -136,7 +139,21 @@ int main(int argc, char* argv[]) {
 
   gma::ExecutionContext exec(store.get(), gma::gThreadPool.get());
 
-  gma::WebSocketServer ws(ioc, &exec, dispatcher.get(), wsPort);
+  // ENC-1006: the acceptor is opened in the constructor and throws on a
+  // failed open/bind/listen. Catch it here so an occupied port produces an
+  // actionable message + non-zero exit instead of terminate().
+  std::unique_ptr<gma::WebSocketServer> wsPtr;
+  try {
+    wsPtr = std::make_unique<gma::WebSocketServer>(ioc, &exec, dispatcher.get(), wsPort);
+  } catch (const boost::system::system_error& ex) {
+    std::cerr << "[fatal] cannot start WebSocket server on port " << wsPort
+              << ": " << ex.what() << "\n"
+              << "        (is another gma_server already listening there? "
+                 "pass a different wsPort as argv[1])\n";
+    shutdown.stop();
+    return EXIT_FAILURE;
+  }
+  gma::WebSocketServer& ws = *wsPtr;
   ws.run();
   shutdown.registerStep("ws-stop-accept",    5,  [&ws]{ try { ws.stopAccept(); } catch (...) {} });
   shutdown.registerStep("ws-close-sessions", 40, [&ws]{ try { ws.closeAll(); } catch (...) {} });
@@ -231,6 +248,7 @@ int main(int argc, char* argv[]) {
   // IngressRegistry, instantiate, start in registration order. A single
   // ShutdownCoordinator step at priority 35 stops them in reverse order.
   std::vector<std::unique_ptr<gma::engine::IIngressSource>> ingresses;
+  std::vector<std::string> ingressKinds;  // parallel to `ingresses` (skips are not pushed)
   for (const auto& entry : cfg.ingress) {
     const auto* factory = gma::engine::IngressRegistry::find(entry.kind);
     if (!factory) {
@@ -241,14 +259,37 @@ int main(int argc, char* argv[]) {
     }
     try {
       auto src = (*factory)(regs, entry.params);
-      if (src) ingresses.push_back(std::move(src));
+      if (src) {
+        ingresses.push_back(std::move(src));
+        ingressKinds.push_back(entry.kind);
+      }
     } catch (const std::exception& ex) {
       gma::util::logger().log(gma::util::LogLevel::Error,
         "ingress.factory_threw",
         {{"kind", entry.kind}, {"err", ex.what()}});
     }
   }
-  for (auto& src : ingresses) src->start();
+  // ENC-1006: start() opens the ingress socket (e.g. FeedServer's acceptor)
+  // and throws on a failed bind. Report which ingress failed and exit
+  // non-zero rather than letting the exception escape into terminate().
+  for (std::size_t i = 0; i < ingresses.size(); ++i) {
+    try {
+      ingresses[i]->start();
+    } catch (const std::exception& ex) {
+      const std::string kind = i < ingressKinds.size() ? ingressKinds[i] : std::string{"?"};
+      gma::util::logger().log(gma::util::LogLevel::Error, "ingress.start_failed",
+                              {{"kind", kind}, {"err", ex.what()}});
+      std::cerr << "[fatal] cannot start ingress '" << kind << "': " << ex.what() << "\n"
+                << "        (is another gma_server already listening there? "
+                   "pass a different feedPort as argv[3] / ingress.N.port)\n";
+      // Stop the ingresses that did come up, then unwind cleanly.
+      for (std::size_t j = i; j-- > 0;) {
+        if (ingresses[j]) ingresses[j]->stop();
+      }
+      shutdown.stop();
+      return EXIT_FAILURE;
+    }
+  }
   shutdown.registerStep("ingress-stop", 35, [&ingresses] {
     for (auto it = ingresses.rbegin(); it != ingresses.rend(); ++it) {
       if (*it) (*it)->stop();
@@ -280,4 +321,19 @@ int main(int argc, char* argv[]) {
   shutdown.stop();
   logger().log(LogLevel::Info, "stopped", {});
   return EXIT_SUCCESS;
+}
+
+// ---------------------------
+// main — thin wrapper. Anything that still escapes runServer() (a bind we did
+// not anticipate, a connector throwing at boot) is reported on stderr and
+// exits non-zero. Deliberately no catch(...): a non-std throw should still
+// abort loudly rather than be silently converted into an exit code.
+// ---------------------------
+int main(int argc, char* argv[]) {
+  try {
+    return runServer(argc, argv);
+  } catch (const std::exception& ex) {
+    std::cerr << "[fatal] gma_server: " << ex.what() << "\n";
+    return EXIT_FAILURE;
+  }
 }
