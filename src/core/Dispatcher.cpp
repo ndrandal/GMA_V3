@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
+#include <utility>
+#include <vector>
 
 using namespace gma;
 
@@ -53,6 +56,71 @@ void Dispatcher::unregisterListener(const std::string& symbol,
 
 void Dispatcher::onTick(const Event& tick) {
   if (tick.symbol.empty() || !tick.payload) return;
+
+  // ENC-1007: publish the RAW injected fields into the AtomicStore before
+  // anything derived runs.
+  //
+  // Previously the store only ever received DERIVED atomics (FunctionMap
+  // builtins, written by computeAndStoreAtomics below) and connector-computed
+  // values. The injected value itself went to Listeners and was then dropped,
+  // so an externally computed series — a client bringing its own RSI rather
+  // than having gma recompute it — could not be read by AtomicAccessor and so
+  // could not be driven from an Interval clock (§8.1).
+  //
+  // Deliberately NOT gated on having a registered Listener: an
+  // Interval-driven AtomicAccessor is a PULL consumer that registers with
+  // nothing, so requiring a Listener would leave §8.1 unachievable in exactly
+  // the configuration it describes.
+  //
+  // Ordering matters. This runs FIRST, so both IEventComputer writes and the
+  // builtin atomics below overwrite a raw field of the same name rather than
+  // the other way round. Builtin atomics share a flat per-symbol namespace
+  // keyed by bare function name (ENC-792/M9), so a raw field literally called
+  // `mean` collides with the builtin `mean`; keeping the derived value as the
+  // last writer means no existing Listener or AtomicAccessor binding changes
+  // meaning. Namespacing the two apart is ENC-1008.
+  //
+  // Cardinality is bounded by AtomicStore's existing caps (maxSymbols /
+  // maxFieldsPerSymbol, applied in main.cpp), which drop only NEW keys past
+  // the cap and always update existing ones — so an unbounded stream of novel
+  // field names cannot grow the store without limit.
+  if (_store && tick.payload->IsObject()) {
+    std::vector<std::pair<std::string, ArgType>> raw;
+    {
+      // Admission is bounded by the SAME maxSymbols / maxFieldsPerSymbol
+      // budget that bounds history, so raw injection cannot become a second,
+      // unbounded way into the store. Enforced here rather than left to
+      // AtomicStore's own caps because an embedder may construct a capped
+      // Dispatcher over an uncapped store (main.cpp caps both; tests do not).
+      std::unique_lock<std::shared_mutex> lock(_rawMutex);
+      auto sit = _rawAdmitted.find(tick.symbol);
+      if (sit == _rawAdmitted.end()) {
+        if (_rawAdmitted.size() >= _maxSymbols) {
+          sit = _rawAdmitted.end();  // symbol cap reached — reject wholesale
+        } else {
+          sit = _rawAdmitted.emplace(tick.symbol,
+                                     std::unordered_set<std::string>{}).first;
+        }
+      }
+      if (sit != _rawAdmitted.end()) {
+        auto& admitted = sit->second;
+        raw.reserve(tick.payload->MemberCount());
+        for (auto it = tick.payload->MemberBegin();
+             it != tick.payload->MemberEnd(); ++it) {
+          if (!it->name.IsString() || !it->value.IsNumber()) continue;
+          std::string name(it->name.GetString(), it->name.GetStringLength());
+          if (admitted.find(name) == admitted.end()) {
+            if (admitted.size() >= _maxFieldsPerSymbol) continue;
+            admitted.insert(name);
+          }
+          raw.emplace_back(std::move(name), ArgType{ it->value.GetDouble() });
+        }
+      }
+    }
+    if (!raw.empty()) {
+      _store->setBatch(tick.symbol, raw);
+    }
+  }
 
   engine::ComputeContext ctx{ _store, this, _threadPool };
 

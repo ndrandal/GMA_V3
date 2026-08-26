@@ -25,6 +25,7 @@ silence.
 |---|---|---|
 | **bare** (`lastPrice`, `bid`, `ask`, `spread`, `volume`, ...) | `MarketTickComputer::compute` (in the market connector) | **Push.** Fires only when the inbound tick payload carries the JSON field directly (driven by `MarketFieldMap.bidFields`/`askFields`/etc.) — i.e. **pre-aggregated tick connectors**. Reaches subscribers via `Dispatcher::notifyListeners` from `MarketTA.cpp`. |
 | **`ob.*`** (`ob.best.bid.price`, `ob.spread`, `ob.mid`, ...) | `ob::Provider` via `AtomicProviderRegistry::registerNamespace("ob", …)` | **Pull-only.** Always present in the AtomicStore when the market connector is wired and the order book has any state — but `ob::Provider` does **not** call `notifyListeners`. Reachable only via `AtomicAccessor` reading the store. |
+| **injected raw** (any numeric field name on an inbound tick) | the inbound tick payload itself, written by `Dispatcher::onTick` (ENC-1007) | **Both.** Every numeric field of a tick is written into the AtomicStore under its own name, so it is readable via `AtomicAccessor`; if a Listener is bound to that field it is also pushed as before. |
 
 The split is intentional. It preserves the distinction between "the
 feed told us this value" (bare) and "we computed this from
@@ -32,6 +33,33 @@ order-book state" (`ob.*`). Conflating them would lose information
 that matters when debugging data quality, and pushing every book
 update through the dispatcher would amplify message rates beyond
 the dispatcher's design budget.
+
+### Injected (externally computed) series — ENC-1007
+
+An "atomic" here is not a concurrency atomic: it is a value derived
+from a live feed **outside** gma — a client bringing its own RSI
+rather than having gma recompute it. Push a tick for any stream key
+carrying any numeric field, and that field lands in the AtomicStore
+under its own name.
+
+Two consequences worth knowing:
+
+- **No Listener is required.** An `Interval` + `AtomicAccessor` tree is
+  a *pull* consumer that registers with nothing, so the value has to
+  materialise in the store whether or not anything is subscribed —
+  otherwise §8.1's "on an interval, grab that atomic value" is
+  unreachable for injected series.
+- **Derived values win a name clash.** Builtin atomics (`mean`, `sum`,
+  `stddev`, …) live in a flat per-symbol namespace keyed by bare
+  function name, so a raw field literally called `mean` collides with
+  the builtin `mean`. The raw write happens *first*, so the derived
+  value is the last writer and no existing binding changes meaning.
+  Namespacing the two apart is ENC-1008.
+
+Admission is bounded by the same `maxSymbols` / `maxFieldsPerSymbol`
+budget that bounds per-field history, so injection cannot grow the
+store without limit. Once a cap is reached, **new** symbols/fields are
+rejected; already-admitted ones keep updating.
 
 ## Push vs pull — the rule
 

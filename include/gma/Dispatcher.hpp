@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "gma/AtomicStore.hpp"
+
+#include <unordered_set>
 #include "gma/FunctionMap.hpp"
 #include "gma/Event.hpp"
 #include "gma/StreamValue.hpp"
@@ -119,6 +121,17 @@ private:
                      std::vector<std::unique_ptr<engine::IEventComputer>>>
                                           _computersByType;
   mutable std::mutex                      _computerCacheMx;
+
+  // ENC-1007: admission ledger for RAW injected fields. `maxSymbols` is
+  // documented as "maximum distinct symbols tracked before rejecting new
+  // ones", so the raw-injection path has to honour it too — it must not be a
+  // second, unbounded way into the AtomicStore. Kept separate from
+  // `_histories` on purpose: admitting an injected field into the history map
+  // would consume the per-symbol field budget that listened fields compete
+  // for, changing which fields get histories. This ledger only records what
+  // has been admitted, and holds no values.
+  std::unordered_map<std::string, std::unordered_set<std::string>> _rawAdmitted;
+  mutable std::shared_mutex _rawMutex;
 
   mutable std::shared_mutex _histMutex;
   mutable std::shared_mutex _listenerMutex;
