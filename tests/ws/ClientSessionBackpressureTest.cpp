@@ -33,6 +33,8 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
 #include <gtest/gtest.h>
+
+#include <cstdlib>
 #include <rapidjson/document.h>
 
 #include <chrono>
@@ -111,7 +113,41 @@ struct DrainResult {
   bool        closed      = false;  // server tore the connection down
   bool        timedOut    = false;
   std::string closeDetail;
+  // Milliseconds between the last update received and the deadline. This is
+  // what separates the two failure shapes: a drain that is still delivering
+  // when the clock runs out is TOO SLOW, whereas a socket that has been silent
+  // for the whole budget is STALLED. Reporting "never arrived" for both is what
+  // made ENC-996's CI failure look like a lost value when it was neither.
+  long        idleAtDeadlineMs = -1;
 };
+
+// How long to wait for the newest value. These tests assert a LIVENESS property
+// — that the newest value eventually arrives — not a latency bound, so the
+// budget must be generous enough that a slow or contended machine cannot turn
+// "still draining" into "dropped it". 20s was not: on a loaded 2-core runner
+// the drain of a 100k burst can still be in flight at that point, and the
+// resulting failure text ("newest value never arrived") reads as a lost value.
+// Passing runs exit as soon as the target arrives, so a large budget costs
+// nothing when the property holds. Override with ENC996_BUDGET_MS.
+std::chrono::milliseconds drainBudget() {
+  if (const char* env = std::getenv("ENC996_BUDGET_MS")) {
+    const int ms = std::atoi(env);
+    if (ms > 0) return std::chrono::milliseconds(ms);
+  }
+  return std::chrono::milliseconds(120000);
+}
+
+// Formats the distinction above for an assertion message.
+std::string drainDiagnosis(const DrainResult& r) {
+  if (!r.timedOut) return "drain ended without timing out";
+  if (r.idleAtDeadlineMs < 0) return "no updates arrived at all during the budget";
+  if (r.idleAtDeadlineMs < 1000)
+    return "STILL DRAINING at the deadline (last update " +
+           std::to_string(r.idleAtDeadlineMs) +
+           "ms before it) — the budget was too short for this machine, not a lost value";
+  return "STALLED — silent for " + std::to_string(r.idleAtDeadlineMs) +
+         "ms before the deadline";
+}
 
 // Read frames until `target` shows up as an update value, the server closes,
 // or the budget runs out. Single-threaded (async_read + run_for) so no second
@@ -122,6 +158,7 @@ DrainResult drainUntilValue(ws::stream<tcp::socket>& stream,
   auto& ioc = static_cast<asio::io_context&>(stream.get_executor().context());
   const auto deadline = std::chrono::steady_clock::now() + budget;
   DrainResult r;
+  auto lastUpdateAt = std::chrono::steady_clock::time_point{};
 
   for (;;) {
     const auto now = std::chrono::steady_clock::now();
@@ -168,12 +205,18 @@ DrainResult drainUntilValue(ws::stream<tcp::socket>& stream,
     }
     if (std::string(d["type"].GetString()) != "update") continue;
     ++r.updates;
+    lastUpdateAt = std::chrono::steady_clock::now();
     if (d.HasMember("value") && d["value"].IsNumber()) {
       const double v = d["value"].GetDouble();
       if (r.updates > 1 && v <= r.lastValue) r.monotonic = false;
       r.lastValue = v;
       if (r.lastValue == target) { r.sawTarget = true; break; }
     }
+  }
+  if (r.timedOut && lastUpdateAt != std::chrono::steady_clock::time_point{}) {
+    r.idleAtDeadlineMs = static_cast<long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - lastUpdateAt).count());
+    if (r.idleAtDeadlineMs < 0) r.idleAtDeadlineMs = 0;
   }
   return r;
 }
@@ -253,6 +296,26 @@ void burst(BurstHarness& srv, const std::string& streamKey, int n) {
 void speedUpReader(ws::stream<tcp::socket>& stream) {
   boost::system::error_code ec;
   stream.next_layer().set_option(asio::socket_base::receive_buffer_size(1 << 20), ec);
+  // The error_code used to be discarded. If the resize fails — or the kernel
+  // silently clamps it — the client keeps reading through the deliberately tiny
+  // 2048-byte buffer set by connectSlowReader, the drain runs orders of
+  // magnitude slower than the deadline assumes, and the resulting timeout looks
+  // exactly like the server having dropped the newest value. That is how
+  // ENC-996 read as a flow-control defect when it was a harness one, so the
+  // failure is now surfaced here where it is true rather than downstream where
+  // it is misleading.
+  ASSERT_FALSE(ec) << "speedUpReader: could not widen the receive buffer: "
+                   << ec.message()
+                   << " — the reader is still throttled, so any drain timeout "
+                      "below is a harness artefact, not server behaviour";
+  boost::asio::socket_base::receive_buffer_size actual;
+  boost::system::error_code getEc;
+  stream.next_layer().get_option(actual, getEc);
+  if (!getEc && actual.value() <= 4096) {
+    ADD_FAILURE() << "speedUpReader: receive buffer is still " << actual.value()
+                  << " bytes after asking for " << (1 << 20)
+                  << " — the reader did not actually speed up";
+  }
 }
 
 } // namespace
@@ -271,12 +334,12 @@ TEST(ClientSessionBackpressureTest, BurstAtOutboxBoundaryKeepsConnection) {
   burst(srv, "BOUND", kTicks);
   speedUpReader(stream);
 
-  auto r = drainUntilValue(stream, kTicks - 1, std::chrono::seconds(20));
+  auto r = drainUntilValue(stream, kTicks - 1, drainBudget());
   EXPECT_FALSE(r.closed) << "server killed the session at the boundary: "
                          << r.closeDetail;
   EXPECT_TRUE(r.sawTarget) << "newest value (" << (kTicks - 1)
-                           << ") never arrived; last=" << r.lastValue
-                           << " updates=" << r.updates;
+                           << ") did not arrive; last=" << r.lastValue
+                           << " updates=" << r.updates << " — " << drainDiagnosis(r);
 
   beast::error_code ec;
   stream.close(ws::close_code::normal, ec);
@@ -297,7 +360,7 @@ TEST(ClientSessionBackpressureTest, BurstAboveOutboxBoundaryDoesNotDisconnect) {
   burst(srv, "OVER", kTicks);
   speedUpReader(stream);
 
-  auto r = drainUntilValue(stream, kTicks - 1, std::chrono::seconds(20));
+  auto r = drainUntilValue(stream, kTicks - 1, drainBudget());
   const auto after = gma::util::MetricRegistry::instance().snapshotCounters();
 
   EXPECT_FALSE(r.closed)
@@ -307,8 +370,8 @@ TEST(ClientSessionBackpressureTest, BurstAboveOutboxBoundaryDoesNotDisconnect) {
             counter(before, "ws.outbox_overflow"))
       << "the kill-the-consumer path must not fire any more";
   EXPECT_TRUE(r.sawTarget) << "newest value (" << (kTicks - 1)
-                           << ") never arrived; last=" << r.lastValue
-                           << " updates=" << r.updates;
+                           << ") did not arrive; last=" << r.lastValue
+                           << " updates=" << r.updates << " — " << drainDiagnosis(r);
   // Degradation is the point: a slow reader must not have received every frame.
   EXPECT_LT(r.updates, static_cast<std::size_t>(kTicks))
       << "expected superseded values to be coalesced away";
@@ -335,7 +398,7 @@ TEST(ClientSessionBackpressureTest, HundredThousandTickBurstDegradesWithoutDisco
                             std::chrono::steady_clock::now() - t0).count();
 
   speedUpReader(stream);
-  auto r = drainUntilValue(stream, kTicks - 1, std::chrono::seconds(20));
+  auto r = drainUntilValue(stream, kTicks - 1, drainBudget());
 
   RecordProperty("ingest_ms", static_cast<int>(ingestMs));
   RecordProperty("updates_received", static_cast<int>(r.updates));
@@ -345,8 +408,8 @@ TEST(ClientSessionBackpressureTest, HundredThousandTickBurstDegradesWithoutDisco
             << "%\n";
 
   EXPECT_FALSE(r.closed) << "100k burst disconnected the client: " << r.closeDetail;
-  EXPECT_TRUE(r.sawTarget) << "newest value never arrived; last=" << r.lastValue
-                           << " updates=" << r.updates;
+  EXPECT_TRUE(r.sawTarget) << "newest value did not arrive; last=" << r.lastValue
+                           << " updates=" << r.updates << " — " << drainDiagnosis(r);
   EXPECT_LT(r.updates, static_cast<std::size_t>(kTicks))
       << "expected lossy degradation, not full delivery";
 
@@ -371,7 +434,7 @@ TEST(ClientSessionBackpressureTest, ControlFramesSurviveAnUpdateFlood) {
   // Queued behind ~16k updates, none of which the client has read yet.
   stream.write(asio::buffer(R"({"type":"cancel","keys":[1]})"));
 
-  EXPECT_FALSE(readUntilType(stream, "canceled", std::chrono::seconds(20)).empty())
+  EXPECT_FALSE(readUntilType(stream, "canceled", drainBudget()).empty())
       << "the cancel ack was dropped or the session was killed by the flood";
 
   beast::error_code ec;
@@ -395,11 +458,11 @@ TEST(ClientSessionBackpressureTest, BurstBelowWatermarkIsLossless) {
   burst(srv, "SMALL", kTicks);
   speedUpReader(stream);
 
-  auto r = drainUntilValue(stream, kTicks - 1, std::chrono::seconds(20));
+  auto r = drainUntilValue(stream, kTicks - 1, drainBudget());
   const auto after = gma::util::MetricRegistry::instance().snapshotCounters();
 
   EXPECT_FALSE(r.closed) << r.closeDetail;
-  EXPECT_TRUE(r.sawTarget) << "last=" << r.lastValue;
+  EXPECT_TRUE(r.sawTarget) << "last=" << r.lastValue << " — " << drainDiagnosis(r);
   EXPECT_EQ(r.updates, static_cast<std::size_t>(kTicks))
       << "a sub-watermark burst must be lossless";
   EXPECT_EQ(counter(after, "ws.outbox_coalesced"),
@@ -425,9 +488,9 @@ TEST(ClientSessionBackpressureTest, CoalescedValuesStayInOrder) {
   burst(srv, "ORDER", kTicks);
   speedUpReader(stream);
 
-  auto r = drainUntilValue(stream, kTicks - 1, std::chrono::seconds(20));
+  auto r = drainUntilValue(stream, kTicks - 1, drainBudget());
   EXPECT_FALSE(r.closed) << r.closeDetail;
-  EXPECT_TRUE(r.sawTarget) << "last=" << r.lastValue;
+  EXPECT_TRUE(r.sawTarget) << "last=" << r.lastValue << " — " << drainDiagnosis(r);
   EXPECT_TRUE(r.monotonic)
       << "values went backwards — coalescing overwrote an out-of-order slot";
 
