@@ -6,23 +6,15 @@ namespace gma {
 Interval::Interval(std::chrono::milliseconds period,
                    std::shared_ptr<INode> child,
                    gma::rt::ThreadPool* pool)
-  : period_(period), child_(std::move(child)), pool_(pool)
+  : state_(std::make_shared<State>(period, std::move(child), pool))
 {
 }
 
 Interval::~Interval() {
-  stopping_.store(true, std::memory_order_release);
-  cv_.notify_all();
-  if (timerThread_.joinable()) {
-    // If the destructor is running from the timer thread itself (the thread
-    // held the last shared_from_this() and released it on loop exit), join()
-    // would deadlock.  Detach instead — the thread is about to return.
-    if (timerThread_.get_id() == std::this_thread::get_id()) {
-      timerThread_.detach();
-    } else {
-      timerThread_.join();
-    }
-  }
+  // The timer thread holds no reference back to this object (ENC-1065), so
+  // reaching the destructor at all is the normal path even when nobody called
+  // shutdown(). Stop and join here so no thread outlives the Interval.
+  Interval::shutdown();
 }
 
 void Interval::start() {
@@ -30,33 +22,32 @@ void Interval::start() {
   if (!started_.compare_exchange_strong(expected, true))
     return; // already started
 
-  timerThread_ = std::thread([self = shared_from_this()] {
-    self->timerLoop();
-  });
+  // Capture the State, never `this` and never a shared_from_this().
+  timerThread_ = std::thread([st = state_] { timerLoop(st); });
 }
 
-void Interval::timerLoop() {
+void Interval::timerLoop(const std::shared_ptr<State>& st) {
   while (true) {
     {
-      std::unique_lock<std::mutex> lk(mx_);
-      if (cv_.wait_for(lk, period_, [this] {
-            return stopping_.load(std::memory_order_acquire);
+      std::unique_lock<std::mutex> lk(st->mx);
+      if (st->cv.wait_for(lk, st->period, [&st] {
+            return st->stopping.load(std::memory_order_acquire);
           })) {
         break; // woken by shutdown
       }
     }
 
-    if (stopping_.load(std::memory_order_acquire))
+    if (st->stopping.load(std::memory_order_acquire))
       break;
 
-    if (!child_) break; // child gone, stop ticking
+    if (!st->child) break; // child gone, stop ticking
 
     try {
-      if (pool_) {
-        auto c = child_;
-        pool_->post([c] { c->onValue(StreamValue{"", 0.0}); });
+      if (st->pool) {
+        auto c = st->child;
+        st->pool->post([c] { c->onValue(StreamValue{"", 0.0}); });
       } else {
-        child_->onValue(StreamValue{"", 0.0});
+        st->child->onValue(StreamValue{"", 0.0});
       }
     } catch (const std::exception& ex) {
       gma::util::logger().log(gma::util::LogLevel::Error,
@@ -71,11 +62,13 @@ void Interval::onValue(const StreamValue&) {
 }
 
 void Interval::shutdown() noexcept {
-  stopping_.store(true, std::memory_order_release);
-  cv_.notify_all();
+  state_->stopping.store(true, std::memory_order_release);
+  state_->cv.notify_all();
   if (timerThread_.joinable()) {
-    // Mirror the destructor guard: if shutdown() is called from the timer
-    // thread itself (e.g. via a downstream callback), join() would deadlock.
+    // If shutdown() is called from the timer thread itself (e.g. via a
+    // downstream callback), join() would deadlock. Detach instead: the thread
+    // owns the State it is still reading, so it can finish safely even if the
+    // Interval is destroyed first.
     if (timerThread_.get_id() == std::this_thread::get_id()) {
       timerThread_.detach();
     } else {

@@ -157,9 +157,14 @@ void ClientSession::close() {
 
     // Best-effort shutdown of active requests/trees. Shut down EVERY node in
     // each pipeline (head shutdown() does not propagate down the chain), or
-    // mid-pipeline timer nodes (Interval/TumblingWindow/BucketTime) leak their
-    // timer threads forever. Head shutdown() is idempotent, so re-running it
-    // here when the head also appears in its keepAlive chain is harmless.
+    // mid-pipeline timer nodes (TumblingWindow/BucketTime) leak their timer
+    // threads forever. Head shutdown() is idempotent, so re-running it here
+    // when the head also appears in its keepAlive chain is harmless.
+    //
+    // ENC-1065 removed Interval from that list: its timer thread no longer
+    // holds a reference back to the node, so ~Interval stops and joins it even
+    // if shutdown() is never called. TumblingWindow and BucketTime still carry
+    // the original pattern, so this sweep is still load-bearing for them.
     {
       std::lock_guard<std::mutex> lk(self->reqMu_);
       for (auto& kv : self->active_) {

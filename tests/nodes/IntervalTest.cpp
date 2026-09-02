@@ -80,3 +80,44 @@ TEST(IntervalTest, MultipleIntervalsIndependently) {
     i2->shutdown();
     pool.shutdown();
 }
+
+// ----- ENC-1065 -----
+//
+// Dropping the last owning reference must actually destroy the Interval and
+// stop its timer thread. The timer thread used to hold its own
+// shared_from_this(), so the refcount never reached zero, ~Interval never ran,
+// and the thread kept firing into a child, a ThreadPool and a store that the
+// test had already torn down.
+//
+// This is the failure that does not fail where it is caused: in the ENC-1007
+// work it surfaced as a SIGFPE in an unrelated suite ~40 suites later. A test
+// that passes in isolation proves nothing about it, which is why the assertion
+// here is on the lifetime itself, not on downstream symptoms.
+TEST(IntervalTest, DestructionWithoutShutdownStopsTheTimerThread) {
+    rt::ThreadPool pool(1);
+    auto stub = std::make_shared<IStubNode>();
+    std::weak_ptr<Interval> weak;
+    {
+        auto interval = std::make_shared<Interval>(5ms, stub, &pool);
+        weak = interval;
+        interval->start();
+        // Wait until the timer thread is demonstrably running, so the test is
+        // about lifetime and not about a thread that never got going.
+        auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (stub->count.load() < 2 && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(1ms);
+        ASSERT_GE(stub->count.load(), 2) << "timer never started; test proves nothing";
+        // Drop the last owning reference WITHOUT calling shutdown().
+    }
+
+    EXPECT_TRUE(weak.expired())
+        << "Interval outlived its last owner — the timer thread still holds a "
+           "strong self-reference, so ~Interval can never run";
+
+    const int before = stub->count.load();
+    std::this_thread::sleep_for(60ms);
+    EXPECT_EQ(stub->count.load(), before)
+        << "timer kept firing after the Interval's last owner was dropped";
+
+    pool.shutdown();
+}
