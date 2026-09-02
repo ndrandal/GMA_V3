@@ -9,10 +9,30 @@
 namespace gma {
 
 // Forward declarations first — ArgType, ArgValue, and RecordField form a
-// recursive cycle. The cycle is broken exactly the way the standard guarantees
-// for std::vector: a vector member may name an incomplete element type, so
-// Record can hold std::vector<RecordField> before RecordField is complete, and
-// ArgType's std::vector<ArgValue> can name ArgValue before it is complete.
+// recursive cycle.
+//
+// std::vector may be *instantiated* on an incomplete element type, but the
+// element must be complete before any member of that specialization is
+// referenced ([vector.overview]). Two members below sit on opposite sides of
+// that line, and the difference is why this header only ever failed under one
+// compiler:
+//
+//   * ArgType's `std::vector<ArgValue>` alternative is fine. Its members are
+//     members of a class template, so their point of instantiation is deferred
+//     to the end of the translation unit — by which time ArgValue is complete.
+//
+//   * Record's `std::vector<RecordField>` member is not. Naming Record as a
+//     std::variant alternative makes variant query Record's special member
+//     functions; if those are *implicitly declared* they get defined right
+//     there, and their definitions reference std::vector<RecordField>'s copy,
+//     move and destroy members while RecordField is still incomplete. That is
+//     ill-formed (no diagnostic required). libstdc++ under g++ happens to
+//     accept it; clang rejects it with 13 errors — see ENC-1073.
+//
+// The fix is to declare Record's special members here and default them below,
+// once RecordField is complete. variant then has real declarations to reason
+// about and instantiates nothing early, so no vector<RecordField> member is
+// referenced before its element type is complete.
 struct ArgValue;
 struct RecordField;
 
@@ -24,6 +44,16 @@ struct RecordField;
 // the fields were packed.
 struct Record {
   std::vector<RecordField> fields;
+
+  // Declared, not defined: the definitions are further down, after RecordField
+  // is complete. Do not replace these with implicit or in-class-defaulted
+  // members — that reintroduces the ENC-1073 clang failure described above.
+  Record();
+  Record(const Record&);
+  Record(Record&&) noexcept;
+  Record& operator=(const Record&);
+  Record& operator=(Record&&) noexcept;
+  ~Record();
 };
 
 // ArgType: the value carried on every pipeline edge. `std::vector<ArgValue>` is
@@ -60,6 +90,17 @@ struct RecordField {
   std::string name;
   ArgValue    value;
 };
+
+// ----- Record special members (RecordField is complete from here on) -----
+//
+// std::vector<RecordField>'s members are first referenced here, which is
+// exactly what [vector.overview] requires.
+inline Record::Record() = default;
+inline Record::Record(const Record&) = default;
+inline Record::Record(Record&&) noexcept = default;
+inline Record& Record::operator=(const Record&) = default;
+inline Record& Record::operator=(Record&&) noexcept = default;
+inline Record::~Record() = default;
 
 // ----- Record helpers (ArgValue/RecordField are complete from here on) -----
 

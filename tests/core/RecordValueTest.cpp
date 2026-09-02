@@ -5,6 +5,8 @@
 #include <rapidjson/document.h>
 
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 using namespace gma;
@@ -101,4 +103,52 @@ TEST(RecordValueTest, RecordCarriedOnStreamValue) {
   const ArgType* p = recordFind(std::get<Record>(sv.value), "price");
   ASSERT_NE(p, nullptr);
   EXPECT_DOUBLE_EQ(std::get<double>(*p), 10.0);
+}
+
+// ----- ENC-1073 regression guards -----
+//
+// Record's special members are declared in StreamValue.hpp and defaulted below
+// RecordField, so that naming Record as a std::variant alternative does not
+// instantiate std::vector<RecordField>'s members while RecordField is still
+// incomplete. That restructuring is what makes the header compile under clang.
+//
+// These asserts pin the observable consequences. They are the part a future
+// "simplify this back to implicit members" edit would break in a way g++ alone
+// would not report: the noexcept moves in particular are what let containers of
+// Record relocate by move instead of copy.
+static_assert(std::is_default_constructible_v<Record>);
+static_assert(std::is_copy_constructible_v<Record>);
+static_assert(std::is_copy_assignable_v<Record>);
+static_assert(std::is_nothrow_move_constructible_v<Record>);
+static_assert(std::is_nothrow_move_assignable_v<Record>);
+static_assert(std::is_nothrow_destructible_v<Record>);
+static_assert(std::is_nothrow_move_constructible_v<ArgType>);
+
+TEST(RecordValueTest, CopyIsDeepAndMovePreservesFields) {
+  Record inner;
+  recordSet(inner, "n", 1.0);
+  Record r;
+  recordSet(r, "a", 1.0);
+  recordSet(r, "nested", inner);
+
+  // Copy is independent of the original, all the way through the nesting.
+  Record copy = r;
+  recordSet(r, "a", 99.0);
+  recordSet(inner, "n", 99.0);
+  const ArgType* copiedA = recordFind(copy, "a");
+  ASSERT_NE(copiedA, nullptr);
+  EXPECT_DOUBLE_EQ(std::get<double>(*copiedA), 1.0);
+
+  const ArgType* copiedNested = recordFind(copy, "nested");
+  ASSERT_NE(copiedNested, nullptr);
+  const ArgType* copiedN = recordFind(std::get<Record>(*copiedNested), "n");
+  ASSERT_NE(copiedN, nullptr);
+  EXPECT_DOUBLE_EQ(std::get<double>(*copiedN), 1.0);
+
+  // Move carries the fields across intact.
+  Record moved = std::move(copy);
+  ASSERT_EQ(moved.fields.size(), 2u);
+  const ArgType* movedA = recordFind(moved, "a");
+  ASSERT_NE(movedA, nullptr);
+  EXPECT_DOUBLE_EQ(std::get<double>(*movedA), 1.0);
 }
