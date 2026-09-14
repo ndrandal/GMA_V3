@@ -118,7 +118,7 @@ Key semantics:
 
 - **Type routing.** `Dispatcher` invokes only computers whose `eventType()` matches the event's `type`. This is how market + synthetic computers coexist on the same dispatcher.
 - **TA atomics are not directly subscribable.** `sma_5`, `rsi_14`, etc. are written to `AtomicStore` but delivered to listeners only when a client adds an `AtomicAccessor` node to its pipeline. Subscribing directly on field `sma_5` does nothing by itself.
-- **FunctionMap builtins are subscribable.** `mean`, `sum`, `stddev`, etc. are computed per-field per-tick inside `Dispatcher::computeAndStoreAtomics` and fan out to matching listeners.
+- **FunctionMap builtins are subscribable.** `mean`, `sum`, `stddev`, etc. are computed per-field per-tick inside `Dispatcher::computeAndStoreAtomics` and fan out to matching listeners. By default they are stored under the **bare** function name — one slot per symbol, shared by every field, so two fields driving the same builtin overwrite each other. Set `atomicKeyNamespaceByField = true` to store them as `<field>.<fn>` instead; Listener push is unchanged either way. See [atomic-keys.md](atomic-keys.md#derived-atomic-key-shape--atomickeynamespacebyfield-enc-1008) for what flipping it breaks.
 - **Per-field raw path.** If a listener subscribed on `(AAPL, lastPrice)` and the payload has `lastPrice`, the dispatcher reads it and delivers directly — no TA involvement.
 
 ## 4. Engine registries (extension points)
