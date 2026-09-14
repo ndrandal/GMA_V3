@@ -70,12 +70,18 @@ a future `EmitOnEmpty` config addition.
 Mirrors `BucketTime` and `Interval`:
 
 - Constructed via `std::make_shared<TumblingWindow>(period, downstream, pool)`.
-- `start()` must be called after the `shared_ptr` is held. The builder in
-  `TreeBuilder::registerBuiltinNodeTypes` calls it automatically.
+- `start()` launches the timer thread. The builder in
+  `TreeBuilder::registerBuiltinNodeTypes` calls it automatically. It does
+  not require the node to be owned by a `shared_ptr` (ENC-1080 removed the
+  `shared_from_this()` capture — the timer thread shares a `State` block
+  instead, and the node owns the thread).
 - `shutdown()` is synchronous: sets a stopping flag, wakes the timer
   thread, joins it (or detaches safely if invoked from the timer thread).
   The downstream pointer and per-symbol buffers are released under the
   internal mutex.
+- `shutdown()` is only for stopping *early*. Dropping the last owning
+  reference destroys the node, and the destructor stops and joins the
+  timer thread on its own.
 
 ### Resource caps
 

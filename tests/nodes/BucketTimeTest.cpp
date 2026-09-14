@@ -168,3 +168,47 @@ TEST(BucketTimeTest, NextAlignedAfterReturnsStrictlyGreaterMultiple) {
         EXPECT_EQ(duration_cast<MS>(next.time_since_epoch()).count(), 12400);
     }
 }
+
+// ----- ENC-1080 (sibling of ENC-1065, which fixed the same bug on Interval) -----
+//
+// Dropping the last owning reference must actually destroy the BucketTime and
+// stop its timer thread. The timer thread used to hold its own
+// shared_from_this(), so the refcount never reached zero, ~BucketTime never
+// ran, and the thread kept firing into a child, a ThreadPool and a store that
+// the test had already torn down.
+//
+// This is the failure that does not fail where it is caused: in the ENC-1007
+// work the Interval instance of it surfaced as a SIGFPE in an unrelated suite
+// ~40 suites later. A test that passes in isolation proves nothing about it,
+// which is why the primary assertion here is on the lifetime itself, not on a
+// downstream symptom.
+TEST(BucketTimeTest, DestructionWithoutShutdownStopsTheTimerThread) {
+    rt::ThreadPool pool(1);
+    auto stub = std::make_shared<TimestampingStub>();
+    std::weak_ptr<BucketTime> weak;
+    {
+        auto bt = std::make_shared<BucketTime>(10ms, stub, &pool);
+        weak = bt;
+        bt->start();
+        // Wait until the timer thread is demonstrably running, so the test is
+        // about lifetime and not about a thread that never got going.
+        auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (stub->count.load() < 2 && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(1ms);
+        ASSERT_GE(stub->count.load(), 2) << "timer never started; test proves nothing";
+        // Drop the last owning reference WITHOUT calling shutdown().
+    }
+
+    EXPECT_TRUE(weak.expired())
+        << "BucketTime outlived its last owner — the timer thread still holds a "
+           "strong self-reference, so ~BucketTime can never run";
+
+    // Let any tick already posted to the pool land before sampling.
+    std::this_thread::sleep_for(20ms);
+    const int before = stub->count.load();
+    std::this_thread::sleep_for(60ms);
+    EXPECT_EQ(stub->count.load(), before)
+        << "timer kept firing after the BucketTime's last owner was dropped";
+
+    pool.shutdown();
+}
