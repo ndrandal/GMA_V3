@@ -95,3 +95,17 @@ node tools/smoke-test/smoke.js --url ws://localhost:8080 --duration 30
 
 - **0** — All keys received at least one update (PASS)
 - **1** — One or more keys received no updates (FAIL)
+
+## Run logs
+
+Run output is **not** committed. A checked-in log of one past run cannot be kept true
+by anything — there is no CI to regenerate it (server-side CI was decided against
+workspace-wide; the local pre-push gate is the mechanism), so it silently goes stale the
+next time `smoke.js` changes and then misleads the next reader. That is exactly what
+happened to the old `SMOKE_RUN_LOG.md`, deleted in ENC-1000: written 2026-03-20, never
+updated, still advertising symbols and fields (`BLITZ`, `ema_12`) that `smoke.js` stopped
+using in 2026-05.
+
+Run the script and read its own output; the shape to expect is under **Expected Output**
+above. The old log is recoverable from git history if you ever want it (`git log --
+tools/smoke-test/SMOKE_RUN_LOG.md`).
