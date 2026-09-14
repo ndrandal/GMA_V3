@@ -325,24 +325,50 @@ Once the queue exceeds `COALESCE_WATERMARK` (256 frames), a new `update` for a
 rather than queueing behind it. Below the watermark the queue is a plain
 lossless FIFO, so a consumer that keeps up receives every value.
 
+At `MAX_OUTBOX_SIZE` (4096 frames) the queue is out of memory budget and cannot
+append at all. A newer `update` then **displaces the oldest pending `update` in
+the whole outbox** — the same newer-supersedes-older trade coalescing makes, but
+across keys rather than within one (ENC-1072). A lossless frame likewise evicts
+the oldest pending `update`.
+
 Consequences for clients:
 - **Intermediate values can vanish.** A client that must see every tick (running
   client-side aggregation, event replay, sequence-critical logic) cannot rely on
   the `update` stream when it falls behind — do the aggregation server-side with
   a pipeline node instead. Chart rendering is unaffected: the newest sample is
   always delivered.
+- **Drops are stale-first, at every queue depth.** A value frame is only ever
+  dropped in favour of a *newer* one, so the last value a producer emits is
+  always either queued or coalesced into a queued frame, and the queue delivers
+  it once production stops. That is what "the newest value always arrives" has
+  to mean for a chart, which would otherwise sit on a stale number indefinitely.
+  Until ENC-1072 this held only *below* the hard bound: at the bound the
+  arriving frame was the one dropped, so a stream whose key had nothing pending
+  went silent for as long as the client stayed behind.
+  What the bound still costs is the final value of a key that fell silent while
+  other traffic kept arriving; a key that keeps producing always wins a slot
+  back.
 - **Order is preserved.** Coalescing replaces the *newest* pending frame for a
   key, so surviving values still arrive in production order, and the final value
-  of a burst is always delivered.
+  of a burst is always delivered. Displacement at the hard bound only ever
+  targets a key with nothing mutable pending, so it cannot put a value ahead of
+  an older value of its own key either. Ordering *between* different keys has
+  never been promised and is not preserved by either path.
 - **The connection is not dropped.** The pre-ENC-996 policy closed the session
   at 4096 queued frames (`ws.outbox_overflow`), so a replay faster than the
   browser could render disconnected the browser. `MAX_OUTBOX_SIZE` is now a
-  memory bound that sheds updates; only a queue of *entirely* lossless protocol
-  frames can still force a close.
+  memory bound that sheds stale updates; only a queue of *entirely* lossless
+  protocol frames can still force a close.
 
 Operator signals: `ws.outbox_backpressure` (one Info line the first time a
-session degrades) and the counters `ws.outbox_coalesced` / `ws.outbox_shed` /
-`ws.outbox_overflow`.
+session degrades, tagged with the policy that fired) and the counters:
+
+| counter | meaning |
+|---|---|
+| `ws.outbox_coalesced` | a newer value superseded the pending value for its own key — the designed degradation |
+| `ws.outbox_shed` | a **stale** queued value frame was dropped to admit something newer |
+| `ws.outbox_shed_newest` | the **arriving** value was dropped. Only possible when all 4096 queued frames are lossless, so there is no value frame to trade against and protocol state must not be dropped for a sample. Non-zero means a stream really did lose its head value |
+| `ws.outbox_overflow` | the queue was entirely lossless at the cap and a further lossless frame arrived — the session is closed |
 
 ### TCP feed (port `cfg.feedPort`, default 9001) — `FeedServer` (market connector)
 

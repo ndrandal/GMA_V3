@@ -68,6 +68,28 @@ private:
   // the number of live (subscription, streamKey) pairs instead of by producer
   // rate, so a producer that outruns the socket degrades to "latest value
   // wins" instead of being disconnected (the pre-ENC-996 policy).
+  //
+  // DROPS ARE STALE-FIRST (ENC-1072). Whenever a value frame has to be thrown
+  // away, the one thrown away is the OLDEST candidate, never the arriving one:
+  //   * below MAX_OUTBOX_SIZE a newer value supersedes the pending value for
+  //     its own key (coalescing);
+  //   * at MAX_OUTBOX_SIZE a newer value displaces the oldest pending value in
+  //     the whole outbox, because there is no free slot to append into.
+  // So the last value a producer emits is always either queued or coalesced
+  // into a queued frame, and once production stops the queue drains it — which
+  // is what "the newest value always arrives" has to mean for a chart that
+  // would otherwise sit on a stale number forever. Before ENC-1072 the bound
+  // dropped the ARRIVING frame, which broke that guarantee at exactly the
+  // point it mattered most.
+  //
+  // What the bound still costs: the final value of a key that fell silent
+  // while other traffic kept arriving can be displaced by a newer value for a
+  // different key. A key that keeps producing always wins a slot back.
+  //
+  // One residual case sheds the newest value, counted separately as
+  // `ws.outbox_shed_newest`: an outbox holding MAX_OUTBOX_SIZE frames that are
+  // ALL lossless. There is no value frame to trade against, and protocol state
+  // must not be dropped to make room for a sample.
   // --------------------------------------------------------------------
   struct CoalesceKey {
     std::uint64_t sub{0};      // per-session subscription instance id; 0 = lossless
@@ -127,7 +149,15 @@ private:
   // Drop the oldest coalescable frame (never the one currently in flight) to
   // make room for a lossless frame. Returns false if there is nothing to shed.
   bool evictOldestCoalescable();
+  // Index of the oldest coalescable frame that is safe to touch, or
+  // outbox_.size() if there is none.
+  std::size_t oldestCoalescableIndex() const;
+  // Overwrite the frame at `i` in place with a newer coalescable frame,
+  // keeping every absolute sequence number valid.
+  void replaceFrame(std::size_t i, std::string payload, const CoalesceKeyView& ckey);
   void reindexOutbox();
+  // Emit the one-per-session "this client is behind" Info line.
+  void noteBackpressure(const char* policy);
 
   // Send a value update on the COALESCABLE path. `subId` is the per-session
   // subscription instance id; `streamKey` disambiguates fan-out subscriptions
@@ -163,9 +193,10 @@ private:
   //
   // MAX_OUTBOX_SIZE is now a memory bound, not a kill switch: coalescing keeps
   // a well-behaved session far below it, and a session that still reaches it
-  // sheds the newest update (or, for a lossless frame, evicts the oldest
-  // shedable one). Only a queue made up ENTIRELY of lossless protocol frames
-  // can still force a close — that really is unbounded memory growth.
+  // sheds the OLDEST queued update to make room for whatever arrives next,
+  // whether that is a lossless frame or a newer value (ENC-1072). Only a queue
+  // made up ENTIRELY of lossless protocol frames can still force a close —
+  // that really is unbounded memory growth.
   static constexpr std::size_t MAX_OUTBOX_SIZE = 4096;
   // Low-water mark: below this depth the outbox is a plain lossless FIFO, so a
   // consumer that is keeping up (or only briefly behind) still receives EVERY
