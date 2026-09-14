@@ -304,6 +304,12 @@ TEST(InjectedAtomicTest, RawInjectionRespectsMaxFieldsPerSymbol) {
 // a field literally named after a builtin would collide. That collision axis
 // belongs to ENC-1008; ENC-1007 must not change who wins today, so the derived
 // value is pinned as the winner.
+//
+// ENC-1008 update: still true, and still the DEFAULT — this fixture builds a
+// default-constructed Config, i.e. `atomicKeyNamespaceByField == false`. With
+// the flag on the derived value moves to `mean.mean` and the raw field becomes
+// the only writer of the bare key; that state is pinned by
+// AtomicKeyNamespaceTest.NamespacingVacatesTheBareKeyForTheRawField.
 TEST(InjectedAtomicTest, DerivedAtomicStillWinsOverASameNamedRawField) {
   rt::ThreadPool pool(1);
   AtomicStore store;

@@ -49,17 +49,141 @@ Two consequences worth knowing:
   materialise in the store whether or not anything is subscribed —
   otherwise §8.1's "on an interval, grab that atomic value" is
   unreachable for injected series.
-- **Derived values win a name clash.** Builtin atomics (`mean`, `sum`,
-  `stddev`, …) live in a flat per-symbol namespace keyed by bare
-  function name, so a raw field literally called `mean` collides with
-  the builtin `mean`. The raw write happens *first*, so the derived
-  value is the last writer and no existing binding changes meaning.
-  Namespacing the two apart is ENC-1008.
+- **Derived values win a name clash** (default). Builtin atomics
+  (`mean`, `sum`, `stddev`, …) live in a flat per-symbol namespace
+  keyed by bare function name, so a raw field literally called `mean`
+  collides with the builtin `mean`. The raw write happens *first*, so
+  the derived value is the last writer and no existing binding changes
+  meaning. ENC-1008 namespaces the two apart behind
+  `atomicKeyNamespaceByField` — see
+  [Derived-atomic key shape](#derived-atomic-key-shape--atomickeynamespacebyfield-enc-1008)
+  below.
 
 Admission is bounded by the same `maxSymbols` / `maxFieldsPerSymbol`
 budget that bounds per-field history, so injection cannot grow the
 store without limit. Once a cap is reached, **new** symbols/fields are
 rejected; already-admitted ones keep updating.
+
+## Derived-atomic key shape — `atomicKeyNamespaceByField` (ENC-1008)
+
+`Dispatcher::computeAndStoreAtomics` recomputes the FunctionMap
+builtins over **one field's** history and writes the result into the
+AtomicStore. Which key it writes is switchable:
+
+| `atomicKeyNamespaceByField` | Store key | Status |
+|---|---|---|
+| `false` | `<fn>` — bare, e.g. `mean` | **Default.** Pre-ENC-1008 behaviour. |
+| `true` | `<field>.<fn>` — e.g. `alpha.mean` | Opt-in. |
+
+### The defect the flag fixes
+
+The bare key is **one slot per symbol per builtin**, shared by every
+field of that symbol. With a symbol whose `alpha` and `beta` fields
+both drive `mean`, the second field to tick overwrites the first and
+that value is gone:
+
+```
+alpha history [10, 20]   -> mean  15   ─┐
+                                        ├─ both write (SYM, "mean")
+beta  history [100, 200] -> mean 150   ─┘   -> store holds 150; 15 is lost
+```
+
+Turn the flag on and they become `alpha.mean = 15` and
+`beta.mean = 150`, which is the whole point of the ticket.
+
+The single-primary-field assumption the old shape encoded was never an
+external requirement — `docs/CODE_REVIEW_2026-06-26.md` §M9 records it
+as a **CONFIRMED** defect whose two sanctioned fixes were "incorporate
+`field` into the key, **or** document/enforce the single-field
+assumption", and ENC-792 took the second branch. The flag exists
+because the key is client-visible, not because flat is correct.
+
+### Why it is a flag, and why it defaults off
+
+The store key is a **client-supplied wire string**. `field` in a WS
+subscribe request is read verbatim by `TreeBuilder` and used as both
+the `Listener` subscription key (push) and the `AtomicAccessor` field
+(pull). There is no version negotiation on it, so the shape cannot
+simply change under existing clients.
+
+### Exactly what changes when you flip it on
+
+- **AtomicStore keys for derived builtins move** from `<fn>` to
+  `<field>.<fn>`. This is the breaking half, and it has two shapes:
+
+  - For the 53 builtin names nothing else writes, an
+    **`AtomicAccessor` bound to the bare name stops resolving** — a
+    loud failure.
+  - For **`mean`, `median` and `spread`** the bare key does *not* go
+    away, and that is worse. `MarketTickComputer` writes those three
+    itself, over **price** history (`MarketTA.cpp` ~91-92 and ~391).
+    Today the Dispatcher runs after the computers in `onTick`, so its
+    builtin is the last writer and wins the key. With the flag on it
+    vacates the key and MarketTA's value — *a different number, not a
+    missing one* — is what a bare `mean` reads. Silent value change.
+
+  For those three names the flag also **splits push from pull**: a
+  Listener on bare `mean` still receives the Dispatcher's per-field
+  mean, while an `AtomicAccessor` on bare `mean` reads MarketTA's price
+  mean. Under the default they agree. Pinned by
+  `AtomicKeyNamespaceTest.MarketTAKeepsTheBareKeyAliveWithADifferentValue`.
+- **Listener push does not change.** A subscriber on the bare `mean`
+  still receives every field's mean, exactly as before;
+  `<field>.<fn>` becomes *additionally* subscribable and narrows to
+  one field. The outbound WS surface carries no key string at all
+  (`update` frames are `type` / request key / `streamKey` / `value`),
+  so nothing on the response side needs migrating.
+- **Only the Dispatcher's builtins move.** `MarketTickComputer`'s bare
+  keys (`lastPrice`, `bid`, `sma_5`, its own `mean`/`median`, …),
+  `ob.*` and the ENC-1007 raw injected fields are untouched in both
+  states. One side effect worth knowing: with the flag on the
+  Dispatcher vacates the bare `mean`/`median`/`spread` keys, so
+  MarketTA's same-named values stop being contested in the store.
+  MarketTA's own notify-suppression list (`_skipFields`) is unchanged.
+- **Key cardinality grows.** Derived keys multiply by the number of
+  listened fields, so `maxFieldsPerSymbol` / `AtomicStore::setCaps`
+  budgets are consumed faster. Note the failure mode: past a cap
+  `AtomicStore::set` silently drops **new** keys, so flipping this flag
+  can stop some *other* producer's key being admitted at all.
+- **Dotted keys meet the provider grammar.** `AtomicProviderRegistry`
+  splits a key on its first `.` and treats the prefix as a provider
+  namespace. A *present* `alpha.mean` is served from the store and
+  never reaches that path, but a *missing* one will probe for a
+  provider named `alpha`. Harmless today — `ob` is the only registered
+  provider namespace (`MarketConnector.cpp`); `synthetic.*` is a plain
+  store-key prefix with no provider behind it. But do not register a
+  provider namespace that collides with a field name.
+- **A field named after an existing dotted prefix can collide.** The
+  new key is a plain `field + "." + fn` concatenation, so a tick field
+  literally called `ob` driving the builtin `spread` writes
+  `ob.spread` — the key `ob::Provider` owns — and a field called
+  `synthetic` driving `sin` writes `synthetic.sin`, the
+  `SyntheticConnector`'s. Nothing rejects either:
+  `nodes::Listener::Create` only refuses fields with a literal `ob.`
+  prefix, and bare `ob` is two characters. `AtomicAccessor` checks the
+  store *before* falling back to the provider registry, so the written
+  key wins and the real order-book value is silently shadowed — while
+  the namespaced key itself is not Listener-subscribable, because
+  `ob.*` is rejected. Narrow and opt-in-only, but a genuine new
+  silent-overwrite path: **do not name a tick field `ob` or
+  `synthetic` with this flag on.**
+
+### Migration checklist before flipping it on
+
+Anything that names a bare builtin as a `field` must move to
+`<field>.<fn>`:
+
+- checked-in WS corpora — `tools/nl-tree/corpus_ws_messages.json`,
+  `tools/nl-tree/corpus.json`, `tests/treebuilder/corpus_requests.json`
+  (`"field": "mean"` / `"median"` inside `AtomicAccessor` nodes);
+- `tools/nl-tree/schema.py`'s "Available atomic fields" list, which is
+  what the NL tool generates client trees from;
+- **saved pipelines in the forum DB**, which are stored client JSON and
+  cannot be migrated from this repo.
+
+Note that the corpora's `mean`/`median` are `MarketTickComputer` keys,
+which do **not** move — check each one against its actual producer
+rather than renaming on sight.
 
 ## Push vs pull — the rule
 
