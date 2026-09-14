@@ -1,6 +1,7 @@
 // Registers engine builtins (worker functions and node types), constructs a
-// process-static MarketConnector, and calls its registerWith() — NOT start(). Tests don't need live sockets, so the feed
-// server / WS clients are constructed but never started. The "tick" event
+// process-static MarketConnector, and calls its registerWith() — NOT start().
+// Tests don't need live sockets, so the feed server / WS clients are
+// constructed but never started. The "tick" event
 // computer factory is registered with EventComputerRegistry as a side effect
 // of registerWith, so every Dispatcher built in any test picks up its own
 // fresh MarketTickComputer the first time it sees a tick.
