@@ -262,14 +262,7 @@ void ClientSession::enqueue(std::string payload, const CoalesceKeyView* ckey) {
       if (seq >= firstMutable && seq < outboxHeadSeq_ + outbox_.size()) {
         outbox_[static_cast<std::size_t>(seq - outboxHeadSeq_)].payload = std::move(payload);
         GMA_METRIC_HIT("ws.outbox_coalesced");
-        if (!backpressureLogged_) {
-          backpressureLogged_ = true;
-          gma::util::logger().log(gma::util::LogLevel::Info,
-                                  "ws.outbox_backpressure",
-                                  {{"sessionId", std::to_string(sessionId_)},
-                                   {"queueSize", std::to_string(outbox_.size())},
-                                   {"policy", "coalesce-latest"}});
-        }
+        noteBackpressure("coalesce-latest");
         return;
       }
       // Either stale (already drained) or the frame currently in flight —
@@ -280,11 +273,34 @@ void ClientSession::enqueue(std::string payload, const CoalesceKeyView* ckey) {
   }
 
   // ---- 2. Hard memory bound ----------------------------------------------
+  // The outbox is at its memory cap, so this frame can only be admitted by
+  // dropping one that is already queued — or by dropping itself.
+  //
+  // ENC-1072: a coalescable frame used to drop ITSELF here, which contradicted
+  // ENC-996's guarantee at precisely the point the guarantee matters. Step 1
+  // above did not fire, so this key has NO mutable pending frame — the value
+  // being discarded was the client's only chance at a fresh number for that
+  // stream, and nothing newer was coming to repair it. Displace the OLDEST
+  // pending value instead: that is the same trade coalescing makes below the
+  // bound (newer supersedes older), applied across keys rather than within
+  // one, and it makes drops stale-first everywhere.
   if (outbox_.size() >= MAX_OUTBOX_SIZE) {
     if (ckey) {
-      // The client is hopelessly behind and already has a pending frame for
-      // (nearly) every stream. Drop the newest update instead of the session.
-      GMA_METRIC_HIT("ws.outbox_shed");
+      const std::size_t victim = oldestCoalescableIndex();
+      if (victim < outbox_.size()) {
+        replaceFrame(victim, std::move(payload), *ckey);
+        GMA_METRIC_HIT("ws.outbox_shed");
+        noteBackpressure("displace-oldest");
+        return;
+      }
+      // Nothing to displace: every queued frame is lossless protocol state,
+      // which must not be dropped to make room for a sample. This is the one
+      // case where the newest value really is lost, so it gets its own counter
+      // — `ws.outbox_shed` means "a stale value was dropped", which is the
+      // designed degradation, while this means "the head of a stream was
+      // dropped", which is not.
+      GMA_METRIC_HIT("ws.outbox_shed_newest");
+      noteBackpressure("shed-newest");
       return;
     }
     // Lossless frame: make room by shedding the oldest update.
@@ -318,22 +334,81 @@ void ClientSession::enqueue(std::string payload, const CoalesceKeyView* ckey) {
   }
 }
 
-// Must be called on-strand.
-bool ClientSession::evictOldestCoalescable() {
-  // Never touch outbox_.front() while a write is in flight.
+// Must be called on-strand. Index of the oldest coalescable frame that may be
+// dropped or overwritten, or outbox_.size() if there is none.
+//
+// outbox_.front() is skipped while a write is in flight: Beast holds a buffer
+// pointing straight into that frame's payload string.
+//
+// The scan costs the length of the run of lossless frames at the head, not the
+// length of the queue. Under the shape that actually reaches the bound — a
+// value flood — the head is a value frame and this returns immediately; the
+// walk only gets long for a session whose queue is mostly protocol traffic,
+// which is also the session that is about to be closed by the overflow branch.
+std::size_t ClientSession::oldestCoalescableIndex() const {
   const std::size_t start = writing_ ? 1u : 0u;
   for (std::size_t i = start; i < outbox_.size(); ++i) {
-    if (!outbox_[i].coalescable()) continue;
-    outbox_.erase(outbox_.begin() + static_cast<std::ptrdiff_t>(i));
-    // Erasing from the middle shifts every later frame down one slot, so the
-    // recorded sequence numbers are stale. This path only fires when the queue
-    // is full of protocol frames (rare, and never the value hot path), so a
-    // full rebuild is cheaper to reason about than patching the index.
-    reindexOutbox();
-    GMA_METRIC_HIT("ws.outbox_shed");
-    return true;
+    if (outbox_[i].coalescable()) return i;
   }
-  return false;
+  return outbox_.size();
+}
+
+// Must be called on-strand. Overwrite slot `i` with a newer coalescable frame.
+//
+// In place rather than erase+push_back on purpose: the deque keeps its length,
+// so every absolute sequence number stays valid and only the two affected index
+// entries need touching. An erase would shift every later frame down one slot
+// and force a full reindexOutbox(), turning the hot path quadratic.
+//
+// Ordering is safe because this is only reached for a key with no MUTABLE
+// pending frame: either the key has nothing queued, or its only queued frame is
+// the one in flight at the head — which sits ahead of slot `i` (the scan starts
+// at 1 while writing). So the replacement can never land in front of an older
+// value for its own key. Values for OTHER keys are overtaken, which coalescing
+// already does and which the wire has never ordered across keys.
+void ClientSession::replaceFrame(std::size_t i,
+                                 std::string payload,
+                                 const CoalesceKeyView& ckey) {
+  OutFrame& f = outbox_[i];
+  const std::uint64_t seq = outboxHeadSeq_ + i;
+  if (f.coalescable()) {
+    // Only drop the victim's index entry if it still points HERE; a newer frame
+    // for the victim's key may sit further back and must keep its mapping.
+    auto it = coalesceIndex_.find(CoalesceKeyView{f.key.sub, f.key.streamKey});
+    if (it != coalesceIndex_.end() && it->second == seq) {
+      coalesceIndex_.erase(it);
+    }
+  }
+  f.payload = std::move(payload);
+  f.key.sub = ckey.sub;
+  f.key.streamKey.assign(ckey.streamKey);
+  coalesceIndex_[f.key] = seq;
+}
+
+// Must be called on-strand.
+void ClientSession::noteBackpressure(const char* policy) {
+  if (backpressureLogged_) return;  // one Info line per session, not per frame
+  backpressureLogged_ = true;
+  gma::util::logger().log(gma::util::LogLevel::Info,
+                          "ws.outbox_backpressure",
+                          {{"sessionId", std::to_string(sessionId_)},
+                           {"queueSize", std::to_string(outbox_.size())},
+                           {"policy", policy}});
+}
+
+// Must be called on-strand.
+bool ClientSession::evictOldestCoalescable() {
+  const std::size_t i = oldestCoalescableIndex();
+  if (i >= outbox_.size()) return false;
+  outbox_.erase(outbox_.begin() + static_cast<std::ptrdiff_t>(i));
+  // Erasing from the middle shifts every later frame down one slot, so the
+  // recorded sequence numbers are stale. This path only fires to make room for
+  // a LOSSLESS frame — rare, and never the value hot path, which displaces in
+  // place via replaceFrame() — so a full rebuild is cheaper to reason about
+  // than patching the index.
+  reindexOutbox();
+  GMA_METRIC_HIT("ws.outbox_shed");
+  return true;
 }
 
 // Must be called on-strand.
