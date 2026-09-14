@@ -266,6 +266,9 @@ void Dispatcher::computeAndStoreAtomics(const std::string& symbol,
   // flipping the flag breaks. OFF is the pre-ENC-1008 flat namespace
   // (ENC-792/M9) and must stay bit-identical to it.
   const bool nsByField = _cfg.atomicKeyNamespaceByField;
+  // Built once rather than per-builtin: forEach below runs over all 56
+  // registered reducers, and this is the per-tick hot path.
+  const std::string nsPrefix = nsByField ? field + "." : std::string{};
   auto& fmap = FunctionMap::instance();
 
   // Snapshot this symbol's subscribers once. If nothing is subscribed there is
@@ -299,7 +302,7 @@ void Dispatcher::computeAndStoreAtomics(const std::string& symbol,
     auto nsIt   = symListeners.end();
     std::string nsKey;
     if (nsByField) {
-      nsKey = field + "." + fnName;
+      nsKey = nsPrefix + fnName;
       nsIt  = symListeners.find(nsKey);
     }
     if (bareIt == symListeners.end() && nsIt == symListeners.end()) {
