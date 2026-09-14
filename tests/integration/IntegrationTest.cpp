@@ -243,9 +243,27 @@ TEST(IntegrationTest, TickToListenerToWorkerToTerminal) {
 
     pool.shutdown();
 
+    // ORDER IS NOT A GUARANTEE TODAY — do not "fix" this back to an indexed
+    // comparison (ENC-1085). `Listener::onValue` re-posts each tick's downstream
+    // work into the shared unsharded pool, and `Dispatcher`'s concurrency
+    // contract states in so many words that it "adds no further serialisation".
+    // With two worker threads the second tick can overtake the first, so
+    // asserting received[0]==200 flaked at ~1-3% under CPU contention.
+    // Deterministic per-symbol ordering is ENC-1005's job; until that lands, the
+    // multiset is the strongest property the pipeline actually promises.
+    //
+    // The multiset IS exact, not a weakened "something arrived" check: `Worker`
+    // pushes the incoming value and calls fn_ while still holding its mutex, so
+    // the two invocations serialise and `doubleFn` (which doubles the LAST
+    // accumulated value) always sees the tick that its own call just pushed.
+    // Every call therefore emits exactly 2x its own tick, whichever order the
+    // pool runs them in — {200, 400} either way.
     ASSERT_EQ(terminal->safeSize(), 2u);
-    EXPECT_DOUBLE_EQ(std::get<double>(terminal->received[0].value), 200.0);
-    EXPECT_DOUBLE_EQ(std::get<double>(terminal->received[1].value), 400.0);
+    std::vector<double> vals;
+    for (auto& sv : terminal->received) vals.push_back(std::get<double>(sv.value));
+    std::sort(vals.begin(), vals.end());
+    EXPECT_DOUBLE_EQ(vals[0], 200.0);
+    EXPECT_DOUBLE_EQ(vals[1], 400.0);
 }
 
 TEST(IntegrationTest, MultipleListenersSameSymbol) {
