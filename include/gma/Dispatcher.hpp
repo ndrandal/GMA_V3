@@ -110,6 +110,10 @@ private:
   //     injected fields are untouched in both states.
   //   * More distinct store keys per symbol, so `maxFieldsPerSymbol` /
   //     AtomicStore::setCaps budgets are consumed faster.
+  //   * The key is a plain `field + "." + fn` concatenation, so a field named
+  //     after a provider namespace can collide with it (a field `ob` driving
+  //     the builtin `spread` writes `ob.spread`, which ob::Provider owns).
+  //     Narrow, opt-in-only, and documented in docs/atomic-keys.md.
   void computeAndStoreAtomics(const std::string& symbol,
                               const std::string& field,
                               const std::vector<double>& history);

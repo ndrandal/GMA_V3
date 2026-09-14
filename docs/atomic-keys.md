@@ -134,6 +134,16 @@ simply change under existing clients.
   provider named `alpha`. Harmless today (only `ob` and `synthetic`
   are registered) — but do not register a provider namespace that
   collides with a field name.
+- **A field named after a provider namespace can collide.** The new key
+  is a plain `field + "." + fn` concatenation, so a tick field
+  literally called `ob` driving the builtin `spread` writes
+  `ob.spread` — the same key `ob::Provider` owns. Nothing rejects it:
+  `nodes::Listener::Create` only refuses fields with a literal `ob.`
+  prefix, and bare `ob` is two characters. The builtin names that make
+  this reachable are `spread`, `mid`-adjacent reducers and anything
+  else in `ObKeysCatalog`. Narrow and opt-in-only, but it is a genuine
+  new silent-overwrite path — do not name a tick field `ob` with this
+  flag on.
 
 ### Migration checklist before flipping it on
 
