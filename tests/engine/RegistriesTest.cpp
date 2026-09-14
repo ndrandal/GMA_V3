@@ -182,6 +182,23 @@ TEST(NodeTypeRegistryTest, MissingFindReturnsNull) {
   EXPECT_FALSE(NodeTypeRegistry::contains("__test_absent__"));
 }
 
+// ---------- Bootstrap idempotence (ENC-1102) ----------
+//
+// gtest re-runs the global Environment::SetUp() on every --gtest_repeat
+// iteration, and MarketConnector::registerWith() APPENDS its "tick" computer
+// factory to the process-global EventComputerRegistry (there is no per-factory
+// removal). Unguarded, iteration N therefore ran N MarketTickComputers per
+// tick, each with its own TA history — silent double-computation across the
+// whole suite, not just a failing assertion. Nothing else in the binary
+// registers a "tick" factory, so this count is an order-independent invariant.
+
+TEST(BootstrapIdempotenceTest, TickComputerFactoryRegisteredExactlyOnce) {
+  EXPECT_EQ(EventComputerRegistry::factoryCount("tick"), 1u)
+      << "test bootstrap re-registered the market tick computer; every "
+         "Dispatcher in this iteration computes each tick's atomics more than "
+         "once";
+}
+
 // ---------- IngressRegistry ----------
 
 TEST(IngressRegistryTest, RegisterAndFind) {
