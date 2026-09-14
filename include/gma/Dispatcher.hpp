@@ -76,16 +76,60 @@ public:
 private:
   // Recompute FunctionMap builtins over `history` and publish them.
   //
-  // ATOMIC-KEY CONTRACT (ENC-792/M9): builtin atomics live in a FLAT per-symbol
-  // namespace keyed by bare function name (mean, sum, stddev, …) — the same key
-  // shape Listeners bind to and AtomicAccessor reads from the AtomicStore, and
-  // the shape MarketTA writes. `field` is therefore deliberately NOT folded into
-  // the stored key: a symbol is assumed to have a single primary value field
-  // driving its builtin atomics. If two fields of one symbol both flow through
-  // here, they share this namespace (last tick wins). Namespacing the key by
-  // field would silently break every Listener / AtomicAccessor binding, so the
-  // single-primary-field assumption is documented and enforced by key shape
-  // rather than changed. `field` is retained in the signature for diagnostics.
+  // ATOMIC-KEY CONTRACT (ENC-792/M9, amended by ENC-1008).
+  //
+  // The stored key shape is a CLIENT-VISIBLE string, not an internal detail:
+  // `field` in a WS subscribe request is read straight out of the request JSON
+  // by TreeBuilder for both `Listener` and `AtomicAccessor` (TreeBuilder.cpp
+  // ~257 and ~480), and AtomicAccessor resolves it against this store. There is
+  // no version negotiation on it. That is why the shape is switchable by config
+  // rather than simply changed.
+  //
+  // OFF — `cfg.atomicKeyNamespaceByField == false` (the default, and the
+  // pre-ENC-1008 behaviour): builtin atomics live in a FLAT per-symbol namespace
+  // keyed by bare function name (mean, sum, stddev, …) — the same key shape
+  // Listeners bind to, AtomicAccessor reads, and MarketTA writes. `field` is not
+  // folded into the key: a symbol is ASSUMED to have a single primary value
+  // field driving its builtins. When that assumption does not hold — two fields
+  // of one symbol both driving `mean` — they share the one key and the last
+  // field written wins, silently losing the other. That is the ENC-1008 defect.
+  //
+  // ON — `cfg.atomicKeyNamespaceByField == true`: the stored key is
+  // `<field>.<fn>` (`price.mean`, `size.mean`), so each source field keeps its
+  // own derived values and neither is lost.
+  //
+  // What flipping it changes, exactly:
+  //   * AtomicStore keys for DERIVED builtins move from `<fn>` to `<field>.<fn>`.
+  //     This is the breaking half, and the reason the default is OFF. It has
+  //     two shapes, and the second is nastier:
+  //       - For the 53 builtin names nothing else writes, an `AtomicAccessor`
+  //         bound to the bare name stops resolving — a loud failure.
+  //       - For `mean`, `median` and `spread`, which MarketTickComputer ALSO
+  //         writes (over price history, MarketTA.cpp ~91-92 and ~391), the bare
+  //         key keeps resolving and silently returns MarketTA's value instead
+  //         of the Dispatcher's. Today the Dispatcher wins the key by running
+  //         after the computers; with the flag on it vacates it. That also
+  //         splits push from pull for those three names — a Listener on bare
+  //         `mean` still gets the Dispatcher's per-field mean while an
+  //         AtomicAccessor on bare `mean` now reads MarketTA's price mean.
+  //         Pinned by AtomicKeyNamespaceTest
+  //         .MarketTAKeepsTheBareKeyAliveWithADifferentValue.
+  //   * Listener PUSH is unchanged. Subscribers on the bare `<fn>` still receive
+  //     every value exactly as before; `<field>.<fn>` becomes ADDITIONALLY
+  //     subscribable. So the WS streaming surface is identical in both states.
+  //   * Only builtins written by THIS function move. Connector-written atomics
+  //     (MarketTA's bare `lastPrice`/`sma_5`/…, `ob.*`) and the ENC-1007 raw
+  //     injected fields are untouched in both states.
+  //   * More distinct store keys per symbol, so `maxFieldsPerSymbol` /
+  //     AtomicStore::setCaps budgets are consumed faster. The failure mode is a
+  //     silent drop: past the cap AtomicStore::set discards NEW keys, so
+  //     flipping this can stop some OTHER producer's key being admitted.
+  //   * The key is a plain `field + "." + fn` concatenation, so a field named
+  //     after an existing dotted key prefix can collide with it: a field `ob`
+  //     driving the builtin `spread` writes `ob.spread` (ob::Provider's key),
+  //     and a field `synthetic` driving `sin` writes `synthetic.sin`
+  //     (SyntheticConnector's). Narrow, opt-in-only, documented in
+  //     docs/atomic-keys.md.
   void computeAndStoreAtomics(const std::string& symbol,
                               const std::string& field,
                               const std::vector<double>& history);

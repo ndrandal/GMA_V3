@@ -115,3 +115,39 @@ TEST(ConfigTest, DefaultNewTAFields) {
     EXPECT_EQ(cfg.taMACD_signal, 9);
     EXPECT_EQ(cfg.taVolAvg, 20);
 }
+
+// ENC-1008 — the derived-atomic key shape is INI-switchable, and defaults off.
+// The default matters more than the parse: the key it controls is a
+// client-visible WS `field` string, so a build that silently came up namespaced
+// would break existing AtomicAccessor bindings (see docs/atomic-keys.md).
+TEST(ConfigTest, AtomicKeyNamespaceByFieldDefaultsOff) {
+    EXPECT_FALSE(Config{}.atomicKeyNamespaceByField);
+}
+
+TEST(ConfigTest, AtomicKeyNamespaceByFieldParsesTruthyForms) {
+    for (const char* v : {"true", "1", "yes"}) {
+        const char* path = "test_config_atomic_ns.ini";
+        {
+            std::ofstream f(path);
+            f << "atomicKeyNamespaceByField=" << v << "\n";
+        }
+        Config cfg;
+        EXPECT_TRUE(cfg.loadFromFile(path));
+        EXPECT_TRUE(cfg.atomicKeyNamespaceByField) << "value: " << v;
+        std::remove(path);
+    }
+}
+
+TEST(ConfigTest, AtomicKeyNamespaceByFieldStaysOffForAnythingElse) {
+    for (const char* v : {"false", "0", "no", ""}) {
+        const char* path = "test_config_atomic_ns_off.ini";
+        {
+            std::ofstream f(path);
+            f << "atomicKeyNamespaceByField=" << v << "\n";
+        }
+        Config cfg;
+        EXPECT_TRUE(cfg.loadFromFile(path));
+        EXPECT_FALSE(cfg.atomicKeyNamespaceByField) << "value: '" << v << "'";
+        std::remove(path);
+    }
+}

@@ -183,6 +183,13 @@ via an `AtomicAccessor`, never a direct Listener). The push-vs-pull rule, the
 canonical `ob.*`-in-a-chart pattern, and the exact emitted key names are in
 **[docs/atomic-keys.md](./docs/atomic-keys.md)**.
 
+Derived FunctionMap builtins (`mean`, `sum`, `stddev`, …) are stored under the
+bare function name by default — a single per-symbol slot shared by every field,
+so two fields driving the same builtin overwrite each other. Set
+`atomicKeyNamespaceByField = true` to key them `<field>.<fn>` instead; see
+[docs/atomic-keys.md](./docs/atomic-keys.md#derived-atomic-key-shape--atomickeynamespacebyfield-enc-1008)
+for the migration, since the key is client-visible.
+
 ### TCP feed (market connector, default port 9001)
 
 The market connector's `FeedServer` accepts GMA's own line-delimited JSON:
