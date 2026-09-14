@@ -79,23 +79,6 @@ public:
   // Maximum distinct fields per symbol in per-field histories.
   int maxFieldsPerSymbol = 200;
 
-  // ENC-1008 — namespace derived builtin atomics by their source field.
-  //
-  // OFF (default, and today's behaviour): FunctionMap builtins are stored in a
-  // FLAT per-symbol namespace keyed by bare function name, so two fields of one
-  // symbol that both drive `mean` overwrite each other in the AtomicStore
-  // (last field wins, ordered by the listener map). See the ATOMIC-KEY CONTRACT
-  // on Dispatcher::computeAndStoreAtomics and docs/atomic-keys.md.
-  //
-  // ON: builtins are stored as `<field>.<fn>` (e.g. `price.mean`), so each
-  // source field keeps its own derived values. This CHANGES a client-visible
-  // key: `field` in a WS subscribe is exactly this string (TreeBuilder reads it
-  // for both Listener and AtomicAccessor), so flipping it breaks any
-  // AtomicAccessor bound to a bare builtin name. Listener push is unaffected —
-  // bare-name subscribers still fire — so the migration is store-readers only.
-  // Default OFF because there is no wire-level version negotiation for it.
-  bool atomicKeyNamespaceByField = false;
-
   // Metrics reporter
   bool metricsEnabled = false;
   int  metricsIntervalSec = 15;

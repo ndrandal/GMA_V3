@@ -78,11 +78,7 @@ void Dispatcher::onTick(const Event& tick) {
   // keyed by bare function name (ENC-792/M9), so a raw field literally called
   // `mean` collides with the builtin `mean`; keeping the derived value as the
   // last writer means no existing Listener or AtomicAccessor binding changes
-  // meaning. ENC-1008 namespaces the two apart when
-  // `atomicKeyNamespaceByField` is on: with the flag set the derived value
-  // moves to `<field>.<fn>`, so the raw injected `mean` is the only writer of
-  // the bare `mean` key and nothing is overwritten in either direction. With
-  // the flag off (the default) the ordering above still decides, unchanged.
+  // meaning. Namespacing the two apart is ENC-1008.
   //
   // Cardinality is bounded by AtomicStore's existing caps (maxSymbols /
   // maxFieldsPerSymbol, applied in main.cpp), which drop only NEW keys past
@@ -257,15 +253,12 @@ void Dispatcher::notifyListeners(const std::string& symbol,
 }
 
 void Dispatcher::computeAndStoreAtomics(const std::string& symbol,
-                                              const std::string& field,
+                                              const std::string& /*field*/,
                                               const std::vector<double>& history)
 {
-  // ENC-1008. `field` is folded into the stored key only when
-  // `atomicKeyNamespaceByField` is on; see the ATOMIC-KEY CONTRACT on the
-  // declaration in Dispatcher.hpp for what the two states mean and what
-  // flipping the flag breaks. OFF is the pre-ENC-1008 flat namespace
-  // (ENC-792/M9) and must stay bit-identical to it.
-  const bool nsByField = _cfg.atomicKeyNamespaceByField;
+  // `field` is intentionally unused — builtin atomics share a flat per-symbol
+  // namespace keyed by bare function name (single-primary-field contract; see
+  // the declaration in Dispatcher.hpp, ENC-792/M9).
   auto& fmap = FunctionMap::instance();
 
   // Snapshot this symbol's subscribers once. If nothing is subscribed there is
@@ -291,20 +284,8 @@ void Dispatcher::computeAndStoreAtomics(const std::string& symbol,
   fmap.forEach([&](const std::string& fnName, const Func& fn) {
     if (!fn) return;
 
-    // Subscription gate (ENC-792/M10): skip the compute entirely when nothing
-    // is listening. With namespacing on, EITHER key counts as a subscription —
-    // the bare name keeps working so push behaviour does not change, and
-    // `<field>.<fn>` becomes additionally subscribable.
-    auto bareIt = symListeners.find(fnName);
-    auto nsIt   = symListeners.end();
-    std::string nsKey;
-    if (nsByField) {
-      nsKey = field + "." + fnName;
-      nsIt  = symListeners.find(nsKey);
-    }
-    if (bareIt == symListeners.end() && nsIt == symListeners.end()) {
-      return;  // not subscribed -> skip compute
-    }
+    auto fit = symListeners.find(fnName);
+    if (fit == symListeners.end()) return;  // not subscribed -> skip compute
 
     double result = 0.0;
     try {
@@ -318,26 +299,17 @@ void Dispatcher::computeAndStoreAtomics(const std::string& symbol,
     }
 
     if (_store) {
-      // The ONE line this ticket is about. Flat `<fn>` is a single slot shared
-      // by every field of the symbol, so a second field driving the same
-      // builtin destroys the first field's value. `<field>.<fn>` gives each
-      // source field its own slot.
-      _store->set(symbol, nsByField ? nsKey : fnName, result);
+      _store->set(symbol, fnName, result);
     }
 
-    const auto notify = [&](const std::vector<std::shared_ptr<INode>>& targets) {
-      for (auto& listener : targets) {
-        if (_threadPool) {
-          _threadPool->post([listener, symbol, result]() {
-            if (listener) listener->onValue(StreamValue{ symbol, result });
-          });
-        } else {
+    for (auto& listener : fit->second) {
+      if (_threadPool) {
+        _threadPool->post([listener, symbol, result]() {
           if (listener) listener->onValue(StreamValue{ symbol, result });
-        }
+        });
+      } else {
+        if (listener) listener->onValue(StreamValue{ symbol, result });
       }
-    };
-
-    if (bareIt != symListeners.end()) notify(bareIt->second);
-    if (nsIt   != symListeners.end()) notify(nsIt->second);
+    }
   });
 }
