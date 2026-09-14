@@ -4,6 +4,7 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <string>
 
 using namespace gma;
 
@@ -68,23 +69,32 @@ TEST(FunctionMapTest, OverwriteFunction) {
     EXPECT_DOUBLE_EQ(fn2({}), 2.0);
 }
 
+// ENC-1102: the name must be unique per invocation. FunctionMap is a process
+// -global singleton and registerFunction() REPLACES in place (pinned by
+// OverwriteFunction above), so on a second --gtest_repeat iteration a fixed
+// name is already in the map and the size does not grow — the size assertion
+// failed with "62 vs 63" while the map was in fact perfectly correct.
 TEST(FunctionMapTest, GetAllContainsRegistered) {
+    static std::atomic<unsigned> counter{0};
+    const std::string name =
+        "allTest." + std::to_string(counter.fetch_add(1));
+
     auto& fm = FunctionMap::instance();
     // Snapshot before registration
     auto before = fm.getAll();
     // Register a test function
-    fm.registerFunction("allTest", [](const std::vector<double>&) {
+    fm.registerFunction(name, [](const std::vector<double>&) {
         return 0.0;
     });
     auto all = fm.getAll();
-    // Expect at least one new entry
-    EXPECT_GE(all.size(), before.size() + 1);
+    // Expect exactly one new entry — the name was not in `before`.
+    EXPECT_EQ(all.size(), before.size() + 1);
     // Verify our function is present
     bool found = false;
     for (const auto& kv : all) {
-        if (kv.first == "allTest") { found = true; break; }
+        if (kv.first == name) { found = true; break; }
     }
-    EXPECT_TRUE(found) << "Function 'allTest' should be listed in getAll()";
+    EXPECT_TRUE(found) << "Function '" << name << "' should be listed in getAll()";
 }
 
 TEST(FunctionMapTest, GetFunctionThrowsIfNotFound) {

@@ -8,6 +8,7 @@
 #include "gma/Event.hpp"
 
 #include <gtest/gtest.h>
+#include <atomic>
 #include <memory>
 #include <string>
 
@@ -38,6 +39,20 @@ public:
   void start() override {}
   void stop() noexcept override {}
 };
+
+// ENC-1102: EventComputerRegistry and NodeTypeRegistry are process-global
+// singletons with no per-entry removal, and gtest re-runs every test body on
+// each --gtest_repeat iteration. A test that registers a FIXED key therefore
+// meets, on iteration 2, a registry its own iteration-1 run already populated:
+// the event-computer registry had four factories instead of two (it appends by
+// design) and registerNodeType() returned false (it is first-wins by design).
+// Deriving the key per invocation keeps these tests idempotent across
+// iterations without weakening either registry's production semantics. This is
+// the convention tests/engine/EventComputerCacheTest.cpp already follows.
+std::string uniqueKey(const char* stem) {
+  static std::atomic<unsigned> counter{0};
+  return std::string(stem) + "." + std::to_string(counter.fetch_add(1));
+}
 
 } // namespace
 
@@ -86,22 +101,22 @@ TEST(EventTypeRegistryTest, NamesListsAll) {
 // registered at bootstrap (e.g. the market "tick" computer once Step 8 lands).
 
 TEST(EventComputerRegistryTest, RegisterAndFactoryCount) {
-  const std::string t = "__test_cr_type__";
+  const std::string t = uniqueKey("__test_cr_type__");
   EventComputerRegistry::registerFactory(t,
-    [] { return std::make_unique<NoopComputer>("__test_cr_type__"); });
+    [t] { return std::make_unique<NoopComputer>(t); });
   EventComputerRegistry::registerFactory(t,
-    [] { return std::make_unique<NoopComputer>("__test_cr_type__"); });
+    [t] { return std::make_unique<NoopComputer>(t); });
   EXPECT_EQ(EventComputerRegistry::factoryCount(t), 2u);
   EXPECT_EQ(EventComputerRegistry::factoryCount("__test_cr_absent__"), 0u);
 }
 
 TEST(EventComputerRegistryTest, CreateAllYieldsFreshInstancesInOrder) {
-  const std::string t = "__test_cr_order__";
+  const std::string t = uniqueKey("__test_cr_order__");
   int sinkA = 0, sinkB = 0;
   EventComputerRegistry::registerFactory(t,
-    [&] { return std::make_unique<NoopComputer>("__test_cr_order__", &sinkA); });
+    [&, t] { return std::make_unique<NoopComputer>(t, &sinkA); });
   EventComputerRegistry::registerFactory(t,
-    [&] { return std::make_unique<NoopComputer>("__test_cr_order__", &sinkB); });
+    [&, t] { return std::make_unique<NoopComputer>(t, &sinkB); });
 
   auto batch1 = EventComputerRegistry::createAll(t);
   ASSERT_EQ(batch1.size(), 2u);
@@ -124,7 +139,7 @@ TEST(EventComputerRegistryTest, CreateAllOnMissingTypeReturnsEmpty) {
 }
 
 TEST(EventComputerRegistryTest, NullFactoryIgnored) {
-  const std::string t = "__test_cr_null__";
+  const std::string t = uniqueKey("__test_cr_null__");
   EventComputerRegistry::registerFactory(t, EventComputerRegistry::Factory{});
   EXPECT_EQ(EventComputerRegistry::factoryCount(t), 0u);
 }
@@ -140,10 +155,11 @@ TEST(NodeTypeRegistryTest, RegisterAndFind) {
                     const tree::Deps&, std::shared_ptr<INode>) -> std::shared_ptr<INode> {
     return std::make_shared<NoopNode>();
   };
-  EXPECT_TRUE(NodeTypeRegistry::registerNodeType("__test_noop_find__", builder));
-  EXPECT_TRUE(NodeTypeRegistry::contains("__test_noop_find__"));
+  const std::string name = uniqueKey("__test_noop_find__");
+  EXPECT_TRUE(NodeTypeRegistry::registerNodeType(name, builder));
+  EXPECT_TRUE(NodeTypeRegistry::contains(name));
 
-  const auto* fn = NodeTypeRegistry::find("__test_noop_find__");
+  const auto* fn = NodeTypeRegistry::find(name);
   ASSERT_NE(fn, nullptr);
 
   rapidjson::Document doc;
@@ -156,13 +172,33 @@ TEST(NodeTypeRegistryTest, DuplicateRejected) {
                     const tree::Deps&, std::shared_ptr<INode>) -> std::shared_ptr<INode> {
     return nullptr;
   };
-  EXPECT_TRUE(NodeTypeRegistry::registerNodeType("__test_dup__", builder));
-  EXPECT_FALSE(NodeTypeRegistry::registerNodeType("__test_dup__", builder));
+  const std::string name = uniqueKey("__test_dup__");
+  EXPECT_TRUE(NodeTypeRegistry::registerNodeType(name, builder));
+  EXPECT_FALSE(NodeTypeRegistry::registerNodeType(name, builder));
 }
 
 TEST(NodeTypeRegistryTest, MissingFindReturnsNull) {
   EXPECT_EQ(NodeTypeRegistry::find("__test_absent__"), nullptr);
   EXPECT_FALSE(NodeTypeRegistry::contains("__test_absent__"));
+}
+
+// ---------- Bootstrap idempotence (ENC-1102) ----------
+//
+// MarketConnector::registerWith() APPENDS its "tick" computer factory to the
+// process-global EventComputerRegistry (there is no per-factory removal), so
+// running the test bootstrap twice gives every Dispatcher two
+// MarketTickComputers per tick, each with its own TA history — silent
+// double-computation across the whole suite rather than a failing assertion.
+// gtest only re-runs a global Environment between --gtest_repeat iterations
+// under --gtest_recreate_environments_when_repeating, so this is one flag away
+// by default. Nothing else in the binary registers a "tick" factory, so the
+// count is an order-independent invariant.
+
+TEST(BootstrapIdempotenceTest, TickComputerFactoryRegisteredExactlyOnce) {
+  EXPECT_EQ(EventComputerRegistry::factoryCount("tick"), 1u)
+      << "test bootstrap re-registered the market tick computer; every "
+         "Dispatcher in this iteration computes each tick's atomics more than "
+         "once";
 }
 
 // ---------- IngressRegistry ----------
