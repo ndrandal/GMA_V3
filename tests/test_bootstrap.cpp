@@ -12,7 +12,9 @@
 #include "gma/FunctionRegistry.hpp"
 #include "gma/NodeRegistry.hpp"
 #include "gma/atomic/AtomicProviderRegistry.hpp"
+#include "gma/engine/EventComputerRegistry.hpp"
 #include "gma/engine/Registries.hpp"
+#include <cstdio>
 #include "gma/market/MarketConnector.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include "gma/runtime/ShutdownCoordinator.hpp"
@@ -46,6 +48,7 @@ TestFixtureGlobals& globals() {
 class BuiltinsEnvironment : public ::testing::Environment {
 public:
   void SetUp() override {
+    { static int n=0; ++n; std::fprintf(stderr, "@@BOOTSTRAP SetUp call #%d, tick factories before=%zu\n", n, gma::engine::EventComputerRegistry::factoryCount("tick")); }
     gma::registerBuiltinFunctions();
     gma::registerBuiltinNodeTypes();
 
