@@ -26,12 +26,23 @@ namespace gma {
 // to the wall clock — clients connecting at different moments would
 // receive slightly-shifted buckets. BucketTime guarantees alignment.
 //
-// The ThreadPool / shutdown / shared_from_this contract matches
-// Interval (see Interval.hpp). shutdown() is synchronous; the timer
-// thread is joined (or detached safely if shutdown is called from the
-// timer thread itself).
-class BucketTime final : public INode,
-                         public std::enable_shared_from_this<BucketTime> {
+// ENC-1080 (sibling of ENC-1065, which fixed Interval) — the timer thread
+// must not own the BucketTime. It used to capture shared_from_this(), so the
+// refcount could never reach zero, ~BucketTime could never run, and dropping
+// the last owning reference without first calling shutdown() leaked a live
+// thread that went on firing into a child, a ThreadPool and a store that had
+// already been torn down. That failure does not surface where it is caused:
+// in the ENC-1007 work the same pattern on Interval appeared as a SIGFPE in
+// an unrelated suite roughly 40 suites later.
+//
+// Ownership now runs one way only. The thread shares a `State` block; the
+// BucketTime owns the thread. So:
+//   * dropping the last owning reference destroys the BucketTime, and
+//     ~BucketTime stops and joins the timer thread — shutdown() is no longer
+//     load-bearing for correctness, only for stopping early; and
+//   * a thread detached by a re-entrant shutdown() keeps the State alive but
+//     never the BucketTime, so it can still finish its loop safely.
+class BucketTime final : public INode {
 public:
   BucketTime(std::chrono::milliseconds period,
              std::shared_ptr<INode> child,
@@ -39,7 +50,7 @@ public:
 
   ~BucketTime();
 
-  // Must be called after construction when owned by a shared_ptr.
+  // Starts the timer thread. Safe to call once; later calls are no-ops.
   void start();
 
   void onValue(const StreamValue&) override; // no-op (source node)
@@ -54,17 +65,27 @@ public:
       std::chrono::milliseconds period);
 
 private:
-  void timerLoop();
+  // Everything the timer thread touches. Held by shared_ptr so that a detached
+  // thread keeps it alive without keeping the BucketTime alive.
+  struct State {
+    State(std::chrono::milliseconds p,
+          std::shared_ptr<INode> c,
+          gma::rt::ThreadPool* pl)
+      : period(p), child(std::move(c)), pool(pl) {}
 
-  const std::chrono::milliseconds period_;
-  std::shared_ptr<INode> child_;
-  gma::rt::ThreadPool* pool_;
+    const std::chrono::milliseconds period;
+    const std::shared_ptr<INode> child;
+    gma::rt::ThreadPool* const pool;
 
-  std::atomic<bool> stopping_{false};
+    std::atomic<bool> stopping{false};
+    std::mutex mx;
+    std::condition_variable cv;
+  };
+
+  static void timerLoop(const std::shared_ptr<State>& st);
+
+  const std::shared_ptr<State> state_;
   std::atomic<bool> started_{false};
-
-  std::mutex mx_;
-  std::condition_variable cv_;
   std::thread timerThread_;
 };
 

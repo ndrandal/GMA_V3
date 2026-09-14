@@ -196,3 +196,58 @@ TEST(TumblingWindowTest, ShutdownJoinsTimerThread) {
   pool.shutdown();
   SUCCEED();
 }
+
+// ----- ENC-1080 (sibling of ENC-1065, which fixed the same bug on Interval) -----
+//
+// Dropping the last owning reference must actually destroy the TumblingWindow
+// and stop its timer thread. The timer thread used to hold its own
+// shared_from_this(), so the refcount never reached zero, ~TumblingWindow
+// never ran, and the thread kept flushing buckets into a downstream node, a
+// ThreadPool and a store that the test had already torn down.
+//
+// This is the failure that does not fail where it is caused: in the ENC-1007
+// work the Interval instance of it surfaced as a SIGFPE in an unrelated suite
+// ~40 suites later. A test that passes in isolation proves nothing about it,
+// which is why the primary assertion here is on the lifetime itself, not on a
+// downstream symptom.
+//
+// The secondary assertion is timed deliberately: the test feeds a fresh bucket
+// immediately after observing an emit (so the next boundary is nearly a full
+// period away), then drops the owner. A leaked timer thread would flush that
+// pending bucket at the next boundary; a destroyed one never can.
+TEST(TumblingWindowTest, DestructionWithoutShutdownStopsTheTimerThread) {
+  rt::ThreadPool pool(1);
+  auto rec = std::make_shared<RecorderNode>();
+  std::weak_ptr<TumblingWindow> weak;
+  {
+    auto tw = std::make_shared<TumblingWindow>(100ms, rec, &pool);
+    weak = tw;
+    tw->start();
+    // Wait until two boundaries have actually emitted, so the test is about
+    // lifetime and not about a thread that never got going — and so we know
+    // we are sitting just *after* a boundary.
+    auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (rec->size() < 2 && std::chrono::steady_clock::now() < deadline) {
+      tw->onValue(StreamValue{"SYM", 1.0});
+      std::this_thread::sleep_for(2ms);
+    }
+    ASSERT_GE(rec->size(), 2u) << "timer never emitted; test proves nothing";
+
+    // Leave a full bucket pending for the next boundary.
+    for (int i = 0; i < 5; ++i) tw->onValue(StreamValue{"SYM", 2.0});
+    // Drop the last owning reference WITHOUT calling shutdown().
+  }
+
+  EXPECT_TRUE(weak.expired())
+      << "TumblingWindow outlived its last owner — the timer thread still "
+         "holds a strong self-reference, so ~TumblingWindow can never run";
+
+  // Let any emit already posted to the pool land before sampling.
+  std::this_thread::sleep_for(20ms);
+  const std::size_t before = rec->size();
+  std::this_thread::sleep_for(350ms); // ≥ 3 further boundaries
+  EXPECT_EQ(rec->size(), before)
+      << "timer kept flushing after the TumblingWindow's last owner was dropped";
+
+  pool.shutdown();
+}

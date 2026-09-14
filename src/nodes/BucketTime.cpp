@@ -6,20 +6,15 @@ namespace gma {
 BucketTime::BucketTime(std::chrono::milliseconds period,
                        std::shared_ptr<INode> child,
                        gma::rt::ThreadPool* pool)
-  : period_(period), child_(std::move(child)), pool_(pool)
+  : state_(std::make_shared<State>(period, std::move(child), pool))
 {
 }
 
 BucketTime::~BucketTime() {
-  stopping_.store(true, std::memory_order_release);
-  cv_.notify_all();
-  if (timerThread_.joinable()) {
-    if (timerThread_.get_id() == std::this_thread::get_id()) {
-      timerThread_.detach();
-    } else {
-      timerThread_.join();
-    }
-  }
+  // The timer thread holds no reference back to this object (ENC-1080), so
+  // reaching the destructor at all is the normal path even when nobody called
+  // shutdown(). Stop and join here so no thread outlives the BucketTime.
+  BucketTime::shutdown();
 }
 
 void BucketTime::start() {
@@ -27,9 +22,8 @@ void BucketTime::start() {
   if (!started_.compare_exchange_strong(expected, true))
     return;
 
-  timerThread_ = std::thread([self = shared_from_this()] {
-    self->timerLoop();
-  });
+  // Capture the State, never `this` and never a shared_from_this().
+  timerThread_ = std::thread([st = state_] { timerLoop(st); });
 }
 
 std::chrono::system_clock::time_point
@@ -50,32 +44,32 @@ BucketTime::nextAlignedAfter(
   return system_clock::time_point{milliseconds{next_ms}};
 }
 
-void BucketTime::timerLoop() {
+void BucketTime::timerLoop(const std::shared_ptr<State>& st) {
   while (true) {
-    if (stopping_.load(std::memory_order_acquire))
+    if (st->stopping.load(std::memory_order_acquire))
       break;
 
     const auto now = std::chrono::system_clock::now();
-    const auto target = nextAlignedAfter(now, period_);
+    const auto target = nextAlignedAfter(now, st->period);
     {
-      std::unique_lock<std::mutex> lk(mx_);
+      std::unique_lock<std::mutex> lk(st->mx);
       // wait_until lets shutdown wake us early without re-arming.
-      if (cv_.wait_until(lk, target, [this] {
-            return stopping_.load(std::memory_order_acquire);
+      if (st->cv.wait_until(lk, target, [&st] {
+            return st->stopping.load(std::memory_order_acquire);
           })) {
         break;
       }
     }
-    if (stopping_.load(std::memory_order_acquire))
+    if (st->stopping.load(std::memory_order_acquire))
       break;
-    if (!child_) break;
+    if (!st->child) break;
 
     try {
-      if (pool_) {
-        auto c = child_;
-        pool_->post([c] { c->onValue(StreamValue{"", 0.0}); });
+      if (st->pool) {
+        auto c = st->child;
+        st->pool->post([c] { c->onValue(StreamValue{"", 0.0}); });
       } else {
-        child_->onValue(StreamValue{"", 0.0});
+        st->child->onValue(StreamValue{"", 0.0});
       }
     } catch (const std::exception& ex) {
       gma::util::logger().log(gma::util::LogLevel::Error,
@@ -90,9 +84,13 @@ void BucketTime::onValue(const StreamValue&) {
 }
 
 void BucketTime::shutdown() noexcept {
-  stopping_.store(true, std::memory_order_release);
-  cv_.notify_all();
+  state_->stopping.store(true, std::memory_order_release);
+  state_->cv.notify_all();
   if (timerThread_.joinable()) {
+    // If shutdown() is called from the timer thread itself (e.g. via a
+    // downstream callback), join() would deadlock. Detach instead: the thread
+    // owns the State it is still reading, so it can finish safely even if the
+    // BucketTime is destroyed first.
     if (timerThread_.get_id() == std::this_thread::get_id()) {
       timerThread_.detach();
     } else {

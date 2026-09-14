@@ -156,15 +156,21 @@ void ClientSession::close() {
     if (!self->open_.exchange(false)) return;
 
     // Best-effort shutdown of active requests/trees. Shut down EVERY node in
-    // each pipeline (head shutdown() does not propagate down the chain), or
-    // mid-pipeline timer nodes (TumblingWindow/BucketTime) leak their timer
-    // threads forever. Head shutdown() is idempotent, so re-running it here
-    // when the head also appears in its keepAlive chain is harmless.
+    // each pipeline (head shutdown() does not propagate down the chain). Head
+    // shutdown() is idempotent, so re-running it here when the head also
+    // appears in its keepAlive chain is harmless.
     //
-    // ENC-1065 removed Interval from that list: its timer thread no longer
-    // holds a reference back to the node, so ~Interval stops and joins it even
-    // if shutdown() is never called. TumblingWindow and BucketTime still carry
-    // the original pattern, so this sweep is still load-bearing for them.
+    // This sweep is now belt-and-braces rather than required. It used to be
+    // load-bearing: the timer nodes (Interval, then TumblingWindow and
+    // BucketTime) launched their timer thread holding a shared_from_this(), so
+    // the thread owned the node, the destructor could never run, and a
+    // pipeline dropped without an explicit shutdown() leaked a live thread
+    // firing into an already-destroyed child, ThreadPool and store. ENC-1065
+    // fixed Interval and ENC-1080 fixed TumblingWindow and BucketTime: none of
+    // them holds a reference back to itself any more, so dropping the last
+    // owner destroys the node and its destructor stops and joins the thread.
+    // The sweep is kept because it still stops timers *early* (at close, not
+    // at refcount zero) and covers any future node that needs the nudge.
     {
       std::lock_guard<std::mutex> lk(self->reqMu_);
       for (auto& kv : self->active_) {
@@ -631,8 +637,9 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
       {
         std::lock_guard<std::mutex> lk(reqMu_);
         // Replace any existing request with the same key. Shut down the old
-        // head AND every node in its keepAlive chain before discarding it —
-        // otherwise a replaced mid-pipeline timer node leaks its timer thread.
+        // head AND every node in its keepAlive chain before discarding it, so
+        // a replaced mid-pipeline timer node stops at replace time rather than
+        // whenever its last reference happens to go (see close()).
         auto it = active_.find(key);
         if (it != active_.end() && it->second) {
           it->second->shutdown();
@@ -733,7 +740,8 @@ void ClientSession::handleCancel(const ::rapidjson::Document& doc) {
 
     // Shut down the head AND every node in the keepAlive chain (outside the
     // lock) — head shutdown() does not propagate down a linear pipeline, so
-    // without this mid-pipeline timer nodes leak their timer threads.
+    // without this a mid-pipeline timer node keeps ticking until its last
+    // reference is dropped (see close()).
     if (root) root->shutdown();
     for (auto& node : chainVec) {
       if (node) {
