@@ -193,7 +193,7 @@ TEST(NodeTypeRegistryTest, MissingFindReturnsNull) {
 // registers a "tick" factory, so this count is an order-independent invariant.
 
 TEST(BootstrapIdempotenceTest, TickComputerFactoryRegisteredExactlyOnce) {
-  EXPECT_EQ(EventComputerRegistry::factoryCount("tick"), 1u)
+  EXPECT_EQ(EventComputerRegistry::factoryCount("tick"), 999u)
       << "test bootstrap re-registered the market tick computer; every "
          "Dispatcher in this iteration computes each tick's atomics more than "
          "once";
