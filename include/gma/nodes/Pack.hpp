@@ -9,25 +9,20 @@
 #include <unordered_map>
 #include <vector>
 #include "gma/nodes/INode.hpp"
+#include "gma/nodes/InputPort.hpp"
 
 namespace gma {
 
 class Pack;
 
-// Per-field input adapter: tags each incoming value with its field index and
-// forwards it to the owning Pack. Holds a weak_ptr so it never keeps Pack alive
-// (Pack owns the ports; ports only weak-reference Pack — no ownership cycle).
-class PackPort final : public INode {
-public:
-  PackPort(std::weak_ptr<Pack> owner, std::size_t idx);
-
-  void onValue(const StreamValue& sv) override;
-  void shutdown() noexcept override {}
-
-private:
-  std::weak_ptr<Pack> owner_;
-  std::size_t idx_;
-};
+// ENC-1291 (SPEC D2): `PackPort` was the adapter that made Pack the one fan-in
+// in the engine that joined by INPUT rather than by value count. It has been
+// generalized into `gma::InputPort` + `gma::IFanIn` (include/gma/nodes/
+// InputPort.hpp) and is now shared with `Aggregate`. The ownership direction is
+// unchanged and still load-bearing: Pack owns its ports, each port holds only a
+// weak_ptr back. No alias is left behind on purpose: a port whose index means
+// "field" and a port whose index means "input" are the same object now, and two
+// spellings for it is how the two fan-ins drifted apart in the first place.
 
 // Fan-in node that assembles N named inputs into a keyed Record per symbol
 // (combineLatest semantics, ENC-643): once every field has produced at least
@@ -37,15 +32,17 @@ private:
 // Bounded (total invariant): a fixed field count and a capped per-symbol state
 // map; each emit does O(fields) work. Mirrors Aggregate's fan-in ownership —
 // the builder returns a CompositeRoot holding the input heads plus the Pack.
-class Pack final : public INode, public std::enable_shared_from_this<Pack> {
+class Pack final : public INode, public IFanIn {
 public:
   Pack(std::vector<std::string> names, std::shared_ptr<INode> downstream);
 
-  // Fan-in: fed via onField() from the ports, never as a pipeline sink.
+  // Fan-in: fed via onPortValue() from the ports, never as a pipeline sink.
   void onValue(const StreamValue&) override {}
   void shutdown() noexcept override;
 
-  void onField(std::size_t idx, const StreamValue& sv);
+  // ENC-1291: the IFanIn half of the port contract. `idx` is the field's
+  // position in the declared `fields` object, assigned at build time.
+  void onPortValue(std::size_t idx, const StreamValue& sv) override;
   std::size_t fieldCount() const noexcept { return names_.size(); }
 
   // Builder helper: take ownership of a constructed port so it outlives the
