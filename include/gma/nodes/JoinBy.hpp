@@ -87,14 +87,43 @@ namespace gma {
 //
 // Reserving the name without (3) would be worth very little: the hole is the
 // typo, not the future feature.
+//
+// WHERE THE CLOSED VOCABULARY IS AND IS NOT ENFORCED — say it out loud, because
+// an unstated boundary is how the next `by` typo gets through. `joinByFor` in
+// `src/core/TreeBuilder.cpp` is called from exactly the two fan-in builders,
+// so `by` is meaningful only on `Aggregate` and `Pack`. `by` on ANY OTHER node
+// type used to be accepted and silently ignored — `{"type":"Listener",…,
+// "by":"typo"}` built and ran, which is Q3's own failure shape one node over
+// (found by adversarial review, ENC-1292). It is now REFUSED in `buildOne`,
+// for every node type, before the type's builder is reached. Two more holes
+// the same review found and this file closes:
+//
+//   * a DUPLICATE `by` member made the vocabulary order-dependent. RapidJSON
+//     keeps both and `v["by"]` returns the first, so `{"by":"none","by":"typo"}`
+//     was ACCEPTED while `{"by":"typo","by":"none"}` was refused. A repeated
+//     `by` is now refused outright rather than resolved by position.
+//   * a WHITESPACE-ONLY output identity satisfied Q6's guard, because
+//     `buildForRequest` only rejects an empty `streamKey`. A join emitting
+//     under `" "` is the same silent wrong answer on the wire as one emitting
+//     under `""`, so `by:"none"` now requires an identity with at least one
+//     non-whitespace character. (The general weakness in `buildForRequest` is
+//     older than this ticket and is NOT changed here: tightening it would
+//     change what every stored graph means, which is exactly what D6 forbids.)
+//
+// A CONSEQUENCE OF THE SUBSTITUTION, recorded because it is surprising and is
+// not what the "one logical stream" note below describes. Because a
+// `by:"none"` join rewrites `sv.symbol`, a fan-in DOWNSTREAM of one — carrying
+// the DEFAULT `by:"streamKey"` — sees both branches under the request's key
+// and therefore completes a tuple across what were two different streamKeys.
+// That is the substitution working as designed (the upstream joins genuinely
+// are one stream now), but the outer node's behaviour is decided by its
+// upstream's `by` rather than its own. It requires an explicit `by:"none"`, so
+// no stored graph reaches it. Gated by
+// `FanInJoinKey.InnerByNoneMakesAnOuterDefaultFanInSeeOneStream`.
 enum class JoinBy {
   StreamKey,   // "streamKey" — the default. Correlate by sv.symbol.
   None,        // "none"      — correlate by port alone. The cross-symbol join.
 };
-
-inline const char* joinByName(JoinBy b) noexcept {
-  return b == JoinBy::None ? "none" : "streamKey";
-}
 
 namespace detail {
 // The rejected value is echoed back so the author can see their own spelling,
