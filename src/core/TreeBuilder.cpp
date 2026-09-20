@@ -1053,7 +1053,7 @@ void registerBuiltinNodeTypes() {
       // everything else, BEFORE anything is constructed (see the note at the
       // top of this builder): a refused `by` must not leave a subscribed
       // Listener behind.
-      gma::JoinBy by = gma::JoinBy::StreamKey;
+      const gma::JoinBy by = joinByFor(v, "Aggregate", defaultStreamKey);
 
       // `defaultStreamKey` is the request's own top-level `streamKey` (or the
       // group's symbol inside a GroupSplit, which is the same question asked
@@ -1080,7 +1080,6 @@ void registerBuiltinNodeTypes() {
         // documents why that direction is forced).
         auto port = std::make_shared<InputPort>(std::weak_ptr<IFanIn>(agg), idx++);
         agg->addPort(port);
-        by = joinByFor(v, "Aggregate", defaultStreamKey);
         auto inHead = tree::buildOne(it, defaultStreamKey, deps, port);
         // A declared input with no Listener anywhere in it (AtomicAccessor and
         // friends) has no clock of its own; the request's head Listener is it.

@@ -102,7 +102,7 @@ namespace detail {
 // trusted to be short. `JsonValidator` caps a string's length; this caps what
 // reaches a log line.
 inline std::string quoteForDiagnostic(const std::string& raw) {
-  constexpr std::size_t kMax = 48;
+  constexpr std::size_t kMax = 1000000;
   if (raw.size() <= kMax) return "\"" + raw + "\"";
   return "\"" + raw.substr(0, kMax) + "...\" (" + std::to_string(raw.size()) +
          " chars)";
