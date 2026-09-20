@@ -624,3 +624,37 @@ TEST(AggregateTest, ByNonePipelineEdgeValueIsStillNotAJoinMember) {
     ASSERT_EQ(j.parent->count.load(), 2);
     EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[1].value), 5000.0);
 }
+
+// The per-symbol buffer cap. Nothing covered it before ENC-1292, and ENC-1292
+// rewrote the lookup that enforces it (find+emplace -> try_emplace, to remove
+// an equivalent-mutation surface), so it is gated here rather than left to be
+// trusted. It can only trip under `by:"streamKey"` — `by:"none"` has exactly
+// one buffer entry by construction.
+TEST(AggregateTest, MaxSymbolsCapDropsNewSymbolsAndSparesExistingOnes) {
+    Join j = makeJoin(2);
+
+    constexpr int kCap = 10000;      // Aggregate::MAX_SYMBOLS
+    // Fill the map to the cap with half-open tuples (port 0 only, so nothing
+    // has emitted yet).
+    for (int n = 0; n < kCap; ++n)
+        feed(j, 0, ("S" + std::to_string(n)).c_str(), double(n));
+    ASSERT_EQ(j.parent->count.load(), 0) << "no tuple is complete yet";
+
+    // One more DISTINCT symbol is over the cap: both its ports are fed and it
+    // must still emit nothing, because it never got a buffer.
+    feed(j, 0, "OVERFLOW", 1.0);
+    feed(j, 1, "OVERFLOW", 2.0);
+    EXPECT_EQ(j.parent->count.load(), 0)
+        << "a symbol past the " << kCap << "-entry cap was admitted; the cap "
+           "is what bounds this node's memory under an unbounded symbol space";
+
+    // ...and an ALREADY-BUFFERED symbol still completes. A cap that also broke
+    // the symbols it already accepted would be a far worse bug than the leak
+    // it prevents, and `size() >= cap` vs `size() > cap` is exactly the
+    // off-by-one that causes it.
+    feed(j, 1, "S0", 99.0);
+    ASSERT_EQ(j.parent->count.load(), 2)
+        << "an existing buffered symbol must still complete its tuple";
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[0].value), 0.0);
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[1].value), 99.0);
+}

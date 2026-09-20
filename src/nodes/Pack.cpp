@@ -41,14 +41,17 @@ void Pack::onPortValue(std::size_t idx, const StreamValue& sv) {
   {
     std::lock_guard<std::mutex> lk(mx_);
 
-    auto it = state_.find(joinKey);
-    if (it == state_.end()) {
-      if (state_.size() >= MAX_SYMBOLS) {
+    // ONE lookup, on ONE key — see the note in Aggregate::onPortValue on why
+    // a find/emplace pair on two different keys is an equivalent-mutation
+    // surface no test can gate (ENC-1292 mutation M18).
+    auto [it, inserted] = state_.try_emplace(joinKey);
+    if (inserted) {
+      if (state_.size() > MAX_SYMBOLS) {
+        state_.erase(it);
         gma::util::logger().log(gma::util::LogLevel::Warn,
           "Pack: max symbols reached, dropping", {{"symbol", sv.symbol}});
         return;
       }
-      it = state_.emplace(joinKey, SymState{}).first;
       it->second.latest.resize(names_.size());
     }
 
