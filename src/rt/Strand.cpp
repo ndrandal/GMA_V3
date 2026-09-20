@@ -64,6 +64,16 @@ void Strand::drain() {
       fn = std::move(q_.front());
       q_.pop_front();
     }
+    // ENC-1338: count the completion, whatever the task did. Bumped after the
+    // call so an in-flight task is not yet counted, and under the same mutex
+    // `tasksRun()` reads, so the counter needs no atomic of its own.
+    struct Counted {
+      Strand* s;
+      ~Counted() {
+        std::lock_guard<std::mutex> lk(s->mx_);
+        ++s->tasksRun_;
+      }
+    } counted{this};
     // Outside the lock: a task may post back onto this same strand.
     try {
       fn();
