@@ -66,7 +66,7 @@ public:
   // strand does the off-threading, so Dispatcher must deliver inline rather
   // than interposing its own pool hop and losing the order. See INode.
   bool deliversOnOwnExecutor() const noexcept override {
-    return false;  // MUTATION M1
+    return static_cast<bool>(strand_);
   }
 
   const std::string& symbol() const noexcept { return symbol_; }
