@@ -72,6 +72,16 @@ public:
   const std::string& symbol() const noexcept { return symbol_; }
   const std::string& field()  const noexcept { return field_;  }
 
+  // ENC-1338 / SPEC D3. This request DAG's serializing executor, or null when
+  // the DAG has none. Read-only observation of the strand the DAG is ACTUALLY
+  // running on, as opposed to the one some caller believes it passed — see
+  // `rt::Strand::kUnattributedOrigin` for why that distinction needed an
+  // observable at all. `Dispatcher::listenersFor()` is how a test reaches this
+  // for a subscription built by a live `ClientSession`.
+  const std::shared_ptr<gma::rt::Strand>& strand() const noexcept {
+    return strand_;
+  }
+
 private:
   std::string symbol_;
   std::string field_;

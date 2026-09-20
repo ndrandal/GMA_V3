@@ -280,6 +280,28 @@ TEST_F(FanInArity, MatchingArityBuildsAndJoinsByInput) {
 //
 // So it now counts SUBSCRIPTIONS, which is the thing section 1.5 is about, and
 // keeps the value check as a second, weaker statement.
+//
+// WHAT THIS TEST MEASURES CHANGED WHEN `SubBuildUnwind` LANDED, AND THE NAME IS
+// NOW WIDER THAN THE CLAIM. Measured across two mutation rounds:
+//
+//   before SubBuildUnwind:  M15 (move the check after the input loop) -> RED
+//   after  SubBuildUnwind:  M15 alone                                 -> GREEN
+//                           M20 (M15 AND the guard disarmed)          -> RED
+//
+// That is correct, not a regression: with the sub-build guard in place a LATE
+// check genuinely strands nothing, so "refused before anything subscribes" is
+// no longer the property that makes the assertion hold — "nothing is left
+// subscribed" is, and two independent mechanisms now deliver it. The early
+// check is the cheap one (nothing is built at all); the guard is the general
+// one (it also covers `unknown node type`, which no ordering of the arity check
+// can reach).
+//
+// Kept under its original name deliberately: it is the gate ENC-1291 added for
+// the arity throw specifically, and renaming it would detach it from the
+// mutation record above. Its directional partner is
+// `NestedFanInThrowLeavesNothingSubscribed` + M19, which gates the guard on its
+// own. Do not read a green here as proof the check is still early — read the
+// M20 row.
 TEST_F(FanInArity, ArityMismatchIsRefusedBeforeAnythingSubscribes) {
   const char* kReq = R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
