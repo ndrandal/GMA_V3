@@ -45,48 +45,10 @@ void Aggregate::onValue(const StreamValue& sv) {
   }
 }
 
-// THROWAWAY PROTOTYPE (ENC-1289 falsification only — not for merge).
-// Port-indexed fan-in: a tuple completes only when EVERY declared input has
-// reported, and is assembled in declared port order.
-void AggPort::onValue(const StreamValue& sv) {
-  if (auto p = owner_.lock()) p->onPort(idx_, sv);
-}
-
-void Aggregate::onPort(std::size_t idx, const StreamValue& sv) {
-  if (stopping_.load(std::memory_order_acquire)) return;
-  if (idx >= arity_) return;
-
-  std::vector<ArgType> batch;
-  std::shared_ptr<INode> p;
-  {
-    std::lock_guard<std::mutex> lk(mx_);
-    auto it = slots_.find(sv.symbol);
-    if (it == slots_.end()) {
-      if (slots_.size() >= MAX_SYMBOLS) return;
-      it = slots_.emplace(sv.symbol, SymSlots{}).first;
-      it->second.latest.resize(arity_);
-    }
-    auto& st = it->second;
-    if (!st.latest[idx].has_value()) ++st.filled;
-    st.latest[idx] = sv.value;
-    if (st.filled < arity_) return;
-    batch.reserve(arity_);
-    for (std::size_t i = 0; i < arity_; ++i) batch.push_back(*st.latest[i]);
-    for (auto& s2 : st.latest) s2.reset();
-    st.filled = 0;
-    p = parent_;
-  }
-  if (p) {
-    for (const auto& v : batch)
-      p->onValue(StreamValue{ sv.symbol, v, sv.bucketStartMs });
-  }
-}
-
 void Aggregate::shutdown() noexcept {
   stopping_.store(true, std::memory_order_release);
   std::lock_guard<std::mutex> lk(mx_);
   buf_.clear();
-  slots_.clear();
   parent_.reset();
 }
 

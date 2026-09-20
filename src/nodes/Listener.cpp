@@ -81,7 +81,7 @@ void Listener::onValue(const gma::StreamValue& sv) {
   }
   if (!down) return;
 
-  if (false && pool_) {
+  if (pool_) {
     pool_->post([d = std::move(down), sym = sv.symbol, val = sv.value]() mutable {
       d->onValue(gma::StreamValue{std::move(sym), std::move(val)});
     });
