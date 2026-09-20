@@ -57,7 +57,9 @@
 #include "gma/Event.hpp"
 #include "gma/StreamValue.hpp"
 #include "gma/TreeBuilder.hpp"
+#include "gma/nodes/BucketTime.hpp"
 #include "gma/nodes/INode.hpp"
+#include "gma/nodes/Interval.hpp"
 #include "gma/rt/ThreadPool.hpp"
 
 #include <gtest/gtest.h>
@@ -862,12 +864,25 @@ TEST_F(ComposedChain, LetBoundPullOnlyJoinIsClocked) {
 }
 
 // A timer-headed input IS self-clocked: `Interval`'s own thread drives its
-// child directly. `Interval::onValue` being an explicit no-op means forwarding
-// the clock to it is inert, so this was previously correct BY ACCIDENT — one
-// edit to `Interval::onValue` away from double-firing every such input. The
-// predicate now names the timers, and this pins it: the accessor branch is
-// clocked, the timer branch is not driven by the clock, and with a period long
-// enough never to fire in this test the join completes from neither.
+// child directly, so the request's head Listener must not drive it as well.
+//
+// READ THIS BEFORE DELETING THE `Interval`/`BucketTime` CLAUSE FROM
+// `declaredInputIsSelfClocked`. **No behavioural test can gate that clause
+// today, and I checked** — removing it leaves this whole file green, because
+// `Interval::onValue` and `BucketTime::onValue` are explicit no-ops ("source
+// node: no upstream input"), so forwarding the clock to them is inert either
+// way. The clause is therefore DOCUMENTATION OF AN INVARIANT, not a behaviour
+// change: it says out loud what is currently true only by accident, and it is
+// what stops the next edit to `Interval::onValue` from silently double-firing
+// every timer-headed join input.
+//
+// `TimerOnValueIsANoOpWhichIsWhyTheClauseIsInert` below is the other half of
+// the pair: it pins the accident. Break the no-op and it goes red, and whoever
+// broke it lands here.
+//
+// This test pins the observable part: the accessor branch is clocked, the timer
+// branch is not driven by the clock, and with a period long enough never to
+// fire the join completes from neither.
 TEST_F(ComposedChain, TimerHeadedInputIsNotDrivenByTheClock) {
   const char* kRequest = R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
@@ -902,6 +917,30 @@ TEST_F(ComposedChain, TimerHeadedInputIsNotDrivenByTheClock) {
 
   for (auto& n : chain.keepAlive) if (n) n->shutdown();
   if (chain.head) chain.head->shutdown();
+}
+
+// The pinned accident. If either of these stops being a no-op, the
+// `Interval`/`BucketTime` clause in `declaredInputIsSelfClocked` stops being
+// inert documentation and becomes load-bearing — and a timer-headed join input
+// would otherwise be driven twice per period.
+TEST_F(ComposedChain, TimerOnValueIsANoOpWhichIsWhyTheClauseIsInert) {
+  auto child = std::make_shared<Sink>();
+
+  Interval interval(std::chrono::milliseconds(3600000), child, nullptr);
+  interval.onValue(StreamValue{"AAPL", 42.0});
+  EXPECT_EQ(child->values().size(), 0u)
+      << "Interval::onValue forwarded to its child. It is documented as a "
+         "source node with no upstream\n    input, and "
+         "`declaredInputIsSelfClocked` names `Interval` on that basis — see the "
+         "comment above\n    TimerHeadedInputIsNotDrivenByTheClock. A "
+         "timer-headed join input would now fire twice.";
+  interval.shutdown();
+
+  BucketTime bucket(std::chrono::milliseconds(3600000), child, nullptr);
+  bucket.onValue(StreamValue{"AAPL", 42.0});
+  EXPECT_EQ(child->values().size(), 0u)
+      << "BucketTime::onValue forwarded to its child — same consequence.";
+  bucket.shutdown();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
