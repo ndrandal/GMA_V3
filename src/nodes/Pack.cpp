@@ -33,7 +33,7 @@ void Pack::onPortValue(std::size_t idx, const StreamValue& sv) {
 
   // ENC-1292 / SPEC D1, Q6 — the declared correlation key, and the identity
   // the assembled Record is emitted under. See Aggregate::onPortValue.
-  const std::string& joinKey = sv.symbol;
+  const std::string& joinKey = outKey_;
 
   Record rec;
   std::shared_ptr<INode> ds;
