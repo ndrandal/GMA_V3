@@ -22,8 +22,13 @@ public:
   ThreadPool(ThreadPool&&)                 = delete;
   ThreadPool& operator=(ThreadPool&&)      = delete;
 
-  // Enqueue work
-  void post(std::function<void()> fn);
+  // Enqueue work. Returns FALSE when the task was NOT enqueued because the
+  // pool is stopping — the drop has always been silent, and `rt::Strand`
+  // (ENC-1005) is the first caller that cannot survive not knowing: it sets its
+  // single-drainer token before the kick, so a dropped kick left the token set
+  // and the strand permanently, silently wedged. Existing callers may keep
+  // ignoring the result; the drop semantics are unchanged.
+  bool post(std::function<void()> fn);
 
   // Waits until queue is empty AND all in-flight tasks have completed.
   void drain();

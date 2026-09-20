@@ -28,7 +28,24 @@ void Strand::post(std::function<void()> fn) {
 
   // `shared_from_this` keeps the strand alive for the whole drain, so the last
   // external owner may drop while work is still queued.
-  pool_->post([self = shared_from_this()] { self->drain(); });
+  if (pool_->post([self = shared_from_this()] { self->drain(); }))
+    return;
+
+  // THE KICK WAS REFUSED — the pool is stopping and silently drops posts
+  // (`ThreadPool::post` returns false). We hold the drainer token, and nothing
+  // else will ever clear it, so leaving now wedges this strand permanently and
+  // silently: every later post appends to a queue no drainer will visit, and
+  // the queued closures pin the whole DAG alive. Found by the ENC-1005
+  // adversarial review.
+  //
+  // So drain inline instead. The caller's thread is the only executor left, and
+  // the ordering guarantee is kept. Logged once per occurrence because running
+  // DAG compute on an ingress or shutdown thread is a fact an operator should
+  // be able to see, not a silent fallback.
+  gma::util::logger().log(gma::util::LogLevel::Warn,
+    "Strand: thread pool refused the drain kick (stopping) — draining inline",
+    {{"queued", std::to_string(queueDepth())}});
+  drain();
 }
 
 void Strand::drain() {

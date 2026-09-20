@@ -55,7 +55,19 @@ public:
   Strand& operator=(Strand&&)      = delete;
 
   // Enqueue `fn`. It runs after every task already posted to this strand and
-  // before every task posted after it. Never runs inline on the caller.
+  // before every task posted after it.
+  //
+  // WHERE IT RUNS. Normally on a pool worker, never on the caller. There are
+  // exactly two exceptions, both of which run the queue INLINE ON THE CALLER
+  // rather than dropping it, and both of which still run it in order:
+  //   * the strand has no pool at all (`Strand(nullptr)`), and
+  //   * `ThreadPool::post` refused the kick because the pool is stopping.
+  // The second is the one that matters: `running_` is set before the kick, so a
+  // silently dropped kick used to leave the token set forever and the strand
+  // permanently, silently wedged — every later post appended to a queue that no
+  // drainer would ever visit, with the DAG pinned alive by the queued closures.
+  // Found by an adversarial review of ENC-1005; gated by
+  // `StrandDeliversEvenWhenThePoolIsAlreadyStopping`.
   void post(std::function<void()> fn);
 
   // Diagnostics only — never a synchronisation point.

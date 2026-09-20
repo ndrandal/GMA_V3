@@ -729,7 +729,16 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     // `buildForRequest` would mint one if this line were absent. It is here
     // anyway so the production path states its own ordering guarantee rather
     // than inheriting it from a default several files away.
-    deps.strand = std::make_shared<gma::rt::Strand>(deps.pool);
+    //
+    // Guarded on `deps.pool` for the same reason `buildForRequest`'s backstop
+    // is: with no executor there is nothing to serialise, delivery is already
+    // inline and already in order, and minting a pool-less Strand here would
+    // additionally make the Listener answer `deliversOnOwnExecutor()` — so
+    // `Dispatcher` would go inline too and the entire DAG compute would run
+    // synchronously on the WebSocket read thread. The two mint sites are now
+    // symmetric; the asymmetry was found by the ENC-1005 adversarial review.
+    if (deps.pool)
+      deps.strand = std::make_shared<gma::rt::Strand>(deps.pool);
 
     try {
       // Check subscription limit BEFORE building the pipeline to avoid
