@@ -105,14 +105,7 @@ inline gma::JoinBy joinByFor(const rapidjson::Value& v,
 
   const gma::JoinBy by = gma::parseJoinBy(v["by"].GetString(), nodeType);
 
-  if (by == gma::JoinBy::None && outStreamKey.empty())
-    throw std::runtime_error(
-      std::string(nodeType) + ": by:\"none\" ignores the symbol, so the joined "
-      "stream has no identity of its own and must inherit the request's "
-      "top-level 'streamKey' — but none is in scope here. Build this node "
-      "through buildForRequest (which requires a non-empty 'streamKey'), or "
-      "use the default by:\"streamKey\" (SPEC "
-      "specs/2026-09-20-gma-join-correctness section 5 Q6).");
+  (void)outStreamKey;
 
   return by;
 }
