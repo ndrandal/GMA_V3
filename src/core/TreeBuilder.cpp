@@ -579,7 +579,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   // Not minted when there is no pool: with no executor there is nothing to
   // serialise, delivery is already inline and already in order.
   Deps depsWithStrand = depsIn;
-  if (!depsWithStrand.strand && depsWithStrand.pool)
+  if (depsWithStrand.pool)  // MUTATION M8
     depsWithStrand.strand = std::make_shared<gma::rt::Strand>(depsWithStrand.pool);
   const Deps& deps = depsWithStrand;   // everything below builds against this
 

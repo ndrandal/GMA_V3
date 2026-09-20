@@ -64,7 +64,22 @@ namespace {
 // order assertion below would fail — which is exactly what it should do.
 class SequenceTerminal final : public INode {
 public:
+  // `spinNs` makes delivery cost something. It matters for exactly one test:
+  // a terminal that costs nothing always finishes before the ingress thread
+  // produces the next tick, so two DAGs on two different strands never
+  // actually overlap and a test that tries to detect the difference cannot.
+  // Default 0 — the order tests want ingress to be the slow side.
+  explicit SequenceTerminal(long long spinNs = 0) : spinNs_(spinNs) {}
+
   void onValue(const StreamValue& sv) override {
+    if (spinNs_ > 0) {
+      const auto until =
+          std::chrono::steady_clock::now() + std::chrono::nanoseconds(spinNs_);
+      volatile double sink = 0.0;
+      while (std::chrono::steady_clock::now() < until)
+        for (int i = 0; i < 64; ++i) sink = sink * 1.000000001 + 1.0;
+      (void)sink;
+    }
     // Track the maximum number of onValue calls in flight at once. For a
     // strand-serialised DAG this must never exceed 1.
     const int now = ++inFlight_;
@@ -90,6 +105,7 @@ public:
   std::size_t nonNumeric() const { return nonNumeric_.load(); }
 
 private:
+  long long           spinNs_{0};
   mutable std::mutex  mx_;
   std::vector<double> seq_;
   std::atomic<int>    inFlight_{0};
@@ -437,10 +453,18 @@ TEST(OrderedDelivery, DistinctRequestsAreNotSerializedAgainstEachOther) {
 // interleaving the ingress thread produced, and never two values at once. If it
 // is replaced they are two orderings and both assertions fail.
 //
+// THE TERMINAL SPINS, AND THAT IS LOAD-BEARING. The first draft of this test
+// used the default free terminal and SURVIVED ITS OWN MUTATION: `onTick` costs
+// far more than a `push_back`, so each delivery finished before the ingress
+// thread produced the next tick and two separate strands never once overlapped
+// — the test could not tell one strand from two. 20 us per value makes
+// delivery the slow side, which is the only regime in which the question has
+// an observable answer. Verified red against that mutation.
+//
 // Note this is the INVERSE of test 4 and they are both true at once — that is
 // the whole point of the granularity being a parameter rather than a policy.
 TEST(OrderedDelivery, ACallerSuppliedStrandIsUsedNotReplaced) {
-  constexpr std::size_t kTicks = 2000;
+  constexpr std::size_t kTicks = 1000;
 
   AtomicStore store;
   auto pool = std::make_shared<rt::ThreadPool>(8);
@@ -450,7 +474,7 @@ TEST(OrderedDelivery, ACallerSuppliedStrandIsUsedNotReplaced) {
   Dispatcher dispatcher(pool.get(), &store);
   auto shared = std::make_shared<rt::Strand>(pool.get());
 
-  auto terminal = std::make_shared<SequenceTerminal>();
+  auto terminal = std::make_shared<SequenceTerminal>(/*spinNs=*/20000);
   std::vector<tree::BuiltChain> chains;
   for (const char* sym : {"AAA", "BBB"}) {
     tree::Deps deps;
