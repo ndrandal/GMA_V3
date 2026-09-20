@@ -552,24 +552,34 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   // BucketTime builders spawn threads and call start(), so a reject after the
   // fact would leak live work for a request that is never going to be served.
   //
-  // Both `node` and the `pipeline`/`stages` array are examined, because today
-  // a request carrying both leaves BOTH chains wired into the terminal (SPEC
-  // §1.1 defect 1 — `midHead` is overwritten at the loop below but the `node`
-  // subtree stays live). Whoever lands ENC-1290/D5 and composes them into one
-  // chain should narrow this to the composed tail.
+  // NARROWED BY ENC-1290 (SPEC D5, §5 Q1 "Consequence for D7 and ENC-1293").
+  //
+  // This used to analyse `node` and the pipeline as two INDEPENDENT feeders of
+  // the terminal, which was correct while they were two live chains (SPEC §1.1
+  // defect 1). They are now ONE chain — `node` subtree -> pipeline stages ->
+  // terminal — so exactly one thing feeds the terminal: the LAST pipeline stage
+  // when a pipeline is present, the `node` subtree's output when it is not.
+  //
+  // Threading the node's output shape INTO the pipeline (rather than starting
+  // the pipeline from Opaque and OR-ing the two verdicts) is the whole point:
+  // it is what lets `node:Pack` + `pipeline:[Field]` through. That is the
+  // canonical shape D7 blesses one line above its own restriction, and the old
+  // form rejected it. Nothing in the corpus goes red on the day that becomes
+  // wrong — the 272 entries construct no Record at all — so the gate is
+  // `NodePackPipelineFieldIsAcceptedAndEmits` in
+  // tests/treebuilder/ComposedChainTest.cpp, not a corpus count.
   {
     std::string culprit;
+    // The chain's own upstream is the head Listener, which emits a scalar.
     ValueShape intoTerminal = ValueShape::Opaque;
 
     if (rq.HasMember("node") && rq["node"].IsObject())
-      intoTerminal = shapeInto(rq["node"], ValueShape::Opaque, nullptr, 0, &culprit);
+      intoTerminal = shapeInto(rq["node"], intoTerminal, nullptr, 0, &culprit);
 
     for (const char* k : {"pipeline", "stages"}) {
       if (!rq.HasMember(k) || !rq[k].IsArray()) continue;
-      ValueShape cur = ValueShape::Opaque;
       for (const auto& stage : rq[k].GetArray())
-        cur = shapeInto(stage, cur, nullptr, 0, &culprit);
-      if (cur == ValueShape::Record) intoTerminal = ValueShape::Record;
+        intoTerminal = shapeInto(stage, intoTerminal, nullptr, 0, &culprit);
       break;                                // mirrors the build loop: first key wins
     }
 
@@ -581,16 +591,24 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   std::vector<std::shared_ptr<gma::INode>> keepAlive;
   keepAlive.push_back(terminal);
 
-  // Optional mid-pipeline, ultimately forwarding into terminal
+  // ENC-1290 / SPEC D5 — `node` and `pipeline` COMPOSE INTO ONE CHAIN:
+  //
+  //     Listener(streamKey, field) -> node subtree -> pipeline stages -> terminal
+  //
+  // and nothing reaches the terminal except through the pipeline.
+  //
+  // This used to build the `node` subtree wired straight to `terminal` and then
+  // restart from `terminal` for the pipeline, overwriting `midHead` — leaving
+  // BOTH chains live on one Responder, so the client received two unrelated
+  // streams interleaved on one request key and the pipeline never saw the
+  // values it exists to reduce (SPEC §1.1 defect 1; 52 of the 272 checked-in
+  // corpus requests carry both keys).
+  //
+  // ORDER MATTERS AND IS NOW REVERSED: the pipeline is built first, from the
+  // terminal backwards, so that the `node` subtree can be built INTO its head.
   std::shared_ptr<gma::INode> midHead = terminal;
 
-  // Single node under "node"
-  if (rq.HasMember("node") && rq["node"].IsObject()) {
-    midHead = buildOne(rq["node"], streamKey, deps, terminal);
-    keepAlive.push_back(midHead);
-  }
-
-  // Or an array pipeline under "pipeline" or "stages"
+  // The pipeline, built tail-first. `midHead` stays `terminal` when absent.
   const char* pipeKeys[] = {"pipeline", "stages"};
   for (const char* k : pipeKeys) {
     if (rq.HasMember(k) && rq[k].IsArray()) {
@@ -606,6 +624,12 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
       midHead = curDown;
       break;
     }
+  }
+
+  // The `node` subtree, upstream of whatever the pipeline left in `midHead`.
+  if (rq.HasMember("node") && rq["node"].IsObject()) {
+    midHead = buildOne(rq["node"], streamKey, deps, midHead);
+    keepAlive.push_back(midHead);
   }
 
   if (!deps.dispatcher || !deps.pool)
