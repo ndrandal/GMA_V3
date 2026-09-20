@@ -285,6 +285,31 @@ std::string recordTerminalMessage(const std::string& culprit) {
 // EMPTY and the upstream's output is discarded in total silence: no log, no
 // metric, no error, and a chart that is missing a value nobody can explain.
 //
+// WHAT IT COSTS, MEASURED — AND IT IS NOT NOTHING. SPEC §5 Q7 says "Nothing to
+// forum ... it cannot emit a fan-in pipeline stage at all". That is true of
+// `Aggregate` (forum's translator always turns the edge-fanned join into the
+// Request's Node) and FALSE of `Pack` and `Let`, which forum treats as
+// config-driven LINEAR stages (`forum/internal/pipelinetranslate/
+// config_mapping.go` `case "pack"` / `case "let"`) and `translateStage` will
+// place at ANY index of the chain. Driving forum's real `Translate()` on three
+// graphs produced, verbatim:
+//
+//   Listener->Pack->Filter->Field->Responder  (the ENC-672 demo headline)
+//       -> pipeline:[Pack, Filter, Field]                      ACCEPTED here
+//   Listener->Filter->Pack->Field->Responder
+//       -> pipeline:[Filter, Pack, Field]                      REFUSED here
+//   Listener->{2 accessors}->Aggregate->Pack->Field->Responder
+//       -> node:Aggregate + pipeline:[Pack, Field]             REFUSED here
+//
+// So forum CAN author both refused shapes, and this refusal stops them
+// building. Measured at the pre-change commit `b273278`, all three emit the
+// IDENTICAL sequence — the Pack's own record, projected — because the upstream
+// half really is thrown away: deleting the `Filter`/`Aggregate` changes
+// nothing. That is the defect, not a cost of removing it. But the honest
+// statement is "two shapes forum can emit stop building", not "nothing to
+// forum", and the first ACCEPTED row above is why the accept half must not be
+// widened by one condition: it is forum's flagship graph.
+//
 // WHY IT IS A BUILD-TIME REFUSAL AND NOT A DOCUMENTED BEHAVIOUR. **0 of the 272
 // `tests/treebuilder/corpus_requests.json` entries have a fan-in in a pipeline
 // stage** (all 52 `Aggregate`s are under `node`; the corpus contains no `Pack`
@@ -338,8 +363,12 @@ std::string fanInPipelineStageMessage(const std::string& type,
                                       bool               hasNode) {
   const std::string where =
     std::string(key) + "[" + std::to_string(index) + "]";
+  // `index - 1` is only reached with index >= 1: the caller returns early for
+  // the one accepted placement (!hasNode && index == 0), so !hasNode implies
+  // index != 0. Guarded anyway rather than relying on that at a distance — a
+  // size_t underflow here would print `pipeline[18446744073709551615]`.
   const std::string because =
-    hasNode
+    (hasNode || index == 0)
       ? "this request also carries a 'node', whose subtree is built directly "
         "upstream of the first pipeline stage"
       : "it is not the first stage — " + std::string(key) + "[" +
