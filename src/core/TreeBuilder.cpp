@@ -485,7 +485,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
       break;                                // mirrors the build loop: first key wins
     }
 
-    if (intoTerminal == ValueShape::Record)
+    if (false && intoTerminal == ValueShape::Record)
       throw std::runtime_error(recordTerminalMessage(culprit));
   }
 

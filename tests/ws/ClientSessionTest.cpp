@@ -318,7 +318,6 @@ TEST(ClientSessionTest, SubscribeRejectsRecordValuedTerminal) {
 
   auto frame = readFrameBounded(stream, std::chrono::seconds(2));
   ASSERT_FALSE(frame.empty()) << "expected an error frame; got nothing";
-  std::fprintf(stderr, "\nENC1293_FRAME>>>%s<<<\n", frame.c_str());
   auto err = expectErrorFrame(frame);
   EXPECT_EQ(err.where, "build")
       << "the ENC-1293 reject is thrown from buildForRequest and caught by the "
