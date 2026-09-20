@@ -649,21 +649,21 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   // So everything constructed below is torn down on the way out unless the
   // build reaches the end. This fixes BOTH orders, not just the new one.
   struct Unwind {
-    std::vector<std::shared_ptr<gma::INode>>* alive;
-    std::shared_ptr<gma::INode>*              head;
+    std::vector<std::shared_ptr<gma::INode>>* built;
     bool                                      armed{true};
     ~Unwind() {
-      if (!armed) return;
-      if (head && *head) (*head)->shutdown();
-      if (alive)
-        for (auto it = alive->rbegin(); it != alive->rend(); ++it)
-          if (*it) (*it)->shutdown();
+      if (!armed || !built) return;
+      // Reverse order: tear down upstream before the downstream it feeds.
+      for (auto it = built->rbegin(); it != built->rend(); ++it)
+        if (*it) (*it)->shutdown();
     }
   };
-  std::shared_ptr<gma::INode> builtHead;
-  // `keepAlive[0]` is the caller's terminal — never ours to shut down.
+  // Deliberately NOT `keepAlive`, whose first element is the CALLER's terminal
+  // — that is never ours to shut down. `Listener::Create` is the last thing
+  // that can fail, and it reports failure instead of throwing, so the head
+  // never needs unwinding: on its error path it was never constructed.
   std::vector<std::shared_ptr<gma::INode>> ours;
-  Unwind unwind{&ours, &builtHead};
+  Unwind unwind{&ours};
 
   std::shared_ptr<gma::INode> midHead = terminal;
 
@@ -715,7 +715,6 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
     throw std::runtime_error(headRes.error().message);
   }
   auto head = std::move(headRes.value());
-  builtHead = head;          // now owned by the unwind guard too
 
   unwind.armed = false;      // the build succeeded; the caller owns it all
   BuiltChain out;
