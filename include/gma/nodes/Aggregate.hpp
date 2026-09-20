@@ -1,6 +1,5 @@
 #pragma once
 #include <atomic>
-#include <optional>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -13,24 +12,11 @@ namespace gma {
 // Fan-in node: collects N values per symbol before forwarding the batch
 // to parent. Thread-safe — multiple upstream nodes may call onValue()
 // concurrently.
-class Aggregate;
-class AggPort final : public INode {
-public:
-  AggPort(std::weak_ptr<Aggregate> owner, std::size_t idx)
-    : owner_(std::move(owner)), idx_(idx) {}
-  void onValue(const StreamValue& sv) override;
-  void shutdown() noexcept override {}
-private:
-  std::weak_ptr<Aggregate> owner_;
-  std::size_t idx_;
-};
-
 class Aggregate final : public INode {
 public:
   Aggregate(std::size_t arity, std::shared_ptr<INode> parent);
 
   void onValue(const StreamValue& sv) override;
-  void onPort(std::size_t idx, const StreamValue& sv);
   void shutdown() noexcept override;
 
 private:
@@ -46,8 +32,6 @@ private:
   std::atomic<bool> stopping_{false};
   mutable std::mutex mx_;
   std::unordered_map<std::string, SymBuf> buf_;
-  struct SymSlots { std::vector<std::optional<ArgType>> latest; std::size_t filled{0}; };
-  std::unordered_map<std::string, SymSlots> slots_;
 };
 
 } // namespace gma
