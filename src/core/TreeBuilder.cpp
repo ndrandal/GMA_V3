@@ -349,15 +349,34 @@ private:
 // property of the authored `streamKey`/`field` — which is why all 52 affected
 // corpus entries are RE-WIRED and none is re-authored.
 //
+// THREE THINGS SELF-CLOCK, and the list is exhaustive by construction — a node
+// is self-clocked iff something other than its upstream calls its `onValue`:
+//   * `Listener`      — the Dispatcher pushes to it.
+//   * `Interval` /
+//     `BucketTime`    — a timer thread drives their child directly
+//                       (`timerLoop`). Their own `onValue` is an explicit
+//                       no-op ("source node: no upstream input"), so before
+//                       ENC-1290 named them here the clock was forwarded to
+//                       them and was correct ONLY by accident, via that no-op.
+//                       Saying it out loud costs nothing and stops the next
+//                       edit to `Interval::onValue` from silently double-firing
+//                       every timer-headed join input.
+//
+// `Ref` IS NOT ONE OF THEM, and an earlier draft of this function wrongly said
+// it was. A `Ref`'s own head is a `RefStub` no-op, so clocking it is harmless —
+// but the test runs over the WHOLE declared subtree, so `Ref -> true` poisoned
+// every enclosing node: a `Let` whose bindings are pull-only and whose body
+// merely mentions a `Ref` (i.e. every non-degenerate `Let`) was declared
+// self-clocked, and its join stayed dead — the exact failure this rule exists
+// to end for the 7 pull-only corpus entries. Caught by adversarial review; the
+// `Let` cases in tests/treebuilder/ComposedChainTest.cpp are the gate, and no
+// test covered the clause before.
+//
 // CONSERVATIVE DIRECTION. Returning `true` (do not clock) reproduces the
 // pre-ENC-1290 behaviour exactly, so it is the safe answer when we cannot
-// tell. Returning a wrong `false` is the harmful direction — it injects the
-// clock where something else already drives it. Hence:
-//   * depth overflow -> `true`;
-//   * `Ref` -> `true`. A Ref's binding producer is built elsewhere and may
-//     hold a Listener that is not in this subtree's JSON; the Ref's own head
-//     is a RefStub whose onValue is a no-op, so clocking it could only ever be
-//     a wasted call anyway.
+// tell — hence depth overflow -> `true`. Returning a wrong `false` is the
+// harmful direction: it injects the clock where something else already drives
+// the input.
 bool declaredInputIsSelfClocked(const rapidjson::Value& spec, int depth = 0) {
   if (depth > kMaxShapeDepth) return true;
   if (spec.IsArray()) {
@@ -368,8 +387,9 @@ bool declaredInputIsSelfClocked(const rapidjson::Value& spec, int depth = 0) {
   if (!spec.IsObject()) return false;
   if (spec.HasMember("type") && spec["type"].IsString()) {
     const char* t = spec["type"].GetString();
-    if (std::strcmp(t, "Listener") == 0) return true;
-    if (std::strcmp(t, "Ref") == 0)      return true;
+    if (std::strcmp(t, "Listener")   == 0) return true;
+    if (std::strcmp(t, "Interval")   == 0) return true;
+    if (std::strcmp(t, "BucketTime") == 0) return true;
   }
   for (auto m = spec.MemberBegin(); m != spec.MemberEnd(); ++m)
     if (declaredInputIsSelfClocked(m->value, depth + 1)) return true;
