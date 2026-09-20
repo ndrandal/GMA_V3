@@ -288,6 +288,77 @@ TEST(ClientSessionTest, SubscribeRejectsObListenerField) {
   stream.close(ws::close_code::normal, ec);
 }
 
+// ENC-1293 / SPEC specs/2026-09-20-gma-join-correctness D7: a request whose
+// terminal would receive a `Record` must round-trip as an `error` frame whose
+// `where` is "build", naming the reduction to apply.
+//
+// This is the acceptance criterion's frame half, proved over a real socket
+// rather than inferred from a thrown exception. The frame shape PRE-EXISTS —
+// `ClientSession::sendError` has written {"type","where","message"} since
+// ENC-48, and the "build" catch around `tree::buildForRequest` is the same one
+// the ENC-101 `ob.*` reject above rides. ENC-1293 adds no new frame type and no
+// new error path; it adds a throw that reaches the existing one.
+//
+// TEMPORARY: ENC-1295 (embassy) teaches the data path to consume a Record and
+// lifts the restriction. Delete this test with it.
+TEST(ClientSessionTest, SubscribeRejectsRecordValuedTerminal) {
+  ServerHarness srv;
+  asio::io_context clientIoc;
+  auto stream = connect(clientIoc, srv.port());
+
+  // Pack -> Responder: the terminal receives a gma::Record, which GMA
+  // serializes as a JSON object and embassy's scalar-only asFloat32 drops with
+  // no log, no metric and no error.
+  std::string req =
+    R"({"type":"subscribe","requests":[{"key":1,"streamKey":"AAPL","field":"lastPrice",)"
+    R"("pipeline":[{"type":"Pack","fields":{)"
+    R"("ask":{"type":"Listener","streamKey":"AAPL","field":"ask"},)"
+    R"("bid":{"type":"Listener","streamKey":"AAPL","field":"bid"}}}]}]})";
+  stream.write(asio::buffer(req));
+
+  auto frame = readFrameBounded(stream, std::chrono::seconds(2));
+  ASSERT_FALSE(frame.empty()) << "expected an error frame; got nothing";
+  auto err = expectErrorFrame(frame);
+  EXPECT_EQ(err.where, "build")
+      << "the ENC-1293 reject is thrown from buildForRequest and caught by the "
+         "'build' catch in ClientSession; got where=" << err.where;
+  EXPECT_NE(err.message.find("Record"), std::string::npos)
+      << "message must say what was wrong with the value; got: " << err.message;
+  EXPECT_NE(err.message.find("Pack -> Field"), std::string::npos)
+      << "message must name the reduction to apply; got: " << err.message;
+  EXPECT_NE(err.message.find("ENC-1295"), std::string::npos)
+      << "message must name the ticket that lifts the restriction; got: "
+      << err.message;
+
+  beast::error_code ec;
+  stream.close(ws::close_code::normal, ec);
+}
+
+// The accept direction over the same socket: `Pack -> Field -> Responder` must
+// still subscribe successfully. Without this, the test above would be equally
+// satisfied by refusing every request containing a Pack.
+TEST(ClientSessionTest, SubscribeAcceptsPackFieldResponder) {
+  ServerHarness srv;
+  asio::io_context clientIoc;
+  auto stream = connect(clientIoc, srv.port());
+
+  std::string req =
+    R"({"type":"subscribe","requests":[{"key":1,"streamKey":"AAPL","field":"lastPrice",)"
+    R"("pipeline":[{"type":"Pack","fields":{)"
+    R"("ask":{"type":"Listener","streamKey":"AAPL","field":"ask"},)"
+    R"("bid":{"type":"Listener","streamKey":"AAPL","field":"bid"}}},)"
+    R"({"type":"Field","name":"bid"}]}]})";
+  stream.write(asio::buffer(req));
+
+  auto frame = readUntilType(stream, "subscribed", std::chrono::seconds(2));
+  ASSERT_FALSE(frame.empty())
+      << "Pack -> Field -> Responder must still subscribe; the restriction is "
+         "on Record-valued TERMINALS, not on Pack";
+
+  beast::error_code ec;
+  stream.close(ws::close_code::normal, ec);
+}
+
 TEST(ClientSessionTest, CancelMissingKeysArrayError) {
   ServerHarness srv;
   asio::io_context clientIoc;
