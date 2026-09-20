@@ -99,8 +99,13 @@ void Listener::onValue(const gma::StreamValue& sv) {
   // pool, one task at a time per DAG. The cost is that one DAG can no longer
   // occupy more than one core, which SPEC §5 Q2 rules acceptable.
   //
-  // `bucketStartMs` is carried through (ENC-1280) — the old pool path dropped
-  // it, silently un-bucketing every value that crossed a Listener.
+  // The strand path forwards the whole `StreamValue`, so `bucketStartMs`
+  // (ENC-1280) survives; the pool path below rebuilds a two-field value and
+  // drops it. That is not a behaviour change today — `Dispatcher` constructs
+  // every pushed value with `bucketStartMs == 0` (StreamValue.hpp:134-138
+  // calls the raw Listener path "no bucket identity"), so there is nothing to
+  // lose on either path. It is written the correct way here so the difference
+  // does not become one later.
   if (strand_) {
     strand_->post([d = down, sv]() mutable {
       d->onValue(sv);

@@ -222,13 +222,47 @@ void Dispatcher::onTick(const Event& tick) {
     computeAndStoreAtomics(tick.symbol, field, histVec);
 
     StreamValue out{ tick.symbol, raw };
-    if (_threadPool) {
-      _threadPool->post([node, out]() {
-        if (node) node->onValue(out);
-      });
-    } else {
-      if (node) node->onValue(out);
-    }
+    deliver(node, out);
+  }
+}
+
+// ENC-1005 / SPEC specs/2026-09-20-gma-join-correctness D3, D4.
+//
+// WHY THIS IS NOT ALWAYS A POOL POST. The per-DAG strand orders everything
+// DOWNSTREAM of a Listener. It cannot order what happens UPSTREAM of one — and
+// this hop is upstream. `onTick` walks its `_listeners` entry for the symbol,
+// whose inner container is a `std::map<field, ...>`, so it produces `ask`
+// before `bid` deterministically; posting each notification as an independent
+// pool task then hands that order straight back to the scheduler. At four
+// workers the two tasks run concurrently, each calls `Listener::onValue`, and
+// whichever wins reaches the strand first. The strand would faithfully preserve
+// an order that was already scrambled one hop earlier.
+//
+// So a node that says `deliversOnOwnExecutor()` is called INLINE, on the
+// ingress thread, in the order this loop produced. It does almost no work
+// there — take a lock, lock a weak_ptr, enqueue — and hands the value to its
+// strand, which is what gets the real compute off the ingress thread. The pool
+// hop is not removed, it is moved one node downstream, to the place that can
+// keep the order.
+//
+// EVERYTHING ELSE IS UNCHANGED. `INode::deliversOnOwnExecutor()` defaults to
+// false and only `nodes::Listener` overrides it, only when it holds a strand.
+// A Listener on the legacy unordered path, and every raw `INode` that tests
+// register directly, still gets exactly the pool post it got before.
+void Dispatcher::deliver(const std::shared_ptr<INode>& node,
+                         const StreamValue& out) {
+  if (!node) return;
+  if (node->deliversOnOwnExecutor()) {
+    node->onValue(out);
+    return;
+  }
+  if (_threadPool) {
+    auto n = node;
+    _threadPool->post([n, out]() {
+      if (n) n->onValue(out);
+    });
+  } else {
+    node->onValue(out);
   }
 }
 
@@ -248,13 +282,7 @@ void Dispatcher::notifyListeners(const std::string& symbol,
 
   StreamValue out{ symbol, value };
   for (auto& node : targets) {
-    if (_threadPool) {
-      _threadPool->post([node, out]() {
-        if (node) node->onValue(out);
-      });
-    } else {
-      if (node) node->onValue(out);
-    }
+    deliver(node, out);
   }
 }
 
