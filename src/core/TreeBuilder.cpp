@@ -20,6 +20,7 @@
 #include "gma/nodes/TumblingWindow.hpp"
 #include "gma/nodes/VectorReducer.hpp"
 #include "gma/nodes/Tee.hpp"
+#include "gma/nodes/InputPort.hpp"
 #include "gma/nodes/Pack.hpp"
 #include "gma/nodes/Field.hpp"
 #include "gma/nodes/Expr.hpp"
@@ -395,6 +396,42 @@ bool declaredInputIsSelfClocked(const rapidjson::Value& spec, int depth = 0) {
     if (declaredInputIsSelfClocked(m->value, depth + 1)) return true;
   return false;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUB-BUILD UNWIND (ENC-1291)
+//
+// `buildForRequest`'s `Unwind` guard (section 1.5, ENC-1290) only ever receives
+// the node `buildOne` RETURNS. Anything constructed INSIDE a sub-build that
+// then throws is invisible to it — and a fan-in builder is exactly that: it
+// loops over its declared `inputs`/`fields`/`bindings` calling `buildOne`, so a
+// throw on input N strands every `Listener` inputs 0..N-1 already registered
+// with the Dispatcher. Those are the unbounded, client-reachable, never-
+// unregistered subscriptions section 1.5 is about: still walked on every
+// `onTick`, delivering to a downstream port that died with the rejected fan-in,
+// so nothing observes them and nothing can stop them.
+//
+// This was live before ENC-1291 (a bad node type inside `inputs` reaches it),
+// and ENC-1291 ADDED a throw site in that loop — the arity check fires for a
+// NESTED fan-in too — so it is fixed here rather than left. Found by an
+// adversarial pass that measured 25 stranded subscriptions from 25 refused
+// builds of a nested `Aggregate`, on the committed tree.
+//
+// Used by all three fan-in builders, because the shape and the hole are the
+// same in each. Gated by `NestedFanInThrowLeavesNothingSubscribed`.
+struct SubBuildUnwind {
+  std::vector<std::shared_ptr<gma::INode>> built;
+  bool                                     armed{true};
+
+  void keep(const std::shared_ptr<gma::INode>& n) { if (n) built.push_back(n); }
+  void disarm() noexcept { armed = false; }
+
+  ~SubBuildUnwind() {
+    if (!armed) return;
+    // Reverse order: tear down upstream before the downstream it feeds.
+    for (auto it = built.rbegin(); it != built.rend(); ++it)
+      if (*it) (*it)->shutdown();
+  }
+};
 
 // RefStub: the no-op head a `Ref` returns (ENC-647). A Ref has no local
 // upstream — its binding's producer feeds the Ref's downstream directly (via a
@@ -916,30 +953,87 @@ void registerBuiltinNodeTypes() {
     [](const rapidjson::Value& v, const std::string& defaultStreamKey,
        const tree::Deps& deps, std::shared_ptr<INode> downstream)
         -> std::shared_ptr<INode> {
-      std::size_t arity = sizeOr(v, "arity", 0);
+      // ENC-1291 / SPEC D2. EVERYTHING IS VALIDATED BEFORE ANYTHING IS BUILT.
+      // `Listener`/`Interval`/`BucketTime` builders subscribe and spawn threads
+      // as they are constructed, so a late throw costs real work (SPEC section
+      // 1.5 measured what a partially-built, rejected subscription used to
+      // leave behind). The RAII `Unwind` guard in buildForRequest now cleans
+      // that up, but not building it in the first place is cheaper and is the
+      // order D7's check already established.
+      // `sizeOr` gates on `IsUint()`, so a present-but-wrongly-typed `arity`
+      // (`2.0`, `"2"`, `-1`) silently takes the default and used to be reported
+      // as "positive 'arity' required" — true, but it sends the author looking
+      // for a missing field they did supply. Separate the two complaints
+      // (ENC-1291; nothing covered this before
+      // `NonIntegerArityIsRefusedForTheRightReason`).
+      if (v.HasMember("arity") && !v["arity"].IsUint())
+        throw std::runtime_error(
+          "Aggregate: 'arity' must be a non-negative whole number");
+
+      const std::size_t arity = sizeOr(v, "arity", 0);
       if (arity == 0)
         throw std::runtime_error("Aggregate: positive 'arity' required");
-
-      auto agg = std::make_shared<Aggregate>(arity, downstream);
 
       if (!v.HasMember("inputs") || !v["inputs"].IsArray())
         throw std::runtime_error("Aggregate: 'inputs' must be an array");
 
       const auto& inputArr = v["inputs"];
+      const std::size_t inputCount = inputArr.Size();
+      if (inputCount == 0)
+        throw std::runtime_error("Aggregate: empty 'inputs' array");
+
+      // ENC-1291 / SPEC D2: `arity` used to be read by `sizeOr` and NEVER
+      // compared to `inputs.size()`, so `{"arity":2,"inputs":[a,b,c,d,e]}`
+      // built happily and then joined by value count. Now that an input's
+      // identity IS its port index, the two numbers are the same number said
+      // twice and a disagreement is unresolvable: there is no defensible
+      // reading of "2 of these 5 inputs". Refuse it, naming BOTH counts so the
+      // author can see which one they meant.
+      //
+      // Measured against the checked-in corpus at the commit that introduced
+      // this: 0 of 272 `tests/treebuilder/corpus_requests.json` entries are
+      // refused — all 52 `Aggregate` requests already agree (49 are 2/2, two
+      // are 3/3, one is 4/4). So this costs the corpus nothing and forum
+      // nothing (`internal/pipelinetranslate/translator.go:160` already
+      // documents the contract as "arity must match"); it closes the door on a
+      // hand-written request that silently means something the engine cannot
+      // express.
+      if (arity != inputCount)
+        throw std::runtime_error(
+          "Aggregate: 'arity' is " + std::to_string(arity) +
+          " but 'inputs' declares " + std::to_string(inputCount) +
+          " input(s) — they must be equal. A fan-in's inputs are addressed by "
+          "position (SPEC specs/2026-09-20-gma-join-correctness D2), so "
+          "'arity' is just the length of 'inputs' and cannot disagree with it.");
+
+      auto agg = std::make_shared<Aggregate>(arity, downstream);
+
+      // ENC-1291: a throw on input N must not strand inputs 0..N-1. See
+      // SubBuildUnwind above.
+      SubBuildUnwind unwind;
+      unwind.keep(agg);
+
       std::vector<std::shared_ptr<INode>> roots;
       std::vector<std::weak_ptr<INode>>   clockTargets;   // ENC-1290 (D5/Q1)
-      roots.reserve(inputArr.Size() + 1);
+      roots.reserve(inputCount + 1);
+      std::size_t idx = 0;
       for (auto& it : inputArr.GetArray()) {
-        auto inHead = tree::buildOne(it, defaultStreamKey, deps, agg);
+        // ENC-1291 / SPEC D2: each declared input terminates in its OWN
+        // indexed port, so the join knows which input a value came from
+        // without anything being added to StreamValue. `agg` owns the port;
+        // the port holds only a weak_ptr back (include/gma/nodes/InputPort.hpp
+        // documents why that direction is forced).
+        auto port = std::make_shared<InputPort>(std::weak_ptr<IFanIn>(agg), idx++);
+        agg->addPort(port);
+        auto inHead = tree::buildOne(it, defaultStreamKey, deps, port);
         // A declared input with no Listener anywhere in it (AtomicAccessor and
         // friends) has no clock of its own; the request's head Listener is it.
         // An input that carries a Listener is already Dispatcher-driven and
         // must NOT be driven a second time.
         if (!declaredInputIsSelfClocked(it)) clockTargets.emplace_back(inHead);
+        unwind.keep(inHead);
         roots.push_back(std::move(inHead));
       }
-      if (roots.empty())
-        throw std::runtime_error("Aggregate: empty 'inputs' array");
 
       // Keep Aggregate alive alongside input heads — Listeners hold only a
       // weak_ptr to their downstream, so without this the Aggregate would be
@@ -949,6 +1043,7 @@ void registerBuiltinNodeTypes() {
       // CompositeRoot comment.
       roots.push_back(agg);
 
+      unwind.disarm();
       return std::make_shared<CompositeRoot>(std::move(roots),
                                              std::move(clockTargets));
     });
@@ -1025,7 +1120,7 @@ void registerBuiltinNodeTypes() {
 
   // Pack assembles N named input subtrees into a keyed Record per symbol
   // (combineLatest). Shape: {"type":"Pack","fields":{"o":<sub>,"h":<sub>,...}}.
-  // Each field's input is built terminating in a per-field PackPort; the Pack
+  // Each field's input is built terminating in a per-field InputPort; the Pack
   // owns the ports and emits the Record into the shared `downstream`. Mirrors
   // Aggregate's fan-in ownership (CompositeRoot holds the input heads + Pack).
   NodeTypeRegistry::registerNodeType("Pack",
@@ -1046,19 +1141,24 @@ void registerBuiltinNodeTypes() {
 
       auto pack = std::make_shared<Pack>(names, downstream);
 
+      SubBuildUnwind unwind;          // ENC-1291, same hole as Aggregate's
+      unwind.keep(pack);
+
       std::vector<std::shared_ptr<INode>> roots;
       std::vector<std::weak_ptr<INode>>   clockTargets;   // ENC-1290 (D5/Q1)
       roots.reserve(fobj.MemberCount() + 1);
       std::size_t idx = 0;
       for (auto it = fobj.MemberBegin(); it != fobj.MemberEnd(); ++it, ++idx) {
-        auto port = std::make_shared<PackPort>(std::weak_ptr<Pack>(pack), idx);
+        auto port = std::make_shared<InputPort>(std::weak_ptr<IFanIn>(pack), idx);
         pack->addPort(port);
         auto inHead = tree::buildOne(it->value, defaultStreamKey, deps, port);
         if (!declaredInputIsSelfClocked(it->value)) clockTargets.emplace_back(inHead);
+        unwind.keep(inHead);
         roots.push_back(std::move(inHead));
       }
       roots.push_back(pack);   // lifecycle, NOT a clock target (ENC-1290)
 
+      unwind.disarm();
       return std::make_shared<CompositeRoot>(std::move(roots),
                                              std::move(clockTargets));
     });
@@ -1184,7 +1284,9 @@ void registerBuiltinNodeTypes() {
       scope.parent   = deps.bindingScope;
       tree::Deps bodyDeps = deps;
       bodyDeps.bindingScope = &scope;
+      SubBuildUnwind unwind;          // ENC-1291, same hole as Aggregate's
       auto bodyHead = tree::buildOne(v["body"], defaultStreamKey, bodyDeps, downstream);
+      unwind.keep(bodyHead);
 
       // Pass 2: build each referenced binding's producer once -> Tee/consumer.
       std::vector<std::shared_ptr<INode>> roots;
@@ -1205,6 +1307,7 @@ void registerBuiltinNodeTypes() {
           tree::buildOne(bindings[name.c_str()], defaultStreamKey, deps, sink);
         if (!declaredInputIsSelfClocked(bindings[name.c_str()]))
           clockTargets.emplace_back(prodHead);
+        unwind.keep(prodHead);
         roots.push_back(prodHead);
       }
 
@@ -1213,6 +1316,8 @@ void registerBuiltinNodeTypes() {
       // head Listener is there to drive.
       if (!declaredInputIsSelfClocked(v["body"])) clockTargets.emplace_back(bodyHead);
       roots.push_back(bodyHead);
+
+      unwind.disarm();
       return std::make_shared<CompositeRoot>(std::move(roots),
                                              std::move(clockTargets));
     });

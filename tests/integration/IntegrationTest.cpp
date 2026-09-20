@@ -2,6 +2,7 @@
 #include "gma/AtomicFunctions.hpp"
 #include "gma/Dispatcher.hpp"
 #include "gma/nodes/Aggregate.hpp"
+#include "gma/nodes/InputPort.hpp"
 #include "gma/nodes/Worker.hpp"
 #include "gma/nodes/Listener.hpp"
 #include "gma/nodes/AtomicAccessor.hpp"
@@ -64,6 +65,12 @@ Event makeTick(const std::string& symbol, const std::string& field, double value
 TEST(IntegrationTest, AggregateToWorkerPipeline) {
     // Wire: Aggregate(2) -> Worker(sum) -> Terminal
     // Worker accumulates: after value 1 sum=10, after value 2 sum=10+20=30
+    //
+    // ENC-1291 (SPEC D2): the two values must arrive on the two DECLARED
+    // INPUTS, through their own ports. This test used to push both into
+    // `agg.onValue` — no input identity at all — and so pinned SPEC section 1.1
+    // defect 2 alongside tests/nodes/AggregateTest.cpp. The pipeline's expected
+    // output is unchanged; only the way the join is fed is corrected.
     auto terminal = std::make_shared<PipelineTerminal>();
 
     Worker::Fn sumFn = [](Span<const ArgType> inputs) -> ArgType {
@@ -72,10 +79,29 @@ TEST(IntegrationTest, AggregateToWorkerPipeline) {
         return ArgType(s);
     };
     auto worker = std::make_shared<Worker>(sumFn, terminal);
-    Aggregate agg(2, worker);
+    auto agg    = std::make_shared<Aggregate>(2, worker);
 
-    agg.onValue(StreamValue{"SYM", 10.0});
-    agg.onValue(StreamValue{"SYM", 20.0});
+    std::vector<std::shared_ptr<INode>> ports;
+    for (std::size_t i = 0; i < 2; ++i) {
+        auto p = std::make_shared<InputPort>(std::weak_ptr<IFanIn>(agg), i);
+        agg->addPort(p);
+        ports.push_back(p);
+    }
+
+    // TWO values on input 0 before input 1 reports. One value each would NOT
+    // gate defect 2: with arity 2 and exactly two values, counting values and
+    // counting inputs are indistinguishable, and the first version of this
+    // test was green against the original defect (measured, ENC-1291
+    // adversarial pass). Two on one side separates them — a value-counting
+    // join completes here, a port-indexed one does not.
+    ports[0]->onValue(StreamValue{"SYM", 7.0});
+    ports[0]->onValue(StreamValue{"SYM", 10.0});   // supersedes 7.0
+    ASSERT_EQ(terminal->received.size(), 0u)
+        << "two values arrived on input 0 and NONE on input 1. A two-input "
+           "join has no complete tuple to emit; before ENC-1291 it counted "
+           "VALUES and emitted {7, 10} here.";
+
+    ports[1]->onValue(StreamValue{"SYM", 20.0});
 
     ASSERT_EQ(terminal->received.size(), 2u);
     EXPECT_DOUBLE_EQ(std::get<double>(terminal->received[0].value), 10.0);

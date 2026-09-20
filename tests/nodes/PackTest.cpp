@@ -24,7 +24,7 @@ std::shared_ptr<Pack> makePack(const std::vector<std::string>& names,
                                std::vector<std::shared_ptr<INode>>& ports) {
   auto pack = std::make_shared<Pack>(names, std::move(sink));
   for (std::size_t i = 0; i < names.size(); ++i) {
-    auto p = std::make_shared<PackPort>(std::weak_ptr<Pack>(pack), i);
+    auto p = std::make_shared<InputPort>(std::weak_ptr<IFanIn>(pack), i);
     pack->addPort(p);
     ports.push_back(p);
   }

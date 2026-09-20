@@ -35,6 +35,12 @@
 // `ClockIsNeverAJoinMember` below fails under that implementation and passes
 // under this one. It is the only reason that distinction is checkable.
 //
+// ENC-1291 NOTE: what makes it fail changed. `Aggregate::onValue` is now a
+// warn-and-drop (SPEC D2), so the clock reaching the fan-in no longer corrupts
+// the output and the value comparison alone could not fail any more. The gate
+// is now `Aggregate::pipelineEdgeValues()`, asserted not to move. See the block
+// above the test.
+//
 // ─────────────────────────────────────────────────────────────────────────────
 // SCOPE — FAN-IN NODES ONLY
 //
@@ -57,6 +63,7 @@
 #include "gma/Event.hpp"
 #include "gma/StreamValue.hpp"
 #include "gma/TreeBuilder.hpp"
+#include "gma/nodes/Aggregate.hpp"
 #include "gma/nodes/BucketTime.hpp"
 #include "gma/nodes/INode.hpp"
 #include "gma/nodes/Interval.hpp"
@@ -323,9 +330,36 @@ TEST_F(ComposedChain, Corpus86ComposedChainEmitsTheExactMeasuredValues) {
 // 7777 is pushed into `buf_["AAPL"]` as a join member, every batch shifts, and
 // this test fails. Delete the `clockTargets` filter entirely and it fails the
 // same way. There is no other test in the suite that separates the two rules.
+//
+// ENC-1291 RE-ARMED THIS TEST AFTER DISARMING IT. Read this before touching it.
+//
+// As ENC-1290 wrote it, the gate was the value comparison below: forward the
+// clock to `roots_` (which holds the `Aggregate` itself) and `lastPrice` lands
+// in `Aggregate::buf_` as a join member, corrupting the six arrivals. That
+// worked because a stray value reaching the fan-in CHANGED THE OUTPUT.
+//
+// SPEC D2 (ENC-1291) made `Aggregate::onValue` a warn-and-drop, so a stray
+// value reaching the fan-in now changes nothing observable — and the exact
+// retracted-wording mutation (`clockTargets.emplace_back(agg);` after
+// `roots.push_back(agg);` in the Aggregate builder) produced output
+// BIT-IDENTICAL to baseline. The gate was silently unable to fail. Measured by
+// an adversarial pass, not noticed in review.
+//
+// So the assertion is now in two parts, and the FIRST is the one that gates
+// the clock rule:
+//
+//   1. `Aggregate::pipelineEdgeValues()` must not move. The clock must not
+//      reach the fan-in AT ALL — not "must not corrupt it". This is directional
+//      against the retracted wording and stays directional however defensively
+//      `Aggregate::onValue` behaves.
+//   2. The six values, unchanged from ENC-1290. Kept because it pins the
+//      arithmetic as well as the wiring.
+//
 TEST_F(ComposedChain, ClockIsNeverAJoinMember) {
   const rapidjson::Value* req = corpusRequest(86);
   ASSERT_NE(req, nullptr);
+
+  const std::size_t edgeBefore = Aggregate::pipelineEdgeValues();
 
   auto sink = std::make_shared<Sink>();
   tree::BuiltChain chain;
@@ -341,6 +375,28 @@ TEST_F(ComposedChain, ClockIsNeverAJoinMember) {
   const std::vector<double> kExpected = {0.00, -0.02, 1.00, 0.98, 2.00, 1.98};
   const auto vals = sink->values();
   EXPECT_EQ(sink->nonNumeric(), 0u);
+
+  // ── PART 1: the clock never reaches the fan-in at all (ENC-1291) ──────────
+  EXPECT_EQ(Aggregate::pipelineEdgeValues(), edgeBefore)
+      << (Aggregate::pipelineEdgeValues() - edgeBefore)
+      << " value(s) reached an `Aggregate` on its PIPELINE edge while driving "
+         "corpus 86.\n"
+         "    The head Listener(AAPL,lastPrice) is the chain's CLOCK. Both of "
+         "corpus 86's declared inputs\n"
+         "    carry Listeners of their own, so the clock's forwarding set is "
+         "EMPTY and `lastPrice` must\n"
+         "    reach nothing. A non-zero count means `CompositeRoot` is "
+         "forwarding the clock to something\n"
+         "    that is not a declared input head — almost certainly `roots_`, "
+         "which holds the Aggregate\n"
+         "    ITSELF. That is the RETRACTED first wording of SPEC section 5 "
+         "Q1's rule (ENC-1317 C4.0),\n"
+         "    and it is SPEC section 1.1 defect 2 manufactured inside the "
+         "builder.\n"
+         "    Since ENC-1291 the value is DROPPED rather than buffered, so it "
+         "no longer corrupts the\n"
+         "    numbers below — which is exactly why this counter, and not those "
+         "numbers, is the gate.";
 
   for (auto& n : chain.keepAlive) if (n) n->shutdown();
   if (chain.head) chain.head->shutdown();

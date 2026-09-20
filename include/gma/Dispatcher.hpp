@@ -72,6 +72,24 @@ public:
   std::vector<std::shared_ptr<INode>> listenersFor(const std::string& symbol,
                                                    const std::string& field) const;
 
+  // ENC-1291. How many subscriptions are live RIGHT NOW, across every
+  // (symbol, field).
+  //
+  // This exists because SPEC specs/2026-09-20-gma-join-correctness section 1.5
+  // — a rejected build stranding every `Listener` it had already registered,
+  // an unbounded client-reachable leak — had no direct observation point. The
+  // only way to see it was to tick and watch for a value arriving at a
+  // terminal, which is blind whenever the stranded Listener's downstream is
+  // already dead (its downstream is a weak_ptr, so a Listener whose downstream
+  // died is still SUBSCRIBED and still costs `onTick` work, while delivering
+  // nothing anyone can observe). That is exactly the shape a rejected fan-in
+  // build leaves behind, and it is why `ArityMismatchIsRefusedBeforeAnything
+  // Subscribes` was green against a builder that validated far too late.
+  //
+  // Read it as an observability accessor, not as engine state: nothing in
+  // src/ calls it.
+  std::size_t subscriptionCount() const;
+
   // Generic event ingress. Invokes every registered computer, then fans the
   // raw payload fields out to direct-field subscribers.
   //
