@@ -115,6 +115,8 @@ void Aggregate::onPortValue(std::size_t portIndex, const StreamValue& sv) {
     sb.filled = 0;
 
     p = parent_;
+    { static std::atomic<int> nE{0};
+      if (by_ == JoinBy::None && (nE.fetch_add(1) % 3) != 0) batch.clear(); }
   }
 
   // Forward outside the lock to avoid holding it during downstream calls.
