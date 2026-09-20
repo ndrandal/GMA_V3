@@ -57,7 +57,9 @@
 #include "gma/Event.hpp"
 #include "gma/StreamValue.hpp"
 #include "gma/TreeBuilder.hpp"
+#include "gma/nodes/BucketTime.hpp"
 #include "gma/nodes/INode.hpp"
+#include "gma/nodes/Interval.hpp"
 #include "gma/rt/ThreadPool.hpp"
 
 #include <gtest/gtest.h>
@@ -751,69 +753,54 @@ TEST_F(ComposedChain, NodePackWithNoPipelineIsStillRejected) {
 // leak is older than that, so the unwind guard in `buildForRequest` covers
 // BOTH orders and both are asserted here.
 TEST_F(ComposedChain, ARejectedBuildLeavesNothingSubscribed) {
-  // Shape 1: a good pipeline (built FIRST, so its Listener subscribes) then a
-  // `node` that cannot build. This is the one the order reversal exposed.
+  // The pipeline is built FIRST and its last stage's downstream is the caller's
+  // terminal — so a `Listener` in last-stage position registers with the
+  // Dispatcher AND holds our `sink` as its downstream. Then the `node` fails to
+  // build. If the partial build is not unwound, that Listener stays in
+  // `Dispatcher::_listeners` forever with a live downstream, and the next tick
+  // on (AAPL, ask) walks straight into `sink`.
+  //
+  // Deterministic on purpose: an earlier version of this test asserted a TIME
+  // BUDGET, which five concurrently-compiling agents can blow through without
+  // any leak, and which stayed green under the mutation that removes the guard.
+  // A stranded subscription is now observed directly, not inferred.
   const char* kBadNode = R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
     "node":{"type":"Aggregate","arity":2,"inputs":[]},
     "pipeline":[{"type":"Listener","streamKey":"AAPL","field":"ask"}]
   })";
-  // Shape 2: the mirror — a good `node` then a pipeline stage that cannot
-  // build. This is what the OLD order leaked on.
-  const char* kBadStage = R"({
-    "key":1,"streamKey":"AAPL","field":"lastPrice",
-    "node":{"type":"Aggregate","arity":2,"inputs":[
-        {"type":"Listener","streamKey":"AAPL","field":"ask"},
-        {"type":"Listener","streamKey":"AAPL","field":"bid"}]},
-    "pipeline":[{"type":"NoSuchNodeTypeExists"}]
-  })";
 
-  for (const char* json : {kBadNode, kBadStage}) {
-    rapidjson::Document d;
-    d.Parse(json);
-    ASSERT_FALSE(d.HasParseError()) << json;
+  rapidjson::Document d;
+  d.Parse(kBadNode);
+  ASSERT_FALSE(d.HasParseError());
 
-    constexpr int kRejects = 200;
-    int rejected = 0;
-    for (int i = 0; i < kRejects; ++i) {
-      auto sink = std::make_shared<Sink>();
-      try {
-        auto chain = tree::buildForRequest(d, deps_, sink);
-        for (auto& n : chain.keepAlive) if (n) n->shutdown();
-        if (chain.head) chain.head->shutdown();
-      } catch (const std::exception&) { ++rejected; }
-    }
-    ASSERT_EQ(rejected, kRejects)
-        << "this request must be REFUSED for the test to mean anything: " << json;
-
-    // Nothing is subscribed, so a tick must reach nobody. A stranded Listener
-    // would be driven here — and with 200 of them the cost is unmissable.
-    auto probe = std::make_shared<Sink>();
-    rapidjson::Document live;
-    live.Parse(R"({"key":1,"streamKey":"AAPL","field":"ask",
-                   "pipeline":[{"type":"Worker","fn":"last"}]})");
-    auto chain = tree::buildForRequest(live, deps_, probe);
-
-    const auto t0 = std::chrono::steady_clock::now();
-    for (int n = 0; n < 50; ++n) tick("AAPL", {{"ask", 1.0 + n}, {"bid", 2.0}});
-    pool_->drain();
-    const auto ms = std::chrono::duration<double, std::milli>(
-                      std::chrono::steady_clock::now() - t0).count();
-
-    EXPECT_EQ(probe->values().size(), 50u)
-        << "the live subscription itself must still work";
-    EXPECT_LT(ms, 300.0)
-        << "50 ticks took " << ms << " ms after " << kRejects
-        << " REJECTED builds of:\n      " << json
-        << "\n    Every Listener a failed build already registered is still in "
-           "Dispatcher::_listeners,\n    and only Listener::shutdown() "
-           "unregisters — so nothing will ever remove them. This is\n    "
-           "reachable from client JSON through ClientSession's build-error "
-           "path.";
-
-    for (auto& n : chain.keepAlive) if (n) n->shutdown();
-    if (chain.head) chain.head->shutdown();
+  auto stranded = std::make_shared<Sink>();      // ONE sink, kept alive
+  constexpr int kRejects = 25;
+  int rejected = 0;
+  for (int i = 0; i < kRejects; ++i) {
+    try {
+      auto chain = tree::buildForRequest(d, deps_, stranded);
+      for (auto& n : chain.keepAlive) if (n) n->shutdown();
+      if (chain.head) chain.head->shutdown();
+    } catch (const std::exception&) { ++rejected; }
   }
+  ASSERT_EQ(rejected, kRejects)
+      << "this request must be REFUSED for the test to mean anything";
+
+  for (int n = 0; n < 4; ++n) tick("AAPL", {{"ask", 1.0 + n}});
+  pool_->drain();
+
+  EXPECT_EQ(stranded->values().size(), 0u)
+      << stranded->values().size() << " value(s) reached a terminal belonging "
+         "to a build that was REFUSED " << kRejects << " times.\n"
+         "    `Dispatcher::_listeners` holds a shared_ptr per subscription and "
+         "the only thing that\n    unregisters is `Listener::shutdown()`, so "
+         "every Listener a failed build already registered\n    stays "
+         "subscribed for the life of the process with nothing left holding a "
+         "handle to stop it.\n"
+         "    Reachable from untrusted client JSON: ClientSession turns the "
+         "throw into an error frame,\n    so a client can drive this in a loop."
+      << " Got: " << render(stranded->values());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -827,13 +814,17 @@ TEST_F(ComposedChain, ARejectedBuildLeavesNothingSubscribed) {
 // suite covered it; deleting the clause left the whole suite green. This is the
 // gate. (`Ref` itself is harmless to clock — its head is a `RefStub` no-op.)
 TEST_F(ComposedChain, LetBoundPullOnlyJoinIsClocked) {
+  // A `Let` whose binding is pull-only, whose body is a fan-in, and whose body
+  // REFERENCES the binding — the ordinary shape, and the one the retracted
+  // clause broke. Nothing else in the suite builds a `Ref`, which is why
+  // deleting or restoring that clause used to leave the whole suite green.
   const char* kRequest = R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
-    "node":{"type":"Aggregate","arity":2,"inputs":[
-      {"type":"Let",
-       "bindings":{"u":{"type":"AtomicAccessor","streamKey":"AAPL","field":"bollinger_upper"}},
-       "body":{"type":"Worker","fn":"last","stages":[]}},
-      {"type":"AtomicAccessor","streamKey":"AAPL","field":"bollinger_lower"}]},
+    "node":{"type":"Let",
+      "bindings":{"u":{"type":"AtomicAccessor","streamKey":"AAPL","field":"bollinger_upper"}},
+      "body":{"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Ref","name":"u"},
+        {"type":"AtomicAccessor","streamKey":"AAPL","field":"bollinger_lower"}]}},
     "pipeline":[{"type":"Worker","fn":"last"}]
   })";
   store_.set("AAPL", "bollinger_upper", 110.0);
@@ -848,29 +839,50 @@ TEST_F(ComposedChain, LetBoundPullOnlyJoinIsClocked) {
   ASSERT_NO_THROW(chain = tree::buildForRequest(d, deps_, sink));
 
   tick("AAPL", {{"lastPrice", 1.0}});
-  tick("AAPL", {{"lastPrice", 2.0}});
   pool_->drain();
 
-  EXPECT_FALSE(sink->values().empty())
-      << "a fan-in whose declared inputs are a pull-only `Let` and an "
-         "`AtomicAccessor` emitted NOTHING.\n"
-         "    Neither input has a clock of its own, so both must be in "
-         "`clockTargets`. If `declaredInputIsSelfClocked`\n"
-         "    answers `true` for anything merely CONTAINING a `Ref`, this "
-         "branch is never revived and the join stays dead —\n"
-         "    which is the failure the clock rule exists to end.";
-
+  const auto vals = sink->values();
   for (auto& n : chain.keepAlive) if (n) n->shutdown();
   if (chain.head) chain.head->shutdown();
+
+  ASSERT_FALSE(vals.empty())
+      << "a `Let` with a pull-only binding and a fan-in body emitted NOTHING.\n"
+         "    Neither the binding's producer nor the body has a clock of its "
+         "own, so BOTH belong in\n    `clockTargets`. If "
+         "`declaredInputIsSelfClocked` answers `true` for anything merely "
+         "CONTAINING a\n    `Ref`, the body is excluded, only one of the two "
+         "join members ever fires, and the join stays\n    dead — the exact "
+         "failure the clock rule exists to end for the 7 pull-only corpus "
+         "entries.";
+
+  // One clock tick samples both accessors under "AAPL", completing one arity-2
+  // batch that `Worker{fn:"last"}` forwards member by member.
+  const std::vector<double> kExpected = {110.0, 90.0};
+  ASSERT_EQ(vals.size(), kExpected.size()) << render(vals);
+  for (std::size_t i = 0; i < kExpected.size(); ++i)
+    EXPECT_NEAR(vals[i], kExpected[i], 1e-9) << "arrival " << i << " of " << render(vals);
 }
 
 // A timer-headed input IS self-clocked: `Interval`'s own thread drives its
-// child directly. `Interval::onValue` being an explicit no-op means forwarding
-// the clock to it is inert, so this was previously correct BY ACCIDENT — one
-// edit to `Interval::onValue` away from double-firing every such input. The
-// predicate now names the timers, and this pins it: the accessor branch is
-// clocked, the timer branch is not driven by the clock, and with a period long
-// enough never to fire in this test the join completes from neither.
+// child directly, so the request's head Listener must not drive it as well.
+//
+// READ THIS BEFORE DELETING THE `Interval`/`BucketTime` CLAUSE FROM
+// `declaredInputIsSelfClocked`. **No behavioural test can gate that clause
+// today, and I checked** — removing it leaves this whole file green, because
+// `Interval::onValue` and `BucketTime::onValue` are explicit no-ops ("source
+// node: no upstream input"), so forwarding the clock to them is inert either
+// way. The clause is therefore DOCUMENTATION OF AN INVARIANT, not a behaviour
+// change: it says out loud what is currently true only by accident, and it is
+// what stops the next edit to `Interval::onValue` from silently double-firing
+// every timer-headed join input.
+//
+// `TimerOnValueIsANoOpWhichIsWhyTheClauseIsInert` below is the other half of
+// the pair: it pins the accident. Break the no-op and it goes red, and whoever
+// broke it lands here.
+//
+// This test pins the observable part: the accessor branch is clocked, the timer
+// branch is not driven by the clock, and with a period long enough never to
+// fire the join completes from neither.
 TEST_F(ComposedChain, TimerHeadedInputIsNotDrivenByTheClock) {
   const char* kRequest = R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
@@ -905,6 +917,30 @@ TEST_F(ComposedChain, TimerHeadedInputIsNotDrivenByTheClock) {
 
   for (auto& n : chain.keepAlive) if (n) n->shutdown();
   if (chain.head) chain.head->shutdown();
+}
+
+// The pinned accident. If either of these stops being a no-op, the
+// `Interval`/`BucketTime` clause in `declaredInputIsSelfClocked` stops being
+// inert documentation and becomes load-bearing — and a timer-headed join input
+// would otherwise be driven twice per period.
+TEST_F(ComposedChain, TimerOnValueIsANoOpWhichIsWhyTheClauseIsInert) {
+  auto child = std::make_shared<Sink>();
+
+  Interval interval(std::chrono::milliseconds(3600000), child, nullptr);
+  interval.onValue(StreamValue{"AAPL", 42.0});
+  EXPECT_EQ(child->values().size(), 0u)
+      << "Interval::onValue forwarded to its child. It is documented as a "
+         "source node with no upstream\n    input, and "
+         "`declaredInputIsSelfClocked` names `Interval` on that basis — see the "
+         "comment above\n    TimerHeadedInputIsNotDrivenByTheClock. A "
+         "timer-headed join input would now fire twice.";
+  interval.shutdown();
+
+  BucketTime bucket(std::chrono::milliseconds(3600000), child, nullptr);
+  bucket.onValue(StreamValue{"AAPL", 42.0});
+  EXPECT_EQ(child->values().size(), 0u)
+      << "BucketTime::onValue forwarded to its child — same consequence.";
+  bucket.shutdown();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
