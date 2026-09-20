@@ -361,89 +361,41 @@ if (GMA_BUILD_TESTS)
       "$<TARGET_FILE_DIR:gma_tests>/corpus_requests.json"
     COMMENT "Copying corpus_requests.json next to gma_tests")
 
-  # ─── ENC-1289: assertions that are EXPECTED TO FAIL until the join is
-  # fixed, registered so `ctest` stays green while they stay live.
-  # Three at ENC-1289; two after ENC-1005 cleared the race gate; ONE after
-  # ENC-1291 cleared the counting gate. The survivor is the cross-streamKey
-  # join, which needs SPEC D1's declared `by` — ENC-1292.
+  # ─── ENC-1289's EXPECTED-FAILURE MACHINERY IS GONE. ENC-1292 CLEARED THE
+  # LAST GATE, 2026-09-20.
   #
-  # `tests/treebuilder/CorpusTest.cpp` gained real value assertions against
-  # corpus entries 86 and 87 (SPEC specs/2026-09-20-gma-join-correctness D8).
-  # They are red on `master` by design — an instrument that cannot
-  # fail is not a gate — but leaving `ctest` red turns "is the build green?"
-  # into a question every other session has to re-investigate, and the answer
-  # decays to "ignore those three" within a day.
+  # What stood here: `tests/treebuilder/CorpusTest.cpp`'s value assertions
+  # (SPEC specs/2026-09-20-gma-join-correctness D8) were red on `master` BY
+  # DESIGN — an instrument that cannot fail is not a gate — so each was
+  # registered as its own ctest case with `WILL_FAIL TRUE`, excluded from the
+  # main `gma_tests` case by a `--gtest_filter=-...` list, and guarded by
+  # `gma_enc1289_expected_failures_really_failed`, which pinned the COUNT and
+  # required gtest's own end-of-run summary line so a crash could not read as
+  # an expected failure. It unwound itself by construction: each fix flipped
+  # its WILL_FAIL case RED and forced whoever landed it to come here.
   #
-  # So each is registered as its own ctest case with WILL_FAIL TRUE: the
-  # assertion still executes on every run, ctest reports it as a pass *because*
-  # it fails, and the moment the corresponding fix lands the test starts
-  # passing, WILL_FAIL flips the ctest case RED, and whoever landed the fix must
-  # come here and delete its block. It unwinds itself; a DISABLED_ test would
-  # have rotted silently instead.
+  # It did exactly that, three times, and the count is the record:
+  #   3  ENC-1289 (the instrument lands first, D8)
+  #   2  ENC-1005  — the per-request strand; Corpus86_SpreadIsExactlyTwoCents
+  #   1  ENC-1291  — port-indexed fan-in; Corpus86_JoinMustNotComplete...
+  #   0  ENC-1292  — the declared join key; Corpus87_CrossSymbolJoin...
   #
-  # WHOEVER LANDS ENC-1292: delete the matching add_test block below
-  # AND its name from the gma_tests exclusion filter. All of this goes away
-  # together, including gma_enc1289_expected_failures_really_failed.
+  # ENC-1291 left the last one deliberately: port-indexing turned "six tuples
+  # pairing one symbol with itself" into "no tuples at all", so the test went
+  # green VACUOUSLY — every assertion true over an empty tuple list. It added
+  # an anti-vacuity ASSERT and kept the marker rather than bank that. ENC-1292
+  # declares `by:"none"` on a copy of the corpus entry, the join emits six
+  # MIXED tuples, and the assertion is now checking a non-empty set. All three
+  # corpus 87 tests — the gate, its observation-point control, and the
+  # cross-corpus measurement in `tests/treebuilder/FanInJoinKeyTest.cpp` —
+  # now run inside the ordinary `gma_tests` case below, uninverted.
   #
-  # NOTE on the WILL_FAIL hole: WILL_FAIL cannot tell a real assertion failure
-  # from a crash or a missing corpus file — both exit non-zero and both would
-  # read as "expected". Two things close it. A missing corpus is caught by
-  # AllCorpusRequestsBuild, which FAIL()s and is NOT inverted. A crash is caught
-  # by gma_enc1289_expected_failures_really_failed below, which requires gtest's
-  # own end-of-run summary line — a process that dies never prints it.
-  #
-  # NOTE on the exclusion filter: the ENC-1065 `--gtest_repeat` check must still
-  # be run against the RAW, UNFILTERED binary (`./gma_tests --gtest_repeat=N`),
-  # not through this ctest entry.
-  # ENC-1005 REMOVED "CorpusValueAssertions.Corpus86_SpreadIsExactlyTwoCents"
-  # from this list on 2026-09-20: SPEC D3's per-request strand landed and the
-  # assertion passes.
-  # ENC-1291 REMOVED "CorpusValueAssertions.Corpus86_JoinMustNotCompleteFromOneInputAlone"
-  # on 2026-09-20: SPEC D2's port-indexed fan-in landed and a two-input join no
-  # longer completes a tuple from one input alone.
-  # ONE remains, and it is ENC-1292's (SPEC D1, declared `by`). ENC-1291 did
-  # NOT clear it: port-indexing puts AAPL and MSFT in two `buf_[sv.symbol]`
-  # entries that each stay half-filled, so the join emits NOTHING. The test's
-  # old body passed on that — vacuously, over an empty tuple list — so ENC-1291
-  # added the anti-vacuity ASSERT that keeps it honestly red. See the block
-  # above that test in tests/treebuilder/CorpusTest.cpp.
-  set(GMA_ENC1289_EXPECTED_FAILURES
-    "CorpusValueAssertions.Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself")
-  string(JOIN ":" GMA_ENC1289_EXPECTED_FAILURES_FILTER
-         ${GMA_ENC1289_EXPECTED_FAILURES})
-
+  # NOTE (unchanged and still true): the ENC-1065 `--gtest_repeat` check must
+  # be run against the RAW, UNFILTERED binary (`./gma_tests --gtest_repeat=N`).
+  # It always had to be; there is simply no filter left for it to dodge.
   add_test(NAME gma_tests
-    COMMAND gma_tests "--gtest_filter=-${GMA_ENC1289_EXPECTED_FAILURES_FILTER}"
-    WORKING_DIRECTORY "$<TARGET_FILE_DIR:gma_tests>")
-
-  # ENC-1292 (SPEC D1, declared `by`) makes this pass. ENC-1291 (D2) did not:
-  # it turned "six tuples pairing one symbol with itself" into "no tuples at
-  # all", which is inert rather than correct. When it passes, DELETE THIS BLOCK.
-  add_test(NAME gma_enc1289_xfail_no_cross_symbol_join
     COMMAND gma_tests
-            "--gtest_filter=CorpusValueAssertions.Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself"
     WORKING_DIRECTORY "$<TARGET_FILE_DIR:gma_tests>")
-  set_tests_properties(gma_enc1289_xfail_no_cross_symbol_join
-    PROPERTIES WILL_FAIL TRUE)
-
-  # The guard on the gate(s) above. WILL_FAIL would read a segfault or an aborted
-  # process as "expected failure"; this case is NOT inverted and passes only on
-  # gtest's own end-of-run summary, which a dying process never reaches. It also
-  # pins the COUNT, so an expected failure that silently starts passing while
-  # another starts failing cannot cancel out.
-  # The COUNT is 1 as of ENC-1291 (3 at ENC-1289, 2 after ENC-1005). It must be
-  # edited down every time a gate is cleared, in the same commit that removes
-  # the gate — that coupling is the point of pinning a count rather than just
-  # asserting "some failed".
-  # NOTE: gtest prints "1 FAILED TEST" (singular) for a single failure, not
-  # "1 FAILED TESTS". The regex below matches the singular form; when ENC-1292
-  # clears the last gate this whole case is deleted, so it never needs a plural
-  # again.
-  add_test(NAME gma_enc1289_expected_failures_really_failed
-    COMMAND gma_tests "--gtest_filter=${GMA_ENC1289_EXPECTED_FAILURES_FILTER}"
-    WORKING_DIRECTORY "$<TARGET_FILE_DIR:gma_tests>")
-  set_tests_properties(gma_enc1289_expected_failures_really_failed
-    PROPERTIES PASS_REGULAR_EXPRESSION "[^0-9]1 FAILED TEST")
 
   # ENC-1006: an occupied wsPort/feedPort must produce a clean non-zero exit,
   # not std::terminate. This drives the real gma_server binary, so it lives as
