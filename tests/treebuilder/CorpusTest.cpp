@@ -1035,7 +1035,7 @@ TEST(CorpusValueAssertions, Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself)
          "    streamKeys. " << kTicksPerSide << " ticks were driven into each side. "
       << (joined.size() / 2) << " tuple(s) were emitted and\n"
          "    " << sameSide << " of them pair one symbol with ITSELF:" << examples.str()
-      << "\n\n    Cause: src/nodes/Aggregate.cpp:30 keys the buffer on `sv.symbol`, so "
+      << "\n\n    Cause: `Aggregate::onPortValue` keys the buffer on `sv.symbol`, so "
          "AAPL and\n"
          "    MSFT occupy two independent buffers and each completes alone. "
          "src/nodes/Pack.cpp:32\n"
