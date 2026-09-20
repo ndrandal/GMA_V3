@@ -64,7 +64,7 @@ const char* SubscriptionStrandMint::origin() noexcept {
 // M10 removes. Both are gated by `tests/ws/SubscriptionStrandMintTest.cpp`.
 std::shared_ptr<gma::rt::Strand>
 SubscriptionStrandMint::mint(gma::rt::ThreadPool* pool) {
-  // M10: guard deleted
+  if (!pool) return nullptr;          // <-- the guard M10 deletes
   return std::make_shared<gma::rt::Strand>(
       pool, gma::rt::Strand::Attribution(kSubscriptionStrandOrigin));
 }
@@ -774,7 +774,7 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     // INLINING a mint here does not compile, because `rt::Strand::Attribution`
     // has a private constructor and `SubscriptionStrandMint` is its only
     // friend. Before ENC-1338 neither mutation reddened a single test.
-    deps.strand = gma::server::SubscriptionStrandMint::mint(deps.pool);
+    deps.strand = std::make_shared<gma::rt::Strand>(deps.pool); // M10b
 
     try {
       // Check subscription limit BEFORE building the pipeline to avoid
