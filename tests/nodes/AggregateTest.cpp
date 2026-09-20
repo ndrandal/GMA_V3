@@ -332,20 +332,47 @@ TEST(AggregateTest, PortCarriesItsBuildTimeIndex) {
 // pipeline value into the buffer is exactly how the builder would manufacture
 // defect 2 (see the `CompositeRoot` comment in src/core/TreeBuilder.cpp, and
 // `ClockIsNeverAJoinMember` in tests/treebuilder/ComposedChainTest.cpp).
+//
+// THIS TEST'S FIRST DRAFT WAS FAKE, AND THE SHAPE OF THE MISTAKE IS WORTH
+// KEEPING. It drove only the pipeline edge into an arity-2 join and asserted
+// nothing was emitted. Mutating `Aggregate::onValue` to call
+// `onPortValue(0, sv)` — i.e. making the pipeline edge a join member, the exact
+// defect it claims to gate — SURVIVED it (ENC-1291 mutation M8): port 1 was
+// still empty, so the mutated node emitted nothing either and the test stayed
+// green. A test whose assertion holds for the same reason under both the fix
+// and the defect is not a test.
+//
+// Both halves below are directional. Half one uses arity 1, where ANY value
+// that reaches the buffer completes a tuple on the spot. Half two pre-fills the
+// OTHER input, so a pipeline-edge value routed to ANY port completes the tuple
+// immediately.
 TEST(AggregateTest, AValueOnThePipelineEdgeIsNotAJoinMember) {
+    {
+        Join j1 = makeJoin(1);
+        for (int n = 0; n < 8; ++n)
+            j1.agg->onValue(StreamValue{"SYM", 100.0 + n});
+        EXPECT_EQ(j1.parent->count.load(), 0)
+            << "a one-input join emitted from values that arrived on the "
+               "PIPELINE edge, not on its declared input";
+        feed(j1, 0, "SYM", 1.0);
+        EXPECT_EQ(j1.parent->count.load(), 1)
+            << "control: the declared input must still work";
+    }
+
     Join j = makeJoin(2);
+    feed(j, 1, "SYM", 99.0);        // input 1 has reported; only input 0 is open
 
     for (int n = 0; n < 8; ++n) j.agg->onValue(StreamValue{"SYM", 100.0 + n});
-    EXPECT_EQ(j.parent->count.load(), 0);
+    EXPECT_EQ(j.parent->count.load(), 0)
+        << "8 values on the pipeline edge completed a tuple against input 1's "
+           "value. A fan-in joins its own declared `inputs` (SPEC D2); an "
+           "upstream value is not one of them.";
 
-    // It also leaves no residue in the buffer: a real tuple still needs one
-    // value from each declared input.
+    // And they leave no residue: the real tuple is still {input0, input1}.
     feed(j, 0, "SYM", 1.0);
-    EXPECT_EQ(j.parent->count.load(), 0);
-    feed(j, 1, "SYM", 2.0);
     ASSERT_EQ(j.parent->count.load(), 2);
     EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[0].value), 1.0);
-    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[1].value), 2.0);
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[1].value), 99.0);
 }
 
 TEST(AggregateTest, OutOfRangePortIndexIsIgnored) {
