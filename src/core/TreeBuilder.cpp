@@ -362,7 +362,8 @@ namespace {
 // goes back to discarding its upstream in silence, and nothing goes red. That
 // unclosable gap is why this paragraph is a warning rather than a cross-ref.
 bool isFanInType(const std::string& type) {
-  return type == "Aggregate" || type == "Pack" || type == "Let";
+  return type == "Aggregate" || type == "Pack" || type == "Let"
+      || type == "Worker";  // MUTANT: over-broad
 }
 
 std::string fanInPipelineStageMessage(const std::string& type,
@@ -800,7 +801,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
         // THE ACCEPTED CASE, and it is §5 Q1 rather than an exception: with no
         // `node`, `midHead` starts at `terminal`, so the head Listener is this
         // stage's only upstream — the same wiring the fan-in gets under `node`.
-        // MUTANT: accept exemption removed
+        if (!hasNode && i == 0) continue;
         throw std::runtime_error(
           fanInPipelineStageMessage(type, k, static_cast<std::size_t>(i), hasNode));
       }
