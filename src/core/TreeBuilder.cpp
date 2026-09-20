@@ -1025,7 +1025,7 @@ void registerBuiltinNodeTypes() {
 
   // Pack assembles N named input subtrees into a keyed Record per symbol
   // (combineLatest). Shape: {"type":"Pack","fields":{"o":<sub>,"h":<sub>,...}}.
-  // Each field's input is built terminating in a per-field PackPort; the Pack
+  // Each field's input is built terminating in a per-field InputPort; the Pack
   // owns the ports and emits the Record into the shared `downstream`. Mirrors
   // Aggregate's fan-in ownership (CompositeRoot holds the input heads + Pack).
   NodeTypeRegistry::registerNodeType("Pack",
@@ -1051,7 +1051,7 @@ void registerBuiltinNodeTypes() {
       roots.reserve(fobj.MemberCount() + 1);
       std::size_t idx = 0;
       for (auto it = fobj.MemberBegin(); it != fobj.MemberEnd(); ++it, ++idx) {
-        auto port = std::make_shared<PackPort>(std::weak_ptr<Pack>(pack), idx);
+        auto port = std::make_shared<InputPort>(std::weak_ptr<IFanIn>(pack), idx);
         pack->addPort(port);
         auto inHead = tree::buildOne(it->value, defaultStreamKey, deps, port);
         if (!declaredInputIsSelfClocked(it->value)) clockTargets.emplace_back(inHead);

@@ -4,13 +4,6 @@
 
 namespace gma {
 
-PackPort::PackPort(std::weak_ptr<Pack> owner, std::size_t idx)
-  : owner_(std::move(owner)), idx_(idx) {}
-
-void PackPort::onValue(const StreamValue& sv) {
-  if (auto p = owner_.lock()) p->onField(idx_, sv);
-}
-
 Pack::Pack(std::vector<std::string> names, std::shared_ptr<INode> downstream)
   : names_(std::move(names)), downstream_(std::move(downstream)) {
   if (names_.empty())
@@ -21,7 +14,7 @@ void Pack::addPort(std::shared_ptr<INode> port) {
   ports_.push_back(std::move(port));
 }
 
-void Pack::onField(std::size_t idx, const StreamValue& sv) {
+void Pack::onPortValue(std::size_t idx, const StreamValue& sv) {
   if (stopping_.load(std::memory_order_acquire)) return;
   if (idx >= names_.size()) return;
 
