@@ -88,9 +88,18 @@ TEST(IntegrationTest, AggregateToWorkerPipeline) {
         ports.push_back(p);
     }
 
-    ports[0]->onValue(StreamValue{"SYM", 10.0});
+    // TWO values on input 0 before input 1 reports. One value each would NOT
+    // gate defect 2: with arity 2 and exactly two values, counting values and
+    // counting inputs are indistinguishable, and the first version of this
+    // test was green against the original defect (measured, ENC-1291
+    // adversarial pass). Two on one side separates them — a value-counting
+    // join completes here, a port-indexed one does not.
+    ports[0]->onValue(StreamValue{"SYM", 7.0});
+    ports[0]->onValue(StreamValue{"SYM", 10.0});   // supersedes 7.0
     ASSERT_EQ(terminal->received.size(), 0u)
-        << "input 1 has not reported — a two-input join has nothing to emit";
+        << "two values arrived on input 0 and NONE on input 1. A two-input "
+           "join has no complete tuple to emit; before ENC-1291 it counted "
+           "VALUES and emitted {7, 10} here.";
 
     ports[1]->onValue(StreamValue{"SYM", 20.0});
 

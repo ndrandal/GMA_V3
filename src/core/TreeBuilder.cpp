@@ -924,6 +924,16 @@ void registerBuiltinNodeTypes() {
       // leave behind). The RAII `Unwind` guard in buildForRequest now cleans
       // that up, but not building it in the first place is cheaper and is the
       // order D7's check already established.
+      // `sizeOr` gates on `IsUint()`, so a present-but-wrongly-typed `arity`
+      // (`2.0`, `"2"`, `-1`) silently takes the default and used to be reported
+      // as "positive 'arity' required" — true, but it sends the author looking
+      // for a missing field they did supply. Separate the two complaints
+      // (ENC-1291; nothing covered this before
+      // `NonIntegerArityIsRefusedForTheRightReason`).
+      if (v.HasMember("arity") && !v["arity"].IsUint())
+        throw std::runtime_error(
+          "Aggregate: 'arity' must be a non-negative whole number");
+
       const std::size_t arity = sizeOr(v, "arity", 0);
       if (arity == 0)
         throw std::runtime_error("Aggregate: positive 'arity' required");
