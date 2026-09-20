@@ -114,7 +114,6 @@ void Aggregate::onPortValue(std::size_t portIndex, const StreamValue& sv) {
     for (auto& s : sb.slots) s.reset();
     sb.filled = 0;
 
-    if (by_ == JoinBy::None) for (auto& x : batch) x = batch[0];
     p = parent_;
   }
 
