@@ -784,7 +784,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
         // THE ACCEPTED CASE, and it is §5 Q1 rather than an exception: with no
         // `node`, `midHead` starts at `terminal`, so the head Listener is this
         // stage's only upstream — the same wiring the fan-in gets under `node`.
-        if (!hasNode && i == 0) continue;
+        if (!hasNode && i <= 1) continue;  // MUTANT: accepts pipeline[1] too
         throw std::runtime_error(
           fanInPipelineStageMessage(type, k, static_cast<std::size_t>(i), hasNode));
       }
