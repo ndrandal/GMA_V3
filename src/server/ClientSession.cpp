@@ -774,7 +774,7 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     // INLINING a mint here does not compile, because `rt::Strand::Attribution`
     // has a private constructor and `SubscriptionStrandMint` is its only
     // friend. Before ENC-1338 neither mutation reddened a single test.
-    deps.strand = gma::server::SubscriptionStrandMint::mint(deps.pool);
+    // M7: mint deleted
 
     try {
       // Check subscription limit BEFORE building the pipeline to avoid

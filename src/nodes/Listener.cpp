@@ -106,7 +106,7 @@ void Listener::onValue(const gma::StreamValue& sv) {
   // calls the raw Listener path "no bucket identity"), so there is nothing to
   // lose on either path. It is written the correct way here so the difference
   // does not become one later.
-  if (false && strand_) {   // MUT-E
+  if (strand_) {
     strand_->post([d = down, sv]() mutable {
       d->onValue(sv);
     });
