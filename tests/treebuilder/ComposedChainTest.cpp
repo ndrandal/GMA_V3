@@ -999,37 +999,359 @@ TEST_F(ComposedChain, TimerOnValueIsANoOpWhichIsWhyTheClauseIsInert) {
   bucket.shutdown();
 }
 
+
 // ═══════════════════════════════════════════════════════════════════════════
-// 9. A FAN-IN IN PIPELINE POSITION CLOCKS, IT DOES NOT PASS THROUGH
+// 9. A FAN-IN IS NOT A PIPELINE STAGE — REFUSED AT BUILD TIME
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// **THIS PINS A LIMITATION, NOT A GUARANTEE, AND IT IS A QUESTION FOR THE SPEC.**
+// SPEC §5 Q7 (ruled 2026-09-20 by ENC-1334), D5 as amended. Implemented by
+// ENC-1336 in `src/core/TreeBuilder.cpp` (`isFanInType` /
+// `fanInPipelineStageMessage` and the block at the head of `buildForRequest`).
 //
-// D5's sentence is "`node` subtree -> pipeline stages -> terminal". When a
-// pipeline STAGE is itself a fan-in, that sentence does not hold: the `node` is
-// built into the stage's `CompositeRoot`, whose `onValue` forwards to
-// `clockTargets` and to nothing else. So the node's output CLOCKS the stage's
-// declared inputs, and where those inputs are all `Listener`s the forwarding
-// set is empty and the node's output is discarded in silence.
+// THIS SECTION REPLACES `FanInInPipelinePositionClocksRatherThanPassesThrough`,
+// which ENC-1290 wrote to PIN the behaviour this ruling removes. That test drove
+// the request below and asserted that the `node`'s output never reached the
+// terminal. It was correct as a measurement and is exactly why the shape is now
+// refused: a value an author asked to be computed vanished, and the only place
+// that fact was written down was a comment in this file.
 //
-// That is the coherent extension of the Q1 ruling — an upstream value arriving
-// at a fan-in is a clock, never a join member, which is exactly what the ruling
-// decided for the outer Listener — but it means a hand-authored request of this
-// shape now drops data with no diagnostic. **0 of the 272 corpus entries have a
-// fan-in pipeline stage**, so nothing goes red on the day it starts mattering,
-// which is the same argument D7 used for writing ENC-1293's narrowing into this
-// ticket rather than leaving it to a comment.
+// THE RULE, BOTH HALVES.
 //
-// Recorded here as MEASURED BEHAVIOUR so the next reader inherits a fact rather
-// than a surprise. Whether such a request should instead be REFUSED at build
-// time (the D7 treatment) is a design call this ticket does not own.
-TEST_F(ComposedChain, FanInInPipelinePositionClocksRatherThanPassesThrough) {
-  const char* kRequest = R"({
+//   REFUSED — a fan-in (`Aggregate`, `Pack`, `Let`: the three builders that
+//   construct a `CompositeRoot`) as an element of `pipeline`/`stages` when the
+//   request ALSO carries a `node`, OR when it is not the FIRST element.
+//   Something is then built upstream of it, and a `CompositeRoot` forwards its
+//   upstream to `clockTargets_` and to nothing else — so with all-`Listener`
+//   stage inputs the forwarding set is empty and the upstream's output is
+//   discarded in silence.
+//
+//   ACCEPTED — a fan-in as `pipeline[0]` in a request with NO `node` key. Its
+//   upstream IS the head `Listener`, because `midHead` starts at `terminal`
+//   either way, so that is bit-for-bit the wiring the same fan-in gets under
+//   `node` with no pipeline — the case §5 Q1 already ruled.
+//   `FanInAsFirstPipelineStageWithNoNodeIsWiredExactlyLikeTheNodeForm` proves
+//   that equivalence by VALUE rather than asserting it, and it is the test that
+//   matters here: a refusal written one condition too broad is silent in the
+//   other direction, and no corpus count would catch it (0 of 272 entries put a
+//   fan-in in a pipeline stage at all).
+//
+// NOT RECURSIVE, DELIBERATELY. A fan-in nested inside a stage (a `Chain`, a
+// `Tee`) is NOT refused. That shape is currently an empty forwarding set rather
+// than a designed behaviour; ENC-1336 was scoped non-recursive and inventing a
+// rule for it here would be inventing behaviour. Said out loud so the next
+// reader inherits a decision rather than a gap.
+
+// Build `json` as a request and return the thrown message, or "" on success.
+// Always tears the chain down, so no Listener/Interval thread outlives the call.
+std::string buildAndReport(const rapidjson::Value& d,
+                           const tree::Deps&       deps) {
+  auto sink = std::make_shared<Sink>();
+  try {
+    auto chain = tree::buildForRequest(d, deps, sink);
+    if (chain.head) chain.head->shutdown();
+    for (auto& n : chain.keepAlive) if (n) n->shutdown();
+    return "";
+  } catch (const std::exception& ex) {
+    return ex.what();
+  }
+}
+
+// Every refusal must be actionable: name the culprit stage, say what happens
+// otherwise, name the fix, and name the rule. An error the author cannot act on
+// is barely better than the silent drop it replaces.
+void expectFanInRefusal(const std::string& msg,
+                        const char*        what,
+                        const char*        culpritType,
+                        const char*        culpritWhere) {
+  ASSERT_FALSE(msg.empty()) << what << " built successfully; it must not";
+  EXPECT_NE(msg.find(culpritType), std::string::npos)
+      << what << " must name the offending node type: " << msg;
+  EXPECT_NE(msg.find(culpritWhere), std::string::npos)
+      << what << " must name WHICH stage is offending (" << culpritWhere
+      << "): " << msg;
+  EXPECT_NE(msg.find("FAN-IN"), std::string::npos)
+      << what << " must say the problem is that the stage is a fan-in: " << msg;
+  EXPECT_NE(msg.find("delivered as a CLOCK"), std::string::npos)
+      << what << " must say what happens to the upstream's value: " << msg;
+  EXPECT_NE(msg.find("no log, no metric and no error"), std::string::npos)
+      << what << " must say why the failure it prevents is invisible: " << msg;
+  EXPECT_NE(msg.find("move the fan-in to 'node' position"), std::string::npos)
+      << what << " must name the fix: " << msg;
+  EXPECT_NE(msg.find("ENC-1336"), std::string::npos)
+      << what << " must name the rule's ticket: " << msg;
+  EXPECT_NE(msg.find("section 5 Q7"), std::string::npos)
+      << what << " must cite the SPEC section that ruled it: " << msg;
+}
+
+std::string buildAndReportJson(const char* json, const tree::Deps& deps) {
+  rapidjson::Document d;
+  d.Parse(json);
+  EXPECT_FALSE(d.HasParseError()) << "test JSON is malformed: " << json;
+  return buildAndReport(d, deps);
+}
+
+// ─── DIRECTION 1: REFUSE ────────────────────────────────────────────────────
+
+// ENC-1290's request, verbatim. It used to build and silently swallow the
+// `Worker{fn:"last"}`; it must now refuse.
+TEST_F(ComposedChain, FanInAsAPipelineStageUnderANodeIsRefused) {
+  const std::string msg = buildAndReportJson(R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
     "node":{"type":"Worker","fn":"last"},
     "pipeline":[{"type":"Aggregate","arity":2,"inputs":[
         {"type":"Listener","streamKey":"AAPL","field":"ask"},
         {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]
+  })", deps_);
+  expectFanInRefusal(msg, "node:Worker + pipeline:[Aggregate]",
+                     "Aggregate", "pipeline[0]");
+  EXPECT_NE(msg.find("'node'"), std::string::npos)
+      << "with a `node` present the message must say THAT is the upstream being "
+         "thrown away: " << msg;
+}
+
+// All three fan-in types, so the rule is the shape and not one node's name.
+// This cannot gate the absence of a FOURTH fan-in — nothing in this suite or
+// the corpus can — which is why `isFanInType` carries a written warning.
+TEST_F(ComposedChain, FanInAsAPipelineStageUnderANodeIsRefused_AllThreeTypes) {
+  const std::string agg = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Worker","fn":"last"},
+    "pipeline":[{"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]
+  })", deps_);
+  expectFanInRefusal(agg, "node + pipeline:[Aggregate]", "Aggregate", "pipeline[0]");
+
+  // NOTE — this case deliberately has NO trailing `Field`, so the terminal
+  // WOULD receive a Record and D7's check would fire on it too. That is what
+  // makes the `Record` assertion below load-bearing: it fails if the two checks
+  // are reordered. With a `Field` appended (as this test first had it) D7 never
+  // fires at all, the assertion is inert, and moving the ENC-1336 block after
+  // D7's killed no test — measured, mutation M8.
+  const std::string pack = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Worker","fn":"last"},
+    "pipeline":[{"type":"Pack","fields":{
+        "ask":{"type":"Listener","streamKey":"AAPL","field":"ask"},
+        "bid":{"type":"Listener","streamKey":"AAPL","field":"bid"}}}]
+  })", deps_);
+  expectFanInRefusal(pack, "node + pipeline:[Pack]", "Pack", "pipeline[0]");
+  EXPECT_EQ(pack.find("Record"), std::string::npos)
+      << "a MISPLACED Pack trips BOTH this rule and D7's Record-terminal rule. "
+         "It must be diagnosed as a placement problem: the fan-in check runs "
+         "first on purpose, because moving the stage is the fix and D7 will "
+         "still speak up afterwards if the terminal really would get a Record: "
+      << pack;
+
+  const std::string let = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Worker","fn":"last"},
+    "pipeline":[{"type":"Let",
+      "bindings":{"b":{"type":"Listener","streamKey":"AAPL","field":"bid"}},
+      "body":{"type":"Ref","name":"b"}}]
+  })", deps_);
+  expectFanInRefusal(let, "node + pipeline:[Let]", "Let", "pipeline[0]");
+}
+
+// The other refused half: no `node` at all, but a stage before the fan-in.
+TEST_F(ComposedChain, FanInAsANonFirstPipelineStageIsRefused) {
+  const std::string msg = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "pipeline":[{"type":"Worker","fn":"last"},
+                {"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]
+  })", deps_);
+  expectFanInRefusal(msg, "pipeline:[Worker, Aggregate]", "Aggregate", "pipeline[1]");
+  EXPECT_NE(msg.find("pipeline[0] precedes it"), std::string::npos)
+      << "the message must name the stage that WOULD be discarded, not only the "
+         "fan-in — and must say `precedes`, not `is built`, because a stage "
+         "this check deliberately did not inspect may not be buildable at all: "
+      << msg;
+}
+
+// `stages` is the legacy spelling of `pipeline` and the build loop treats them
+// identically (first key present wins). The check must too, or the rule is
+// bypassable by renaming one key.
+TEST_F(ComposedChain, FanInAsANonFirstStagesElementIsRefused) {
+  const std::string msg = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "stages":[{"type":"Worker","fn":"last"},
+              {"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]
+  })", deps_);
+  expectFanInRefusal(msg, "stages:[Worker, Aggregate]", "Aggregate", "stages[1]");
+}
+
+// The refusal must precede EVERY builder, not merely the fan-in's own: the
+// Listener / Interval / BucketTime builders call start() and spawn threads, so
+// a late reject leaks live work for a request that is never served (SPEC §1.5).
+//
+// This is checkable rather than asserted. The `node` below names a function
+// that does not exist, so `buildOne` throws "Worker: unknown fn" — and the
+// `node` is built LAST, after the whole pipeline. If the ENC-1336 check ran
+// anywhere other than before all construction, the message would be the
+// Worker's, and the pipeline's `Interval` and `Listener` would already be live.
+TEST_F(ComposedChain, FanInRefusalPrecedesEveryBuilder) {
+  const std::string msg = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Worker","fn":"__no_such_fn__"},
+    "pipeline":[{"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Interval","ms":10,
+         "child":{"type":"AtomicAccessor","streamKey":"AAPL","field":"bid"}},
+        {"type":"Listener","streamKey":"AAPL","field":"ask"}]}]
+  })", deps_);
+  expectFanInRefusal(msg, "node:Worker{bad fn} + pipeline:[Aggregate{Interval,...}]",
+                     "Aggregate", "pipeline[0]");
+  EXPECT_EQ(msg.find("unknown fn"), std::string::npos)
+      << "the fan-in check must run BEFORE buildOne touches anything; getting "
+         "the Worker's error means the pipeline had already been constructed: "
+      << msg;
+  EXPECT_TRUE(dispatcher_->listenersFor("AAPL", "ask").empty())
+      << "a refused build must leave nothing subscribed";
+}
+
+// ─── DIRECTION 2: ACCEPT, AND EMIT ──────────────────────────────────────────
+
+// THE HALF THAT MATTERS. A fan-in as `pipeline[0]` with no `node` is not an
+// exception to the rule — it is §5 Q1's already-ruled case wearing a different
+// key — and this pins the equivalence by VALUE instead of by argument:
+//
+//   A:  pipeline:[Aggregate{ask,bid}, Worker{diff}]        (no `node`)
+//   B:  node:Aggregate{ask,bid}, pipeline:[Worker{diff}]   (= corpus 86)
+//
+// `midHead` starts at `terminal` in A, so its head Listener feeds the
+// `CompositeRoot` exactly as B's does. Same ticks, same emitted sequence, and
+// the sequence must be NON-EMPTY — build success alone would be satisfied by a
+// chain that emits nothing at all.
+TEST_F(ComposedChain, FanInAsFirstPipelineStageWithNoNodeIsWiredExactlyLikeTheNodeForm) {
+  auto run = [this](const char* json) {
+    rapidjson::Document d;
+    d.Parse(json);
+    EXPECT_FALSE(d.HasParseError()) << "test JSON is malformed: " << json;
+    auto sink = std::make_shared<Sink>();
+    tree::BuiltChain chain;
+    EXPECT_NO_THROW(chain = tree::buildForRequest(d, deps_, sink));
+    for (int n = 0; n < 3; ++n)
+      tick("AAPL", {{"ask", 1000.02 + n}, {"bid", 1000.00 + n},
+                    {"lastPrice", 7777.0}});
+    pool_->drain();
+    auto vals = sink->values();
+    if (chain.head) chain.head->shutdown();
+    for (auto& x : chain.keepAlive) if (x) x->shutdown();
+    return vals;
+  };
+
+  const auto asPipelineHead = run(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "pipeline":[{"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]},
+      {"type":"Worker","fn":"diff"}]
+  })");
+  const auto asNode = run(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]},
+    "pipeline":[{"type":"Worker","fn":"diff"}]
+  })");
+
+  ASSERT_FALSE(asPipelineHead.empty())
+      << "the accepted shape must BUILD AND EMIT; build success alone is not "
+         "the criterion (ENC-1289)";
+  EXPECT_EQ(asPipelineHead, asNode)
+      << "pipeline[0] with no `node` must be wired identically to the same "
+         "fan-in under `node` — that equivalence is the whole reason §5 Q7 "
+         "accepts it.\n  as pipeline[0]: " << render(asPipelineHead)
+      << "\n  as node:        " << render(asNode);
+  for (double v : asPipelineHead)
+    EXPECT_NE(v, 7777.0)
+        << "the head Listener is the chain's CLOCK, never a join member (§5 "
+           "Q1); got " << render(asPipelineHead);
+}
+
+// A `Pack` at `pipeline[0]` with no `node` is the form `RecordTerminalTest` and
+// `ClientSessionTest` are both written in. If the placement rule were one
+// condition too broad it would refuse them, and the refusal would arrive as a
+// DIFFERENT message than D7's — so this pins which rule owns that shape.
+TEST_F(ComposedChain, PackAtPipelineZeroWithNoNodeIsNotAPlacementError) {
+  const std::string msg = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "pipeline":[{"type":"Pack","fields":{
+        "ask":{"type":"Listener","streamKey":"AAPL","field":"ask"},
+        "bid":{"type":"Listener","streamKey":"AAPL","field":"bid"}}}]
+  })", deps_);
+  ASSERT_FALSE(msg.empty()) << "D7 still rejects a Record-valued terminal";
+  EXPECT_EQ(msg.find("FAN-IN"), std::string::npos)
+      << "Pack at pipeline[0] with no `node` is the ACCEPTED placement; the "
+         "only thing wrong with it is D7's Record terminal: " << msg;
+  EXPECT_NE(msg.find("Record"), std::string::npos)
+      << "expected D7's message, got: " << msg;
+}
+
+// ─── THE CORPUS GATE ────────────────────────────────────────────────────────
+
+// 0 of 272. The measurement, as a test rather than a note: if a future corpus
+// edit ever authors the shape, this NAMES the entries instead of leaving them
+// to be discovered a month later. It is also the instrument that proves the
+// green is a measurement and not a vacuum. Measured: widen `isFanInType` to
+// include "Worker" and this fails naming **69 refused requests across 63
+// distinct corpus_ids** (86-115, 146-170, 178, 181, 185, 192, 195, 197, 198,
+// 200 — some ids carry more than one request key), because `Worker` is the
+// corpus's ONLY pipeline stage type at all, 104 uses of it.
+TEST_F(ComposedChain, NoCheckedInCorpusRequestIsRefusedForFanInPlacement) {
+  rapidjson::Document& doc = corpusDoc();
+  ASSERT_FALSE(doc.IsNull()) << "corpus_requests.json not found next to the "
+                                "test binary — a missing corpus must be LOUD, "
+                                "never a skip (ENC-807 L17)";
+  ASSERT_FALSE(doc.HasParseError()) << "corpus_requests.json failed to parse";
+  ASSERT_TRUE(doc.IsArray());
+  EXPECT_EQ(doc.Size(), 272u)
+      << "the corpus size moved; re-measure the 0-of-272 claim in "
+         "src/core/TreeBuilder.cpp and SPEC §5 Q7 rather than editing this "
+         "number";
+
+  std::vector<std::string> refused;
+  for (auto& e : doc.GetArray()) {
+    if (!e.IsObject() || !e.HasMember("request")) continue;
+    const int id = (e.HasMember("corpus_id") && e["corpus_id"].IsInt())
+                     ? e["corpus_id"].GetInt() : -1;
+    const std::string msg = buildAndReport(e["request"], deps_);
+    if (msg.find("is a FAN-IN") == std::string::npos) continue;
+    refused.push_back("corpus_id " + std::to_string(id) + ": " + msg);
+  }
+
+  std::string detail;
+  for (const auto& r : refused) detail += "\n  " + r;
+  EXPECT_TRUE(refused.empty())
+      << "the ENC-1336 placement rule refused " << refused.size()
+      << " checked-in corpus request(s); it must refuse none:" << detail;
+}
+
+// forum's flagship graph, and the reason the accept half must not be widened.
+// `pipelinetranslate.Translate()` turns the ENC-672 "RSI overbought" node graph
+// (Listener -> Pack -> Filter -> Field -> Responder) into EXACTLY the request
+// below — a `Pack` at pipeline[0] with no `node`. Measured by running forum's
+// own translator, not copied from a doc. If ENC-1336's placement rule were one
+// condition broader, this would stop building, and nothing in GMA's corpus
+// would have said so.
+//
+// The other two graphs the same translator can emit —
+// `pipeline:[Filter, Pack, Field]` and `node:Aggregate + pipeline:[Pack, ...]`
+// — ARE refused, deliberately. At `b273278` both emitted a sequence identical
+// to the same request with the upstream stage deleted, which is the silent
+// discard this rule exists to convert into an error.
+TEST_F(ComposedChain, ForumsRsiOverboughtDemoShapeStillBuildsAndEmits) {
+  const char* kRequest = R"({
+    "key":42,"streamKey":"NEXO","field":"lastPrice",
+    "pipeline":[
+      {"type":"Pack","fields":{
+        "rsi":{"type":"Listener","streamKey":"NEXO","field":"rsi_14"},
+        "price":{"type":"Listener","streamKey":"NEXO","field":"lastPrice"}}},
+      {"type":"Filter","when":{"op":"gt","args":[{"ref":"rsi"},70]}},
+      {"type":"Field","name":"price"}]
   })";
   rapidjson::Document d;
   d.Parse(kRequest);
@@ -1037,22 +1359,85 @@ TEST_F(ComposedChain, FanInInPipelinePositionClocksRatherThanPassesThrough) {
 
   auto sink = std::make_shared<Sink>();
   tree::BuiltChain chain;
-  ASSERT_NO_THROW(chain = tree::buildForRequest(d, deps_, sink));
+  ASSERT_NO_THROW(chain = tree::buildForRequest(d, deps_, sink))
+      << "forum's ENC-672 demo request must still build: a fan-in at "
+         "pipeline[0] with no `node` is the ACCEPTED placement";
 
-  for (int n = 0; n < 2; ++n)
-    tick("AAPL", {{"ask", 1000.02 + n}, {"bid", 1000.00 + n},
-                  {"lastPrice", 7777.0}});
+  for (int n = 0; n < 3; ++n)
+    tick("NEXO", {{"lastPrice", 100.0 + n}, {"rsi_14", 71.0 + n}});
   pool_->drain();
 
   const auto vals = sink->values();
+  EXPECT_FALSE(vals.empty())
+      << "it must EMIT, not merely build — build success alone is the weakness "
+         "ENC-1289 spent a ticket removing";
   for (double v : vals)
-    EXPECT_NE(v, 7777.0)
-        << "the `node`'s output became a JOIN MEMBER of a fan-in pipeline "
-           "stage. An upstream value arriving\n    at a fan-in is a clock, "
-           "never a member — that is the Q1 ruling, and it holds wherever the "
-           "fan-in sits.";
-  EXPECT_EQ(vals.size(), 4u)
-      << "expected only the join's own four members; got " << render(vals);
+    EXPECT_GE(v, 100.0) << "expected projected prices; got " << render(vals);
+
+  if (chain.head) chain.head->shutdown();
+  for (auto& n : chain.keepAlive) if (n) n->shutdown();
+}
+
+// ─── THE KNOWN GAP, PINNED RATHER THAN LEFT TO BE REDISCOVERED ──────────────
+
+// A fan-in WRAPPED in a `Chain` or a `Tee` is NOT refused, and the silent
+// discard survives there untouched. This is ENC-1336's declared non-recursive
+// scope, not an oversight — but SPEC §5 Q7's stated reason for that scope
+// ("today no builder reachable from a pipeline stage takes a sub-node that
+// could hold a fan-in except a fan-in's own `inputs`") is measurably FALSE, and
+// a premise nobody can check is how this class of defect survives. So the fact
+// is a test.
+//
+// `Chain`'s builder ends `return curDown;` — the inner builder's head, verbatim
+// — so the stage head IS the `CompositeRoot`. The request below is the exact
+// shape `FanInAsAPipelineStageUnderANodeIsRefused` refuses, with one keyword
+// wrapped around the stage.
+//
+// **This test asserts a DEFECT.** When a ruling extends Q7 to the nested case,
+// delete it and add the refusal to `FanInAsAPipelineStageUnderANodeIsRefused`.
+TEST_F(ComposedChain, FanInWrappedInAChainIsNotRefused_KnownGap) {
+  auto runOne = [this](const char* json) {
+    rapidjson::Document d;
+    d.Parse(json);
+    EXPECT_FALSE(d.HasParseError()) << "test JSON is malformed: " << json;
+    auto sink = std::make_shared<Sink>();
+    tree::BuiltChain chain;
+    EXPECT_NO_THROW(chain = tree::buildForRequest(d, deps_, sink))
+        << "the check is non-recursive, so this still BUILDS today";
+    for (int n = 0; n < 3; ++n)
+      tick("AAPL", {{"ask", 1000.02 + n}, {"bid", 1000.00 + n},
+                    {"lastPrice", 7777.0}});
+    pool_->drain();
+    auto vals = sink->values();
+    if (chain.head) chain.head->shutdown();
+    for (auto& x : chain.keepAlive) if (x) x->shutdown();
+    return vals;
+  };
+
+  const auto viaChain = runOne(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Worker","fn":"last"},
+    "pipeline":[{"type":"Chain","stages":[
+      {"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]}]
+  })");
+  const auto viaTee = runOne(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Worker","fn":"last"},
+    "pipeline":[{"type":"Tee","outputs":[
+      {"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]}]
+  })");
+
+  for (const auto* vals : {&viaChain, &viaTee}) {
+    EXPECT_FALSE(vals->empty()) << "the join itself still fires";
+    for (double v : *vals)
+      EXPECT_NE(v, 7777.0)
+          << "THE GAP: the `node`'s output is still discarded in silence when "
+             "the fan-in is one wrapper deep. Got " << render(*vals);
+  }
 }
 
 } // namespace

@@ -265,6 +265,156 @@ std::string recordTerminalMessage(const std::string& culprit) {
 } // namespace
 
 //
+// ---------- ENC-1336: a fan-in as a pipeline stage with something upstream ----------
+//
+// SPEC specs/2026-09-20-gma-join-correctness/SPEC.md §5 Q7 (ruled 2026-09-20 by
+// ENC-1334), D5 as amended by that ruling.
+//
+// WHY IT EXISTS. Under D5 the chain is
+//
+//     Listener(streamKey, field) -> node subtree -> pipeline stages -> terminal
+//
+// and each arrow is a real edge. A FAN-IN breaks that arrow. Its data comes
+// from its own DECLARED `inputs`; a value arriving from upstream is a CLOCK for
+// those inputs and is never forwarded on — that is the §5 Q1 ruling, and
+// `CompositeRoot::onValue` below is where it lives: it forwards to
+// `clockTargets_` and TO NOTHING ELSE. So when a fan-in sits in the `pipeline`
+// array with anything built upstream of it, that upstream's output is consumed
+// and dropped. Where the fan-in's declared inputs are all `Listener`s —
+// 45 of the corpus's 52 fan-in requests are that shape — `clockTargets_` is
+// EMPTY and the upstream's output is discarded in total silence: no log, no
+// metric, no error, and a chart that is missing a value nobody can explain.
+//
+// WHAT IT COSTS, MEASURED — AND IT IS NOT NOTHING. SPEC §5 Q7 says "Nothing to
+// forum ... it cannot emit a fan-in pipeline stage at all". That is true of
+// `Aggregate` (forum's translator always turns the edge-fanned join into the
+// Request's Node) and FALSE of `Pack` and `Let`, which forum treats as
+// config-driven LINEAR stages (`forum/internal/pipelinetranslate/
+// config_mapping.go` `case "pack"` / `case "let"`) and `translateStage` will
+// place at ANY index of the chain. Driving forum's real `Translate()` on three
+// graphs produced, verbatim:
+//
+//   Listener->Pack->Filter->Field->Responder  (the ENC-672 demo headline)
+//       -> pipeline:[Pack, Filter, Field]                      ACCEPTED here
+//   Listener->Filter->Pack->Field->Responder
+//       -> pipeline:[Filter, Pack, Field]                      REFUSED here
+//   Listener->{2 accessors}->Aggregate->Pack->Field->Responder
+//       -> node:Aggregate + pipeline:[Pack, Field]             REFUSED here
+//
+// So forum CAN author both refused shapes, and this refusal stops them
+// building. Measured at the pre-change commit `b273278`, all three emit the
+// IDENTICAL sequence — the Pack's own record, projected — because the upstream
+// half really is thrown away: deleting the `Filter`/`Aggregate` changes
+// nothing. That is the defect, not a cost of removing it. But the honest
+// statement is "two shapes forum can emit stop building", not "nothing to
+// forum", and the first ACCEPTED row above is why the accept half must not be
+// widened by one condition: it is forum's flagship graph.
+//
+// WHY IT IS A BUILD-TIME REFUSAL AND NOT A DOCUMENTED BEHAVIOUR. **0 of the 272
+// `tests/treebuilder/corpus_requests.json` entries have a fan-in in a pipeline
+// stage** (all 52 `Aggregate`s are under `node`; the corpus contains no `Pack`
+// and no `Let` — its only pipeline stage type at all is `Worker`, 104 uses). So
+// no corpus count, no build smoke test and no value assertion goes red on the
+// day someone first authors the shape. That is exactly D7/ENC-1293's argument,
+// made by the same evidence, and it reaches the same verdict: convert a silent
+// drop into a loud build error. A refusal can be lifted if a use appears; a
+// silent discard that ships becomes behaviour someone depends on.
+//
+// THE ONE ACCEPTED PLACEMENT IS NOT AN EXCEPTION — IT IS §5 Q1. A fan-in as the
+// FIRST element of `pipeline`/`stages` in a request with NO `node` key has the
+// head `Listener` as its upstream and nothing else, because `midHead` starts at
+// `terminal` either way: that is bit-for-bit the wiring the same fan-in gets
+// under `node` with no pipeline, which §5 Q1 already ruled correct. Refusing it
+// would refuse a shape semantically identical to the blessed one and would
+// break requests that work today — `RecordTerminalTest`'s
+// `Pack -> Field -> Responder` and `ClientSessionTest`'s
+// `SubscribeAcceptsPackFieldResponder` are both written in exactly that form.
+//
+// DELIBERATELY NOT RECURSIVE into a stage's own sub-JSON — AND THAT IS A REAL,
+// MEASURED HOLE, not a vacuous one. SPEC §5 Q7 says "today no builder reachable
+// from a pipeline stage takes a sub-node that could hold a fan-in except a
+// fan-in's own `inputs`, so the question is currently empty." **That is false.**
+// `Chain` holds `stages`, `Tee` holds `outputs`, `Switch` holds `cases`, and
+// `Chain`'s builder ends `return curDown;` — it hands back its inner builder's
+// head verbatim, so a `Chain` wrapping a fan-in makes the STAGE HEAD literally
+// a `CompositeRoot`. Measured on this branch: `node:Worker{last}` +
+// `pipeline:[Chain{stages:[Aggregate{Listener ask, Listener bid}]}]` builds,
+// and the node's output does not appear at the terminal — exactly the failure
+// this check exists to abolish, one keyword away. Reproduced identically
+// through `Tee`. `FanInWrappedInAChainIsNotRefused_KnownGap` pins both.
+//
+// It stays out of scope because ENC-1336 was scoped non-recursive and because
+// inventing a rule for the nested shape would be inventing behaviour the SPEC
+// has not ruled. Widen this only with a ruling that says what the nested shape
+// should MEAN — but widen it from the fact above, not from Q7's premise.
+//
+namespace {
+
+// The node types whose builders construct a `CompositeRoot` — the fan-ins.
+// These are exactly the three `std::make_shared<CompositeRoot>(...)` sites in
+// the registrations at the bottom of this file: "Aggregate", "Pack", "Let".
+//
+// ADDING A FAN-IN? Add its type name here in the SAME commit that registers it.
+// `FanInAsAPipelineStageUnderANodeIsRefused_AllThreeTypes` in
+// tests/treebuilder/ComposedChainTest.cpp gates all three names that exist
+// today. It CANNOT gate the absence of a fourth, and neither can the corpus
+// (see the 0-of-272 note above) — a fan-in registered without being listed here
+// goes back to discarding its upstream in silence, and nothing goes red. That
+// unclosable gap is why this paragraph is a warning rather than a cross-ref.
+bool isFanInType(const std::string& type) {
+  return type == "Aggregate" || type == "Pack" || type == "Let";
+}
+
+std::string fanInPipelineStageMessage(const std::string& type,
+                                      const char*        key,
+                                      std::size_t        index,
+                                      bool               hasNode) {
+  const std::string where =
+    std::string(key) + "[" + std::to_string(index) + "]";
+  // `index - 1` is only reached with index >= 1: the caller returns early for
+  // the one accepted placement (!hasNode && index == 0), so !hasNode implies
+  // index != 0. Guarded anyway rather than relying on that at a distance — a
+  // size_t underflow here would print `pipeline[18446744073709551615]`.
+  const std::string because =
+    (hasNode || index == 0)
+      ? "this request also carries a 'node', whose subtree is built directly "
+        "upstream of the first pipeline stage"
+      : "it is not the first stage — " + std::string(key) + "[" +
+        std::to_string(index - 1) + "] precedes it and would be built directly"
+        " upstream of it";
+
+  return "buildForRequest: node type '" + type + "' is a FAN-IN and it appears"
+         " as " + where + " of this request, with something upstream of it in"
+         " the composed chain: " + because + ". That is rejected at build time."
+         " A fan-in takes its data from its own declared inputs; a value"
+         " arriving from upstream is delivered as a CLOCK for those inputs,"
+         " never as a join member (SPEC section 5 Q1), so this stage is a break"
+         " in the chain and not a link in it. For 'Aggregate' and 'Pack' the"
+         " upstream's output never reaches this stage's downstream at all, and"
+         " where the declared inputs each carry their own Listener the"
+         " forwarding set is EMPTY and that output is discarded entirely, with"
+         " no log, no metric and no error — a chart missing a value with no"
+         " diagnostic in either repo. ('Let' is the one shape where a clock"
+         " reaching a body that carries no Listener is forwarded on; it is"
+         " refused here too because this rule is structural rather than a"
+         " per-shape audit.) THE FIX: move the"
+         " fan-in to 'node' position. The composed chain is"
+         " Listener(streamKey, field) -> node subtree -> pipeline stages ->"
+         " terminal, so a fan-in under 'node' is clocked by the head Listener"
+         " and its output flows THROUGH every pipeline stage instead of being"
+         " thrown away; anything you had upstream of it belongs either inside"
+         " one of the fan-in's own inputs, where it is a real join member, or"
+         " downstream of it as a later pipeline stage. The ONE accepted"
+         " placement in the pipeline is as " + std::string(key) + "[0] of a"
+         " request with NO 'node' key — there the fan-in's upstream is the head"
+         " Listener itself, which is the same wiring it gets under 'node'. See"
+         " specs/2026-09-20-gma-join-correctness/SPEC.md section 5 Q7 and D5"
+         " (ENC-1336).";
+}
+
+} // namespace
+
+//
 // ---------- CompositeRoot: fan-out root for many inputs ----------
 //
 // ENC-1290 / SPEC specs/2026-09-20-gma-join-correctness D5, section 5 Q1
@@ -620,6 +770,43 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
     depsWithStrand.strand = std::make_shared<gma::rt::Strand>(depsWithStrand.pool);
   const Deps& deps = depsWithStrand;   // everything below builds against this
 
+  // ENC-1336 / SPEC §5 Q7, D5 as amended — A FAN-IN IS NOT A PIPELINE STAGE
+  // when anything is built upstream of it. See the long comment on
+  // `isFanInType` above for why this is a refusal rather than a documented
+  // behaviour, and for the one placement that stays legal.
+  //
+  // Like D7's check below, this is STRUCTURAL and reads only the request JSON,
+  // and it runs BEFORE a single node is constructed — the Listener / Interval /
+  // BucketTime builders spawn threads and call start(), so a late reject leaks
+  // live work for a request that is never served (SPEC §1.5).
+  //
+  // It runs BEFORE D7's Record check deliberately: a misplaced `Pack` trips
+  // both, and WHERE the stage sits is the more specific diagnosis — moving it
+  // is the fix, and D7 will still speak up afterwards if the terminal really
+  // would receive a Record. It is also the permanent rule of the two; D7's
+  // block is scheduled for deletion by ENC-1295 and nothing here moves with it.
+  {
+    const bool hasNode = rq.HasMember("node") && rq["node"].IsObject();
+    for (const char* k : {"pipeline", "stages"}) {
+      if (!rq.HasMember(k) || !rq[k].IsArray()) continue;
+      const auto arr = rq[k].GetArray();
+      for (rapidjson::SizeType i = 0; i < arr.Size(); ++i) {
+        const auto& stage = arr[i];
+        if (!stage.IsObject() || !stage.HasMember("type") ||
+            !stage["type"].IsString())
+          continue;                    // malformed — buildOne throws its own error
+        const std::string type = stage["type"].GetString();
+        if (!isFanInType(type)) continue;
+        // THE ACCEPTED CASE, and it is §5 Q1 rather than an exception: with no
+        // `node`, `midHead` starts at `terminal`, so the head Listener is this
+        // stage's only upstream — the same wiring the fan-in gets under `node`.
+        if (!hasNode && i == 0) continue;
+        throw std::runtime_error(
+          fanInPipelineStageMessage(type, k, static_cast<std::size_t>(i), hasNode));
+      }
+      break;                           // mirrors the build loop: first key wins
+    }
+  }
   // ENC-1293 / SPEC specs/2026-09-20-gma-join-correctness D7 — TEMPORARY, and
   // lifted by ENC-1295 (embassy). See the long comment on `shapeInto` above for
   // why a Record reaching the terminal is a SILENT failure in two repos.
