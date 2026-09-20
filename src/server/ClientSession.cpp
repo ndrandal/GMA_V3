@@ -62,7 +62,8 @@ const char* subscriptionStrandOrigin() noexcept {
 // is D3's named mint site, and the null-pool guard below is what ENC-1005's
 // M10 removes. Both are gated by `tests/ws/SubscriptionStrandMintTest.cpp`.
 std::shared_ptr<gma::rt::Strand> mintSubscriptionStrand(gma::rt::ThreadPool* pool) {
-  (void)pool; return nullptr;   // M7b: the helper mints nothing
+  // M10: guard deleted
+  return std::make_shared<gma::rt::Strand>(pool, kSubscriptionStrandOrigin);
 }
 
 } // namespace server
