@@ -64,6 +64,31 @@ public:
   // same event type. IEventComputer implementations (which live in connectors/)
   // MUST therefore make compute() safe to call concurrently — either stateless
   // or internally synchronised. The Dispatcher adds no further serialisation.
+  //
+  // ORDERED DELIVERY REQUIRES SINGLE-THREADED INGRESS PER SYMBOL (ENC-1005,
+  // SPEC specs/2026-09-20-gma-join-correctness D3). Read this as a PRECONDITION
+  // of D3, not as a property of it.
+  //
+  // The per-request strand serialises everything DOWNSTREAM of a Listener, and
+  // this method's fan-out is upstream of one. Within ONE onTick call the order
+  // is deterministic — `_listeners`' inner container is a `std::map<field,...>`,
+  // so `ask` precedes `bid` — and `deliver()` preserves it by calling a
+  // strand-bearing Listener inline. Two CONCURRENT onTick calls interleave
+  // their inline posts, and the strand then faithfully preserves an order that
+  // was already scrambled here. Measured on a corpus-86 DAG: 0 of 2000 tuples
+  // wrong with one ingress thread, 1596 of 2000 wrong with two (1444 of them
+  // `ask` paired with `ask` — SPEC section 1.1 defect 4, back in full).
+  //
+  // It is not reachable in the shipped server: `src/main.cpp` runs `ioc.run()`
+  // on exactly one thread and every ingress source hangs off that one
+  // io_context. It is one `for (...) threads.emplace_back([&]{ioc.run();})`
+  // away, and that is a change nobody would expect to break join correctness —
+  // which is why it is written here, on the contract that permits it, rather
+  // than left to be rediscovered. Making D3 hold under concurrent ingress needs
+  // a decision ENC-1005 did not have the remit to take: either serialise
+  // ingress per symbol, which the paragraph above explicitly refuses, or carry
+  // a sequence number on the value — the provenance-token design SPEC D2
+  // rejected. Raised on ENC-1005 for the SPEC to rule on.
   void onTick(const Event& tick);
 
   // Public hook that IEventComputer implementations call to deliver a computed
@@ -74,6 +99,12 @@ public:
                        double value);
 
 private:
+  // ENC-1005 / SPEC D3. The single routing decision for every value this
+  // Dispatcher hands to a subscriber: pool post (the default, unchanged) or an
+  // inline call for a node that re-posts onto its own serializing executor.
+  // Defined in Dispatcher.cpp with the full rationale.
+  void deliver(const std::shared_ptr<INode>& node, const StreamValue& out);
+
   // Recompute FunctionMap builtins over `history` and publish them.
   //
   // ATOMIC-KEY CONTRACT (ENC-792/M9, amended by ENC-1008).

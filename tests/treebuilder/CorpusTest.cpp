@@ -232,6 +232,10 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
 //       lowest rate observed here the chance of a clean pass is (1-0.0362)^4000
 //       ~ 1e-64; at the probe's all-time minimum single-run rate (1.70%) it is
 //       ~1e-30.
+//       ENC-1005 (2026-09-20): GREEN 40/40 after the per-request strand —
+//       160,000 further tuples at threads=4, 0 wrong. The rates above are what
+//       the same binary measured the day before, and are what makes the green
+//       mean something.
 //   Corpus86_SpreadIsExactlyTwoCents_SingleThreadControl
 //                                                   green 40/40 runs
 //       = 40,000 further single-threaded tuples, 0 wrong.
@@ -254,6 +258,14 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
 //   + ordered delivery (a prototype of ENC-1005/D3: both ThreadPool hops made
 //       synchronous)
 //         -> all four GREEN at threads=4.
+//
+// ENC-1005 SHIPPED ordered delivery and it flipped EXACTLY ONE of the three, as
+// the line above predicts for the ordering defect alone: SpreadIsExactlyTwoCents
+// RED -> GREEN, and the two state-machine gates (defects 2 and 3, both driven at
+// threads=1) unmoved. The shipped form is not "both hops synchronous": hop one
+// (Dispatcher -> Listener) is inline, hop two (Listener -> the DAG) is a
+// per-request `rt::Strand`, so the compute is still off the ingress thread and
+// the thread count is unchanged.
 //
 // ───────────────────────────────────────────────────────────────────────────
 // THREE OF THESE FAIL TODAY, ON PURPOSE, AND `ctest` IS STILL GREEN
@@ -278,11 +290,16 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
 //
 //   Corpus86_JoinMustNotCompleteFromOneInputAlone  -> ENC-1291 (port-indexed
 //                                                     fan-in + arity, D2)
-//   Corpus86_SpreadIsExactlyTwoCents               -> ENC-1005 (per-request
-//                                                     strand, D3/D4)
 //   Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself
 //                                                  -> ENC-1291, and ENC-1292
 //                                                     (declared `by`, D1)
+//
+// TWO, not three, as of ENC-1005 (2026-09-20). `Corpus86_SpreadIsExactlyTwoCents`
+// was the third; SPEC D3's per-request strand landed, it went green, its
+// `WILL_FAIL` block was deleted and the count pinned by
+// `gma_enc1289_expected_failures_really_failed` went from 3 to 2. It now runs
+// inside the main `gma_tests` case. This paragraph unwinding itself one line at
+// a time is the mechanism working as designed.
 //
 // `Corpus86_SpreadIsExactlyTwoCents_SingleThreadControl` is deliberately NOT
 // registered that way. It is an ordinary always-green test — inverting it
@@ -690,25 +707,32 @@ TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents_SingleThreadControl
 
 // ═══ 2b. Defect 4 — the value assertion. THE spread must be 0.02. ═════════
 //
-// RED today. This is the "emitted value asserted exactly" the ticket asks for:
-// every tuple the join completes must be {ask(n), bid(n)} of the SAME tick, in
-// that order, so a pairwise diff is exactly +0.02 — never +-1.00 (ask paired
-// with ask), never -0.02 (sign flip), never +-0.98 (across ticks).
+// GREEN as of ENC-1005 (per-request strand, SPEC D3/D4), 2026-09-20. This is
+// the "emitted value asserted exactly" ENC-1289 was asked for: every tuple the
+// join completes must be {ask(n), bid(n)} of the SAME tick, in that order, so a
+// pairwise diff is exactly +0.02 — never +-1.00 (ask paired with ask), never
+// -0.02 (sign flip), never +-0.98 (across ticks).
 //
 // Runs at threads=4 for `kRaceReps` x `kRaceTicks` ticks. See the budget note
-// at the top of this block for the probability this passes by luck (~2e-30 at
-// the probe's most favourable observed rate).
+// at the top of this block for the probability this would pass by luck if the
+// defect were still present (~2e-30 at the probe's most favourable observed
+// rate) — which is what makes it a gate rather than a sample.
 //
-// Turns green with ENC-1005 (per-request strand, SPEC D3/D4).
-//
-// +-- EXPECTED TO FAIL ----------------------------------------------------+
-// | Registered in CMakeLists.txt as ctest case                             |
-// |   gma_enc1289_xfail_spread_is_not_two_cents_under_concurrency          |
-// |                                                     WILL_FAIL TRUE     |
-// | WHEN ENC-1005 MAKES THIS PASS, that ctest case goes RED. Delete its    |
-// | add_test/set_tests_properties block and drop this test's name from the |
-// | GMA_ENC1289_EXPECTED_FAILURES list. Do not touch the assertion.        |
+// +-- WAS `WILL_FAIL`, AND IS NOT ANY MORE -------------------------------+
+// | ENC-1289 registered this as ctest case                                |
+// |   gma_enc1289_xfail_spread_is_not_two_cents_under_concurrency         |
+// | with WILL_FAIL TRUE. ENC-1005 deleted that block and dropped the name |
+// | from GMA_ENC1289_EXPECTED_FAILURES, so this test now runs inside the  |
+// | main `gma_tests` ctest case like any ordinary test, and a regression  |
+// | in ordered delivery takes the PRIMARY target red.                     |
+// | The assertion is byte-for-byte ENC-1289's. Nothing about what it      |
+// | checks, how it drives, or how many threads it uses was touched.       |
 // +------------------------------------------------------------------------+
+//
+// MEASURED AFTER THE FIX (ENC-1005, Release, Ryzen 7 5800XT, 1-min load
+// average 4.3-6.9): 40 consecutive invocations green = 160,000 tuples at
+// threads=4, 0 wrong. Before the fix the same binary's own baseline was red
+// 40/40. See the ticket for the full before/after.
 TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents) {
   using namespace corpus_values;
 
@@ -742,15 +766,19 @@ TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents) {
          "      sign flip (bid before ask, spread -0.02):               " << r.signFlip << "\n"
          "      cross-tick:                                             " << r.crossTick << "\n"
       << r.examples
-      << "\n\n    Cause: Listener::onValue posts every value to the shared ThreadPool "
-         "queue\n"
-         "    (src/nodes/Listener.cpp:84), so two ticks from one Listener run "
-         "concurrently\n"
-         "    and Aggregate's value-counting buffer completes a batch from whichever "
-         "two\n"
-         "    values land first. At threads=1 this test's control twin passes; only the\n"
-         "    pool width differs.\n"
-         "    Expected green after ENC-1005 (per-request strand, SPEC D3/D4).";
+      << "\n\n    THIS IS A REGRESSION IN ORDERED DELIVERY (ENC-1005, SPEC D3/D4).\n"
+         "    It passed at 4 threads, 40 consecutive invocations, when ENC-1005 landed.\n"
+         "    Ordered delivery is TWO cooperating pieces and breaking either one\n"
+         "    reddens this test — check both before looking anywhere else:\n"
+         "      1. every Listener of ONE request DAG shares ONE rt::Strand\n"
+         "         (tree::Deps::strand, minted per subscription in\n"
+         "         ClientSession::handleSubscribe and per DAG in buildForRequest);\n"
+         "      2. Dispatcher delivers INLINE to a strand-bearing Listener\n"
+         "         (Dispatcher::deliver / INode::deliversOnOwnExecutor) instead of\n"
+         "         posting each notification as an independent pool task, which\n"
+         "         scrambles ask-vs-bid one hop UPSTREAM of the strand.\n"
+         "    Without (2), (1) alone leaves this test red — measured, see ENC-1005.\n"
+         "    At threads=1 this test's control twin passes; only the pool width differs.";
 }
 
 // ═══ 2c. ENC-1290 — the CONTROL on corpus 87's observation point ═══════════
