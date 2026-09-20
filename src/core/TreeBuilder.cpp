@@ -4,6 +4,7 @@
 #include <functional>
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstring>
 #include <numeric>
 #include <cmath>
@@ -21,6 +22,7 @@
 #include "gma/nodes/VectorReducer.hpp"
 #include "gma/nodes/Tee.hpp"
 #include "gma/nodes/InputPort.hpp"
+#include "gma/nodes/JoinBy.hpp"
 #include "gma/nodes/Pack.hpp"
 #include "gma/nodes/Field.hpp"
 #include "gma/nodes/Expr.hpp"
@@ -72,6 +74,72 @@ inline std::size_t sizeOr(const rapidjson::Value& v, const char* k, std::size_t 
 
 inline bool has(const rapidjson::Value& v, const char* k) {
   return v.HasMember(k);
+}
+
+// ENC-1292 / SPEC specs/2026-09-20-gma-join-correctness D1 + section 5 Q3
+// (RULED) and Q6 — READ THE DECLARED JOIN KEY OF A FAN-IN NODE.
+//
+// Deliberately NOT written as `strOr(v, "by", "streamKey")`, which is the shape
+// every other optional member here uses. `strOr` gates on `IsString()` and
+// silently falls back on anything else, and a silent fallback is precisely what
+// Q3 ruled against: `JsonValidator::validateTree` is an open-vocabulary walk
+// that never looks at a key, so `by:"streamkey"`, `by:"origin"` and `by:12`
+// would all reach this point, take the default, and return a plausible WRONG
+// NUMBER with no diagnostic in either repo. Every one of them is refused, by
+// name where the name matters. See include/gma/nodes/JoinBy.hpp.
+//
+// The empty-`outStreamKey` check is Q6's: a `by:"none"` join ignores the symbol
+// and therefore has no output identity unless it is given one.
+// `buildForRequest` already refuses an empty top-level `streamKey`, so this is
+// reachable only via `buildTree`/`buildNode` with no default — and it is
+// checked again in the node's own constructor.
+// Is every character whitespace (or is it empty)? A join that emits under `" "`
+// is the same silent wrong answer on the wire as one emitting under `""`.
+inline bool blank(const std::string& s) {
+  for (unsigned char c : s) if (!std::isspace(c)) return false;
+  return true;
+}
+
+inline gma::JoinBy joinByFor(const rapidjson::Value& v,
+                             const char*             nodeType,
+                             const std::string&      outStreamKey) {
+  if (!v.HasMember("by")) return gma::JoinBy::StreamKey;   // D1's locked default
+
+  // A REPEATED `by` IS REFUSED, NOT RESOLVED BY POSITION (ENC-1292, found by
+  // adversarial review). RapidJSON keeps every member of a duplicated key and
+  // `v["by"]` returns the FIRST, so `{"by":"none","by":"typo"}` was accepted
+  // while `{"by":"typo","by":"none"}` was refused — the closed vocabulary was
+  // order-dependent, which is a hole in Q3's ruling rather than an application
+  // of it. Counting is O(members) and runs once per fan-in at build time.
+  std::size_t byCount = 0;
+  for (auto m = v.MemberBegin(); m != v.MemberEnd(); ++m)
+    if (m->name.IsString() && std::strcmp(m->name.GetString(), "by") == 0)
+      ++byCount;
+  if (byCount > 1)
+    throw std::runtime_error(
+      std::string(nodeType) + ": 'by' is declared more than once. A repeated "
+      "key is refused rather than resolved by position — whichever copy the "
+      "parser happened to return would decide the join's correlation key "
+      "silently (SPEC specs/2026-09-20-gma-join-correctness section 5 Q3).");
+
+  if (!v["by"].IsString())
+    throw std::runtime_error(
+      std::string(nodeType) + ": 'by' must be a string — \"streamKey\" "
+      "(default, correlate per symbol) or \"none\" (correlate by port alone, "
+      "the cross-symbol join)");
+
+  const gma::JoinBy by = gma::parseJoinBy(v["by"].GetString(), nodeType);
+
+  if (by == gma::JoinBy::None && blank(outStreamKey))
+    throw std::runtime_error(
+      std::string(nodeType) + ": by:\"none\" ignores the symbol, so the joined "
+      "stream has no identity of its own and must inherit the request's "
+      "top-level 'streamKey' — but none is in scope here. Build this node "
+      "through buildForRequest (which requires a non-empty 'streamKey'), or "
+      "use the default by:\"streamKey\" (SPEC "
+      "specs/2026-09-20-gma-join-correctness section 5 Q6).");
+
+  return by;
 }
 
 } // namespace
@@ -679,6 +747,32 @@ std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
   const auto& v    = expectObj(spec, "node");
   const std::string type = expectType(v);
 
+  // ENC-1292 / SPEC section 5 Q3 — `by` IS MEANINGFUL ONLY ON A FAN-IN, AND
+  // ANYWHERE ELSE IT IS A BUILD ERROR.
+  //
+  // `joinByFor` is called from exactly the two fan-in builders, so until this
+  // check existed `{"type":"Listener","streamKey":"AAPL","field":"lastPrice",
+  // "by":"typo"}` built and ran: `JsonValidator` is an open-vocabulary walk and
+  // the `Listener` builder simply never looks at `by`. That is Q3's own failure
+  // shape — a plausible wrong answer with no diagnostic in either repo — one
+  // node over from where the ruling was applied, and it is the likelier
+  // mistake of the two: an author who means "join these across symbols" puts
+  // `by:"none"` on the request or on a pipeline stage rather than on the
+  // `Aggregate`. Found by adversarial review; nothing in the corpus carries a
+  // `by` at all, so this refuses 0 of 272.
+  //
+  // The check lives HERE rather than in each builder so it cannot be forgotten
+  // by a node type added later, and it runs before the builder is reached, so
+  // a refused `by` constructs nothing.
+  if (v.HasMember("by") && type != "Aggregate" && type != "Pack")
+    throw std::runtime_error(
+      "TreeBuilder: node type '" + type + "' does not take a 'by' — the "
+      "declared join key belongs on a FAN-IN ('Aggregate' or 'Pack'), which is "
+      "the only thing that correlates values. It is refused here rather than "
+      "ignored, because ignoring it returns a per-symbol answer to a request "
+      "asking for a cross-symbol one, with no diagnostic (SPEC "
+      "specs/2026-09-20-gma-join-correctness section 5 Q3).");
+
   if (const auto* builder = gma::engine::NodeTypeRegistry::find(type)) {
     return (*builder)(v, defaultStreamKey, deps, downstream);
   }
@@ -1193,7 +1287,19 @@ void registerBuiltinNodeTypes() {
           "position (SPEC specs/2026-09-20-gma-join-correctness D2), so "
           "'arity' is just the length of 'inputs' and cannot disagree with it.");
 
-      auto agg = std::make_shared<Aggregate>(arity, downstream);
+      // ENC-1292 / SPEC D1 — the declared correlation key. Validated with
+      // everything else, BEFORE anything is constructed (see the note at the
+      // top of this builder): a refused `by` must not leave a subscribed
+      // Listener behind.
+      const gma::JoinBy by = joinByFor(v, "Aggregate", defaultStreamKey);
+
+      // `defaultStreamKey` is the request's own top-level `streamKey` (or the
+      // group's symbol inside a GroupSplit, which is the same question asked
+      // one level down). It is the join's output identity under `by:"none"`
+      // and is ignored under the default — SPEC section 5 Q6 and
+      // include/gma/nodes/JoinBy.hpp.
+      auto agg = std::make_shared<Aggregate>(arity, downstream, by,
+                                             defaultStreamKey);
 
       // ENC-1291: a throw on input N must not strand inputs 0..N-1. See
       // SubBuildUnwind above.
@@ -1326,7 +1432,12 @@ void registerBuiltinNodeTypes() {
       for (auto it = fobj.MemberBegin(); it != fobj.MemberEnd(); ++it)
         names.push_back(it->name.GetString());
 
-      auto pack = std::make_shared<Pack>(names, downstream);
+      // ENC-1292 / SPEC D1 — same declared join key as Aggregate's, same
+      // closed vocabulary, same output identity rule under `by:"none"`.
+      const gma::JoinBy by = joinByFor(v, "Pack", defaultStreamKey);
+
+      auto pack = std::make_shared<Pack>(names, downstream, by,
+                                         defaultStreamKey);
 
       SubBuildUnwind unwind;          // ENC-1291, same hole as Aggregate's
       unwind.keep(pack);

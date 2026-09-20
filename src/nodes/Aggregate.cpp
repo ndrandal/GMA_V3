@@ -5,11 +5,28 @@
 
 namespace gma {
 
-Aggregate::Aggregate(std::size_t arity, std::shared_ptr<INode> parent)
-  : arity_(arity), parent_(std::move(parent))
+Aggregate::Aggregate(std::size_t arity,
+                     std::shared_ptr<INode> parent,
+                     JoinBy by,
+                     std::string outStreamKey)
+  : arity_(arity), by_(by), outKey_(std::move(outStreamKey)),
+    parent_(std::move(parent))
 {
   if (arity_ == 0)
     throw std::invalid_argument("Aggregate: arity must be > 0");
+
+  // ENC-1292 / SPEC section 5 Q6. A `by:"none"` join has no per-symbol
+  // identity to emit under — that is the point of it — so it MUST be given
+  // one. The builder passes the request's top-level `streamKey`, which
+  // `buildForRequest` already refuses to leave empty; this is the node's own
+  // guard for every other construction path. Emitting under the empty symbol
+  // would be a silent wrong answer on the wire.
+  if (by_ == JoinBy::None && outKey_.empty())
+    throw std::invalid_argument(
+      "Aggregate: by:\"none\" requires a non-empty output streamKey — a join "
+      "that ignores the symbol has no identity of its own and must be given "
+      "the request's top-level 'streamKey' (SPEC "
+      "specs/2026-09-20-gma-join-correctness section 5 Q6)");
 }
 
 void Aggregate::addPort(std::shared_ptr<INode> port) {
@@ -48,20 +65,46 @@ void Aggregate::onPortValue(std::size_t portIndex, const StreamValue& sv) {
   // disagrees with `inputs.size()`), so this is unreachable from client JSON.
   if (portIndex >= arity_) return;
 
+  // ENC-1292 / SPEC D1 — THE DECLARED CORRELATION KEY, and it is the SAME
+  // string the completed tuple is emitted under (SPEC section 5 Q6):
+  //
+  //   by:"streamKey"  -> sv.symbol. Every byte of this path is what shipped
+  //                      before ENC-1292, which is what D6's no-migration
+  //                      guarantee for stored forum graphs rests on.
+  //   by:"none"       -> the request's own top-level streamKey. One shared
+  //                      pending tuple for every symbol, so AAPL on port 0 and
+  //                      MSFT on port 1 complete each other, and the result is
+  //                      ONE logical stream rather than a coin-flip between
+  //                      the two input symbols.
+  //
+  // Buffering and emitting under one key is deliberate: it makes it impossible
+  // for the two to drift apart, which is the bug a separate `outSymbol` local
+  // would eventually grow.
+  const std::string& joinKey =
+      (by_ == JoinBy::None) ? outKey_ : sv.symbol;
+
   std::vector<ArgType> batch;
   std::shared_ptr<INode> p;
   {
     std::lock_guard<std::mutex> lk(mx_);
-    // Cap distinct symbol count to prevent unbounded map growth.
-    auto it = buf_.find(sv.symbol);
-    if (it == buf_.end()) {
-      if (buf_.size() >= MAX_SYMBOLS) {
+    // Cap distinct symbol count to prevent unbounded map growth. Under
+    // `by:"none"` there is exactly one entry and the cap can never trip.
+    //
+    // ONE lookup, on ONE key. This was a `find` followed by an `emplace`, and
+    // the pair was an EQUIVALENT-MUTATION surface: `emplace` returns the
+    // existing element when the key is present, so keying the `find` on
+    // `sv.symbol` while the `emplace` still used `joinKey` produced
+    // bit-identical behaviour and no test could ever have caught it (measured,
+    // ENC-1292 mutation M18). `try_emplace` says the key once.
+    auto [it, inserted] = buf_.try_emplace(joinKey);
+    if (inserted) {
+      if (buf_.size() > MAX_SYMBOLS) {
+        buf_.erase(it);
         gma::util::logger().log(gma::util::LogLevel::Warn,
           "Aggregate: max symbols reached, dropping",
           {{"symbol", sv.symbol}});
         return;
       }
-      it = buf_.emplace(sv.symbol, SymBuf{}).first;
       it->second.slots.resize(arity_);
     }
 
@@ -88,7 +131,11 @@ void Aggregate::onPortValue(std::size_t portIndex, const StreamValue& sv) {
       // forwarded under `sv`'s bucket identity.
       // ENC-1291 / SPEC Q5: still one onValue per member, deliberately — the
       // tuple is not delivered as a unit. See the header.
-      p->onValue(StreamValue{ sv.symbol, std::move(v), sv.bucketStartMs });
+      // ENC-1292 / SPEC Q6: the SYMBOL, however, is the join key, not `sv`'s —
+      // identical to `sv.symbol` under the default, and the request's own
+      // streamKey under `by:"none"`, where `sv.symbol` is whichever side
+      // happened to arrive second and is therefore a race.
+      p->onValue(StreamValue{ joinKey, std::move(v), sv.bucketStartMs });
     }
   }
 }

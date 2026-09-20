@@ -346,10 +346,21 @@ public:
   void onValue(const gma::StreamValue& sv) override {
     const double* d = std::get_if<double>(&sv.value);
     std::lock_guard<std::mutex> lk(mx_);
+    // ENC-1292: the SYMBOL is recorded too. `ClientSession` serialises
+    // `sv.symbol` as the frame's `streamKey`, so a join's output identity is
+    // whatever the last node put there — and under `by:"none"` that is a
+    // design decision, not an accident (SPEC section 5 Q6). Nothing could ask
+    // this terminal what identity it saw before.
+    ++symbols_[sv.symbol];
     if (d) byThread_[std::this_thread::get_id()].push_back(*d);
     else   ++nonNumeric_;
   }
   void shutdown() noexcept override {}
+
+  std::map<std::string, std::size_t> symbols() const {
+    std::lock_guard<std::mutex> lk(mx_);
+    return symbols_;
+  }
 
   std::map<std::thread::id, std::vector<double>> take() {
     std::lock_guard<std::mutex> lk(mx_);
@@ -365,6 +376,7 @@ public:
 private:
   mutable std::mutex mx_;
   std::map<std::thread::id, std::vector<double>> byThread_;
+  std::map<std::string, std::size_t> symbols_;
   std::size_t nonNumeric_{0};
 };
 
@@ -449,11 +461,39 @@ rapidjson::Document nodeWithoutPipeline(const rapidjson::Value& request) {
   return d;
 }
 
+// ENC-1292 / SPEC D1 — the same `node`, with the join key it needs DECLARED.
+//
+// `tests/treebuilder/corpus_requests.json` is still NOT touched: `by` is added
+// to the COPY. That is deliberate and is the D6 boundary. The corpus is the
+// authored record of what clients ask for, and no authored request carries a
+// `by` — the member did not exist when the corpus was written, and forum does
+// not emit one. Editing the file would delete the very baseline the default
+// has to be measured against, which is why `Corpus87_ObservationPointIsSound_
+// Control` below drives the request BOTH ways from the one entry.
+rapidjson::Document nodeWithJoinByNone(const rapidjson::Value& request) {
+  rapidjson::Document d = nodeWithoutPipeline(request);
+  auto& al = d.GetAllocator();
+  EXPECT_TRUE(d.HasMember("node") && d["node"].IsObject())
+      << "this helper declares a join key on the request's `node`, and there "
+         "is none";
+  auto& node = d["node"];
+  node.RemoveMember("by");
+  node.AddMember("by", rapidjson::Value("none", al).Move(), al);
+  return d;
+}
+
 // ─── Driver ────────────────────────────────────────────────────────────────
 struct Drive {
   std::map<std::thread::id, std::vector<double>> byThread;
+  std::map<std::string, std::size_t> symbols;     // ENC-1292, SPEC Q6
   std::size_t arrivals{0};
   std::size_t nonNumeric{0};
+
+  std::string renderSymbols() const {
+    std::ostringstream os;
+    for (const auto& [sym, n] : symbols) os << " " << sym << "=" << n;
+    return os.str();
+  }
 };
 
 Drive driveCorpus(const rapidjson::Value& request,
@@ -480,6 +520,7 @@ Drive driveCorpus(const rapidjson::Value& request,
 
   Drive out;
   out.byThread   = terminal->take();
+  out.symbols    = terminal->symbols();
   out.nonNumeric = terminal->nonNumeric();
   for (auto& [tid, vals] : out.byThread) { (void)tid; out.arrivals += vals.size(); }
 
@@ -810,15 +851,23 @@ TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents) {
 
 // ═══ 2c. ENC-1290 — the CONTROL on corpus 87's observation point ═══════════
 //
-// PASSES today, and must keep passing. NOT registered WILL_FAIL.
+// PASSES today, and must keep passing.
 //
-// Gate 3 below carries a `>= 900.0` filter and an assertion that the filter
-// dropped nothing. That assertion cannot gate anything from where it sits:
-// gate 3 is registered `WILL_FAIL TRUE`, so it is *required* to fail and ctest
-// reads a second failure inside it as the expected one. Injecting the exact
+// WHY IT EXISTS, IN THE PAST TENSE (ENC-1292). Gate 3 below carries a
+// `>= 900.0` filter and an assertion that the filter dropped nothing. While
+// gate 3 was registered `WILL_FAIL TRUE` that assertion could not gate
+// anything from where it sat: the case was *required* to fail, so ctest read a
+// second failure inside it as the expected one, and injecting the exact
 // regression it guards against (stop stripping the pipeline, so the terminal
-// sees `Worker{fn:"diff"}` output and the filter keeps 0 of 12 arrivals) leaves
+// sees `Worker{fn:"diff"}` output and the filter keeps 0 of 12 arrivals) left
 // `gma_enc1289_xfail_no_cross_symbol_join` reporting **Passed**.
+//
+// That registration is GONE — ENC-1292 cleared the gate and deleted the whole
+// expected-failure block from CMakeLists.txt — so gate 3's own assertions now
+// gate normally. This control is kept anyway, and it is not redundant: it
+// drives the entry BOTH ways from one corpus row, so it is the only thing that
+// measures the DEFAULT's zero against a driver it simultaneously proves is
+// live.
 //
 // Corpus 86 already has such a control (2a, and it is what caught D5 hollowing
 // out gate 2). Corpus 87 had none. This is it: the same drive as gate 3, with
@@ -826,33 +875,73 @@ TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents) {
 // join's correctness — so it is green now, stays green through ENC-1291 and
 // ENC-1292, and goes red the moment gate 3 starts measuring the wrong stream.
 //
-// ENC-1291 (2026-09-20): IT IS GREEN FOR A REASON IT WAS NOT WRITTEN FOR, AND
-// SAYS SO NOW. Since SPEC D2's port-indexed fan-in, a cross-streamKey join
-// completes nothing, so `d.arrivals` is 0 and `raw == d.arrivals` holds as
-// `0 == 0` — the filter cannot drop anything because there is nothing to drop.
-// The control's own claim is therefore vacuous today. Deleting it would lose
-// the check the moment ENC-1292 makes it live again, and asserting `arrivals >
-// 0` here would redden the MAIN `gma_tests` target (this test is deliberately
-// NOT inverted — SPEC Corrections C4.5 is what that costs). So instead the
-// zero is PINNED below: the control fails the moment corpus 87 starts emitting
-// anything, which is exactly when ENC-1292 lands and exactly when its real
-// assertion becomes checkable again.
+// ENC-1291 (2026-09-20) FOUND IT GREEN FOR A REASON IT WAS NOT WRITTEN FOR:
+// since SPEC D2's port-indexed fan-in a cross-streamKey join completed
+// nothing, so `d.arrivals` was 0 and `raw == d.arrivals` held as `0 == 0` —
+// the filter could not drop anything because there was nothing to drop. It
+// PINNED that zero so the control would fail the moment corpus 87 started
+// emitting, and told whoever landed ENC-1292 to re-arm it.
+//
+// ENC-1292 (2026-09-20) RE-ARMS IT, AND THE PIN IS GONE. The control now
+// drives corpus 87 BOTH WAYS from the one corpus entry, which is the only
+// shape that can be non-vacuous in both directions:
+//
+//   * as authored (no `by`) -> 0 arrivals, which is D6's no-migration
+//     guarantee stated as a measurement rather than a promise: a stored forum
+//     graph carries no `by` and must keep meaning exactly what it meant;
+//   * with `by:"none"` declared -> 12 arrivals, all of them raw AAPL/MSFT
+//     prices, so `raw == arrivals` is a LIVE check over a non-empty set and
+//     gate 3 below is demonstrably measuring the join's own members.
+//
+// Neither branch can hold over an empty set: the first asserts an exact zero
+// against a driver the second proves is live, and the second asserts an exact
+// twelve.
 TEST(CorpusValueAssertions, Corpus87_ObservationPointIsSound_Control) {
   using namespace corpus_values;
 
   const rapidjson::Value* req = corpusRequest(87);
   ASSERT_NE(req, nullptr) << "corpus_id 87 not found in corpus_requests.json";
-  rapidjson::Document join = nodeWithoutPipeline(*req);
 
   constexpr double kAaplBase = 1000.0, kMsftBase = 5000.0;
   constexpr std::size_t kTicksPerSide = 6;
 
-  Drive d = driveCorpus(join, /*threads=*/1, [](gma::Dispatcher& disp) {
+  auto drive = [](gma::Dispatcher& disp) {
     for (std::size_t n = 0; n < kTicksPerSide; ++n) {
       tick(disp, "AAPL", {{"lastPrice", kAaplBase + double(n)}});
       tick(disp, "MSFT", {{"lastPrice", kMsftBase + double(n)}});
     }
-  });
+  };
+
+  // ── A. AS AUTHORED. SPEC D6 — a stored graph carries no `by` and must keep
+  // meaning exactly what it meant. For a cross-streamKey request that means
+  // emitting NOTHING: the two sides never share a buffer key.
+  {
+    rapidjson::Document asAuthored = nodeWithoutPipeline(*req);
+    Drive d = driveCorpus(asAuthored, /*threads=*/1, drive);
+    EXPECT_EQ(d.arrivals, 0u)
+        << "corpus 87 emitted " << d.arrivals << " value(s) WITHOUT a declared "
+           "`by`." << d.renderSymbols() << "\n"
+           "    The default is `by:\"streamKey\"` (SPEC D1) and under it two "
+           "streamKeys never complete a\n"
+           "    tuple. If this moved, every stored forum graph changed meaning "
+           "with no migration available\n"
+           "    (SPEC D6) — which is a far larger event than whatever made this "
+           "test red.";
+    EXPECT_EQ(d.nonNumeric, 0u);
+  }
+
+  // ── B. WITH THE JOIN KEY DECLARED. This is the branch that makes the
+  // observation-point claim mean anything: the filter must drop nothing out of
+  // TWELVE, not out of zero.
+  rapidjson::Document join = nodeWithJoinByNone(*req);
+  Drive d = driveCorpus(join, /*threads=*/1, drive);
+
+  ASSERT_EQ(d.arrivals, 2 * kTicksPerSide)
+      << "corpus 87 under by:\"none\" emitted " << d.arrivals << " value(s), "
+         "expected " << (2 * kTicksPerSide) << " (" << kTicksPerSide
+      << " two-member tuples)." << d.renderSymbols() << "\n"
+         "    Every check below — and gate 3's — is vacuous over an empty "
+         "tuple list, so this comes first.";
 
   std::size_t raw = 0;
   for (const auto& [tid, vals] : d.byThread) {
@@ -861,18 +950,6 @@ TEST(CorpusValueAssertions, Corpus87_ObservationPointIsSound_Control) {
   }
 
   EXPECT_EQ(d.nonNumeric, 0u) << "terminal received a non-numeric value";
-
-  // ENC-1291: the pinned zero. See the block above this test.
-  EXPECT_EQ(d.arrivals, 0u)
-      << "corpus 87's cross-streamKey join emitted " << d.arrivals
-      << " value(s), where SPEC D1's locked default `by:\"streamKey\"` emits 0.\n"
-         "    If ENC-1292 (declared `by`) just landed, this is the expected "
-         "moment: re-arm this control\n"
-         "    (the `raw == d.arrivals` check below is vacuous while arrivals is "
-         "0) and strengthen gate 3\n"
-         "    to assert 6 MIXED tuples. If ENC-1292 has NOT landed, something "
-         "else started feeding this\n"
-         "    terminal and gate 3 is measuring the wrong stream.";
 
   EXPECT_EQ(raw, d.arrivals)
       << "CONTROL FAILED. " << (d.arrivals - raw) << " of " << d.arrivals
@@ -883,81 +960,82 @@ TEST(CorpusValueAssertions, Corpus87_ObservationPointIsSound_Control) {
          "`>= 900.0` filter in gate 3\n"
          "    must drop nothing. If computed values are arriving, gate 3 is "
          "measuring the wrong stream\n"
-         "    and will pass VACUOUSLY — which its own WILL_FAIL registration "
-         "cannot tell you.";
+         "    and any verdict it reports is worthless.";
 }
 
 // ═══ 3. Defect 3 — the correlation key is `symbol`, so no cross-symbol join ═
 //
-// DETERMINISTIC, at threads=1, red today.
+// DETERMINISTIC, at threads=1. GREEN as of ENC-1292; red for everything before
+// it, and for two different reasons in succession.
 //
 // Corpus 87 "Price difference between AAPL and MSFT" declares a two-input join
-// across two streamKeys. Drive six ticks on each side. Whatever the engine
-// emits, every completed tuple must contain one value from each side — that is
-// what "join" means, and it is the one statement that holds under BOTH answers
-// the SPEC leaves open for D1:
+// across two streamKeys. Drive six ticks on each side. Every completed tuple
+// must contain one value from each side — that is what "join" means.
 //
-//   `by:"streamKey"` (the locked default) -> the two sides never share a key,
-//        so the correct emission count is 0 and this assertion holds vacuously;
-//   `by:"none"` (the cross-symbol join D1 adds) -> 6 tuples, each one AAPL
-//        value and one MSFT value.
+// THE THREE STATES THIS TEST HAS BEEN IN, because the middle one is the
+// failure class this project exists to remove and it was reached by a FIX:
 //
-// Today it is neither: `buf_[sv.symbol]` gives AAPL and MSFT one independent
-// buffer each, and each fires every second value, so the terminal receives six
-// tuples of {AAPL, AAPL} and {MSFT, MSFT} — a "price difference between AAPL
-// and MSFT" computed without ever looking at both.
+//   1. Before ENC-1291: `buf_[sv.symbol]` gave AAPL and MSFT one independent
+//      buffer each and each fired every second value, so the terminal received
+//      six tuples of {AAPL, AAPL} and {MSFT, MSFT} — "a price difference
+//      between AAPL and MSFT" computed without ever looking at both. RED,
+//      honestly.
+//   2. After ENC-1291 (port-indexed fan-in, SPEC D2): each declared input got
+//      its own port, AAPL filled port 0 of one buffer and MSFT port 1 of
+//      another, NEITHER completed, and the terminal saw ZERO arrivals. Every
+//      assertion here then held over an empty tuple list and the test would
+//      have gone GREEN HAVING CHECKED NOTHING. ENC-1289 predicted this in
+//      writing ("can pass vacuously under D1's locked default — honest but
+//      weak"); ENC-1291 measured it, added the anti-vacuity ASSERT below, and
+//      deliberately left the xfail marker in place rather than bank the
+//      vacuous green.
+//   3. ENC-1292 (declared `by`, SPEC D1): the request is driven with
+//      `by:"none"` declared and the join emits SIX MIXED TUPLES. The
+//      anti-vacuity ASSERT, the `sameSide == 0` EXPECT and everything else
+//      below are now checking a non-empty set, and the marker is gone.
 //
-// THE VACUOUS-PASS BRANCH IS NOW LIVE, AND IS WHY THERE IS AN ANTI-VACUITY
-// ASSERT BELOW (ENC-1291, 2026-09-20). ENC-1289 wrote: "under the locked
-// default this test can go green by the join emitting nothing. That is honest
-// (an inert request is better than a wrong answer) but it is weak." SPEC D2
-// shipped and that is exactly what happened: with each declared input on its
-// own port, AAPL fills port 0 of `buf_["AAPL"]` and MSFT fills port 1 of
-// `buf_["MSFT"]`, neither entry ever completes, and the terminal sees ZERO
-// arrivals. `joined` is then empty, `joined.size() % 2 == 0` holds on `0 % 2`,
-// the same-side loop never executes and `sameSide == 0` is true over nothing.
-// The test would have gone GREEN — flipping its `WILL_FAIL` ctest case to
-// FAILED — having checked nothing at all.
+// WHAT "STRENGTHENED" MEANS HERE, concretely. `sameSide == 0` over six tuples
+// is necessary and nowhere near sufficient: a join emitting six tuples of
+// {AAPL(n), MSFT(n+3)} would satisfy it. So this test now pins the EXACT
+// tuples — count, membership, declared port order, and the exact arithmetic
+// truth of the natural-language request ("AAPL minus MSFT" is -4000.00 on
+// every tick, by construction of the encoding) — plus the output identity the
+// join emits under, which is SPEC section 5 Q6 and had no gate at all.
 //
-// So ENC-1291 added `ASSERT_GT(d.arrivals, 0u)` below, and did NOT remove the
-// marker. The gate is red for the real, unfixed reason: SPEC section 1.1
-// defect 3, the correlation key is `sv.symbol`, so no cross-streamKey join
-// exists in the engine. That is ENC-1292's (SPEC D1, `by:"none"`), and when it
-// lands this test should be strengthened to assert SIX MIXED tuples — at which
-// point both the anti-vacuity ASSERT and the `sameSide == 0` EXPECT are
-// checking something, and the marker comes out.
+// THE `by` IS INJECTED INTO A COPY; `tests/treebuilder/corpus_requests.json`
+// IS NOT TOUCHED. See `nodeWithJoinByNone` above the driver for why that
+// boundary matters: the unmodified entry is the baseline the DEFAULT is
+// measured against, one test up, and deleting it would make D6's no-migration
+// guarantee unmeasurable.
 //
 // The ASSERT is deliberately on `d.arrivals` rather than on `joined.size()`:
 // `joined` is what the `>= 900.0` filter left, so asserting on it would confuse
 // "the join emitted nothing" with "the filter dropped everything", which are
 // different defects with different owners.
 //
-// Corpus 87 also carries `pipeline:[Worker{fn:"diff"}]`. SPEC §1.1 defect 1
-// wired that as a SECOND live chain into the same terminal, and the `>= 900.0`
-// filter below existed to drop its values. ENC-1290/D5 composed the chains, so
-// this test now drives corpus 87's `node` alone (see the ENC-1290 note above
-// the driver) and there is no second chain left to filter — which the
-// assertion next to the filter now checks rather than assumes.
-// +-- EXPECTED TO FAIL ----------------------------------------------------+
-// | Registered in CMakeLists.txt as ctest case                             |
-// |   gma_enc1289_xfail_no_cross_symbol_join            WILL_FAIL TRUE     |
-// | WHEN ENC-1292 MAKES THIS PASS, that ctest case goes RED. Delete its    |
-// | add_test/set_tests_properties block and drop this test's name from the |
-// | GMA_ENC1289_EXPECTED_FAILURES list, and change the pinned count in     |
-// | gma_enc1289_expected_failures_really_failed — which, being the last    |
-// | one, means deleting that case too. ENC-1292 should also strengthen the |
-// | assertion itself: 6 MIXED tuples under `by:"none"`, not 0.             |
-// +------------------------------------------------------------------------+
+// Corpus 87 also carries `pipeline:[Worker{fn:"diff"}]`. SPEC section 1.1
+// defect 1 wired that as a SECOND live chain into the same terminal, and the
+// `>= 900.0` filter below existed to drop its values. ENC-1290/D5 composed the
+// chains, so this test drives corpus 87's `node` alone (see the ENC-1290 note
+// above the driver) and there is no second chain left to filter — which the
+// assertion next to the filter checks rather than assumes.
 TEST(CorpusValueAssertions, Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself) {
   using namespace corpus_values;
 
   const rapidjson::Value* req = corpusRequest(87);
   ASSERT_NE(req, nullptr) << "corpus_id 87 not found in corpus_requests.json";
-  rapidjson::Document join = nodeWithoutPipeline(*req);   // ENC-1290, see above
+  // ENC-1290 strips the pipeline; ENC-1292 declares the join key. Both act on
+  // a COPY of the corpus entry.
+  rapidjson::Document join = nodeWithJoinByNone(*req);
 
   constexpr double kAaplBase = 1000.0;   // AAPL lastPrice(n) = 1000 + n
   constexpr double kMsftBase = 5000.0;   // MSFT lastPrice(n) = 5000 + n
   constexpr std::size_t kTicksPerSide = 6;
+  // "AAPL minus MSFT" on tick n = (1000+n) - (5000+n) = -4000.00, for every n.
+  // The tick index cancels, so a CROSS-TICK pairing is indistinguishable from
+  // a correct one by this number alone — which is why the members are pinned
+  // individually below and this is only the closing statement.
+  constexpr double kTruth = kAaplBase - kMsftBase;
 
   Drive d = driveCorpus(join, /*threads=*/1, [](gma::Dispatcher& disp) {
     for (std::size_t n = 0; n < kTicksPerSide; ++n) {
@@ -966,40 +1044,37 @@ TEST(CorpusValueAssertions, Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself)
     }
   });
 
-  // ── ANTI-VACUITY (ENC-1291) ───────────────────────────────────────────────
+  // ── ANTI-VACUITY (ENC-1291, kept and tightened by ENC-1292) ───────────────
   // Everything below this line is a statement about the tuples the join
-  // emitted. Since SPEC D2's port-indexed fan-in it emits NONE for a
-  // cross-streamKey request, and every one of those statements is then true
-  // over an empty set. A gate that cannot distinguish "the join is correct"
-  // from "the join is silent" is not a gate — it is the exact failure this
-  // project has spent the week removing. So: it must emit something first.
-  ASSERT_GT(d.arrivals, 0u)
+  // emitted. Between ENC-1291 and ENC-1292 it emitted NONE, and every one of
+  // those statements was then true over an empty set. A gate that cannot
+  // distinguish "the join is correct" from "the join is silent" is not a gate.
+  // ENC-1291 asserted `> 0`; the count is now EXACT, so a join that emits some
+  // but not all of its tuples can no longer satisfy it either.
+  ASSERT_EQ(d.arrivals, 2 * kTicksPerSide)
       << "corpus_id 87 \"Price difference between AAPL and MSFT\" emitted "
-         "NOTHING from " << (2 * kTicksPerSide) << " ticks.\n"
-         "    Every assertion below this point would hold vacuously over an "
-         "empty tuple list, so this\n"
-         "    test would report GREEN having checked nothing.\n\n"
-         "    Cause: src/nodes/Aggregate.cpp keys its buffer on `sv.symbol` "
-         "(SPEC D1's locked default\n"
-         "    `by:\"streamKey\"`), so AAPL fills port 0 of one buffer and MSFT "
-         "fills port 1 of another and\n"
-         "    neither completes. That is SPEC section 1.1 defect 3 — the "
-         "correlation key caps the system —\n"
-         "    and 23 of the 52 corpus `Aggregate` requests ask for a join it "
-         "cannot express.\n"
-         "    Cleared by ENC-1292 (declared `by`, SPEC D1), which must ALSO "
-         "strengthen the check below\n"
-         "    to assert 6 MIXED tuples rather than 0. ENC-1291 (D2) deliberately "
-         "did not clear it: it turned\n"
-         "    six tuples pairing one symbol with ITSELF into no tuples at all, "
-         "which is inert, not correct.";
+      << d.arrivals << " value(s) from " << (2 * kTicksPerSide)
+      << " ticks; expected " << (2 * kTicksPerSide) << " — "
+      << kTicksPerSide << " complete two-member tuples." << d.renderSymbols()
+      << "\n"
+         "    ZERO means the cross-streamKey join is not happening: the "
+         "correlation key is back to\n"
+         "    `sv.symbol` (SPEC section 1.1 defect 3), or the `by:\"none\"` "
+         "this test declares is no longer\n"
+         "    reaching the node. Every assertion below would hold vacuously "
+         "over an empty tuple list, so\n"
+         "    this test would report GREEN having checked nothing — which is "
+         "exactly the state ENC-1291\n"
+         "    measured and refused to bank.\n"
+         "    A count BETWEEN the two means the barrier is completing "
+         "partially, which is a different\n"
+         "    defect and is not this test's to diagnose.";
 
   // Keep only raw prices. This filter was written to drop the SECOND chain's
   // small diffs; since ENC-1290 composed the chains and this test drives the
   // `node` alone, there is no second chain and nothing to drop. The filter
-  // stays — and the assertion below is new — because a filter that silently
-  // starts dropping everything is exactly how this test passes VACUOUSLY,
-  // which is what D5 would have done to it. It must now say so out loud.
+  // stays — and the assertion below it — because a filter that silently starts
+  // dropping everything is exactly how this test passes VACUOUSLY.
   std::vector<double> joined;
   for (const auto& [tid, vals] : d.byThread) {
     (void)tid;
@@ -1015,18 +1090,38 @@ TEST(CorpusValueAssertions, Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself)
 
   auto sym = [&](double v) { return v >= kMsftBase ? 'M' : 'A'; };
 
-  std::size_t sameSide = 0;
-  std::ostringstream examples;
   ASSERT_EQ(joined.size() % 2, 0u)
       << "odd number of join arrivals (" << joined.size() << ") — recovery unsound";
+
+  // ── THE SIX TUPLES, PINNED ────────────────────────────────────────────────
+  // ENC-1289 finding #2 asked ENC-1292 to "assert 6 mixed tuples under
+  // by:\"none\", not 0". `sameSide == 0` is the weakest reading of that and is
+  // kept below as the headline; these are the statements that make it mean
+  // something.
+  std::size_t sameSide = 0;
+  std::ostringstream examples;
   for (std::size_t i = 0; i + 1 < joined.size(); i += 2) {
-    if (sym(joined[i]) != sym(joined[i + 1])) continue;
-    ++sameSide;
-    if (sameSide <= 6)
-      examples << "\n      {" << std::fixed << std::setprecision(2) << joined[i]
-               << ", " << joined[i + 1] << "}  = both " << sym(joined[i])
-               << "  -> \"AAPL minus MSFT\" = "
-               << std::showpos << (joined[i] - joined[i + 1]) << std::noshowpos;
+    const std::size_t t = i / 2;
+    if (sym(joined[i]) == sym(joined[i + 1])) {
+      ++sameSide;
+      if (sameSide <= 6)
+        examples << "\n      {" << std::fixed << std::setprecision(2) << joined[i]
+                 << ", " << joined[i + 1] << "}  = both " << sym(joined[i])
+                 << "  -> \"AAPL minus MSFT\" = "
+                 << std::showpos << (joined[i] - joined[i + 1]) << std::noshowpos;
+      continue;
+    }
+    // Declared PORT ORDER, not arrival order: input 0 is the AAPL Listener.
+    EXPECT_DOUBLE_EQ(joined[i], kAaplBase + double(t))
+        << "tuple " << t << " member 0 must be AAPL's own tick-" << t
+        << " price. Port order is declared, not observed (SPEC D2).";
+    EXPECT_DOUBLE_EQ(joined[i + 1], kMsftBase + double(t))
+        << "tuple " << t << " member 1 must be MSFT's own tick-" << t
+        << " price — the value the engine could not reach at all before "
+           "ENC-1292.";
+    EXPECT_DOUBLE_EQ(joined[i] - joined[i + 1], kTruth)
+        << "tuple " << t << " does not answer the request: \"price difference "
+           "between AAPL and MSFT\" is " << kTruth << " on every tick.";
   }
 
   EXPECT_EQ(sameSide, 0u)
@@ -1035,16 +1130,34 @@ TEST(CorpusValueAssertions, Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself)
          "    streamKeys. " << kTicksPerSide << " ticks were driven into each side. "
       << (joined.size() / 2) << " tuple(s) were emitted and\n"
          "    " << sameSide << " of them pair one symbol with ITSELF:" << examples.str()
-      << "\n\n    Cause: `Aggregate::onPortValue` keys the buffer on `sv.symbol`, so "
-         "AAPL and\n"
-         "    MSFT occupy two independent buffers and each completes alone. "
-         "`Pack::onPortValue`\n"
-         "    keys the same way — no cross-streamKey join exists in the engine at all "
-         "(SPEC\n"
-         "    §1.1 defect 3; 23 of the 52 corpus Aggregate requests ask for one).\n"
-         "    Expected green after ENC-1291 (D2); ENC-1292 (declared `by`, D1) should "
-         "then\n"
-         "    strengthen this to assert 6 mixed tuples rather than 0.";
+      << "\n\n    Cause: the fan-in is keying its buffer on `sv.symbol` again, so "
+         "AAPL and MSFT occupy\n"
+         "    two independent buffers and each completes alone (SPEC section "
+         "1.1 defect 3). Under the\n"
+         "    declared `by:\"none\"` they share one buffer and complete each "
+         "other.";
+
+  // ── OUTPUT IDENTITY — SPEC section 5 Q6, which had no gate before ─────────
+  // `ClientSession` serialises `sv.symbol` as the frame's `streamKey`. A
+  // `by:"none"` join has no per-symbol identity, so without an explicit
+  // substitution it would report AAPL or MSFT depending on which side happened
+  // to arrive second — under a race. It must be the REQUEST's own top-level
+  // `streamKey`.
+  ASSERT_EQ(d.symbols.size(), 1u)
+      << "the joined stream carries " << d.symbols.size() << " identities:"
+      << d.renderSymbols() << "\n"
+         "    A cross-symbol join is ONE logical stream. Two identities on one "
+         "request key is precisely\n"
+         "    the two-streams-interleaved shape SPEC section 1.1 defect 1 "
+         "describes, arriving by a new route.";
+  EXPECT_EQ(d.symbols.begin()->first, (*req)["streamKey"].GetString())
+      << "got" << d.renderSymbols() << ", expected the request's own top-level "
+         "'streamKey'.\n"
+         "    `sv.symbol` at the point of emission is MSFT (the side that "
+         "released the tuple) and would\n"
+         "    be AAPL had the ticks interleaved the other way — an identity "
+         "that depends on arrival order\n"
+         "    is a race, not an identity (SPEC section 5 Q6).";
 
   EXPECT_EQ(d.nonNumeric, 0u) << "terminal received a non-numeric value";
 }

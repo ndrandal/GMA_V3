@@ -31,6 +31,7 @@
 #include "gma/StreamValue.hpp"
 #include "gma/nodes/INode.hpp"
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -455,4 +456,205 @@ TEST(AggregateTest, OutOfRangePortIndexIsIgnored) {
     feed(j, 1, "SYM", 3.0);
     ASSERT_EQ(j.parent->count.load(), 2);
     EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[0].value), 2.0);
+}
+
+// ═══ 5. ENC-1292 — the DECLARED correlation key ══════════════════════════════
+//
+// SPEC specs/2026-09-20-gma-join-correctness D1, D6, section 1.1 defect 3, and
+// section 5 Q3 (ruled) / Q6.
+//
+// Until ENC-1292 this node keyed its pending tuple on `sv.symbol` and nothing
+// else, so no join across two streamKeys was possible anywhere in the engine.
+// Measured on the real node: `Aggregate(2)` over AAPL+MSFT with one tick each
+// emitted 0; after AAPL ticked a second time it emitted 2, both labelled AAPL
+// and both carrying AAPL's own values. MSFT was never joined. 23 of the 52
+// `Aggregate` requests in the checked-in corpus ask for exactly that join.
+//
+// The default is unchanged and is gated first, because D6's no-migration
+// guarantee for stored forum graphs rests on it.
+
+namespace {
+// The same wiring as makeJoin(), with a declared join key. Kept separate so
+// makeJoin()'s call sites above keep exercising the DEFAULT constructor —
+// which is the thing D6 promises did not move.
+Join makeJoinBy(std::size_t arity, JoinBy by, const char* outKey) {
+    Join j;
+    j.parent = std::make_shared<TestParent>();
+    j.agg    = std::make_shared<Aggregate>(arity, j.parent, by, outKey);
+    for (std::size_t i = 0; i < arity; ++i) {
+        auto p = std::make_shared<InputPort>(std::weak_ptr<IFanIn>(j.agg), i);
+        j.agg->addPort(p);
+        j.ports.push_back(p);
+    }
+    return j;
+}
+} // namespace
+
+// The defect, pinned as a BASELINE rather than as correct behaviour. This is
+// what `by:"streamKey"` means and it is right for a bid/ask join on one symbol;
+// it is also exactly why a cross-symbol request needs `by:"none"`.
+TEST(AggregateTest, ByStreamKeyIsTheDefaultAndNeverJoinsAcrossSymbols) {
+    Join implicit = makeJoin(2);                                   // no `by`
+    Join explicitDefault = makeJoinBy(2, JoinBy::StreamKey, "AAPL");
+
+    for (Join* j : {&implicit, &explicitDefault}) {
+        feed(*j, 0, "AAPL", 1000.0);
+        feed(*j, 1, "MSFT", 5000.0);
+        EXPECT_EQ(j->agg->by(), JoinBy::StreamKey);
+        EXPECT_EQ(j->parent->count.load(), 0)
+            << "under by:\"streamKey\" the two sides occupy two independent "
+               "buffers and NEITHER completes. Emitting here would mean the "
+               "default had started joining across symbols, which SPEC D6 "
+               "forbids: every stored forum graph would change meaning with no "
+               "migration.";
+    }
+
+    // And the half-open AAPL buffer completes with AAPL's own next value —
+    // the pre-ENC-1292 behaviour, preserved byte for byte under the default.
+    feed(implicit, 1, "AAPL", 1000.02);
+    ASSERT_EQ(implicit.parent->count.load(), 2);
+    EXPECT_EQ(implicit.parent->received[0].symbol, "AAPL");
+    EXPECT_EQ(implicit.parent->received[1].symbol, "AAPL");
+}
+
+// THE gate for SPEC section 1.1 defect 3 at unit level.
+TEST(AggregateTest, ByNoneJoinsAcrossTwoStreamKeys) {
+    Join j = makeJoinBy(2, JoinBy::None, "AAPL");
+    ASSERT_EQ(j.agg->by(), JoinBy::None);
+
+    feed(j, 0, "AAPL", 1000.0);
+    EXPECT_EQ(j.parent->count.load(), 0) << "one side is not a tuple";
+
+    feed(j, 1, "MSFT", 5000.0);
+    ASSERT_EQ(j.parent->count.load(), 2)
+        << "AAPL on port 0 and MSFT on port 1 are a COMPLETE tuple under "
+           "by:\"none\" — this is the join 23 of the 52 corpus Aggregate "
+           "requests ask for and the engine could not express at all.";
+
+    // Declared port order, not arrival order, and the values are the two
+    // sides' OWN values — not one side paired with itself.
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[0].value), 1000.0);
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[1].value), 5000.0);
+
+    // SPEC section 5 Q6 — OUTPUT IDENTITY. `ClientSession` serialises
+    // `sv.symbol` onto the wire, so without the substitution this tuple would
+    // be labelled by whichever side happened to arrive second: MSFT here, AAPL
+    // had the ticks interleaved the other way. That is a race, not an
+    // identity. It must be the request's own top-level streamKey.
+    EXPECT_EQ(j.parent->received[0].symbol, "AAPL");
+    EXPECT_EQ(j.parent->received[1].symbol, "AAPL")
+        << "the joined stream must carry ONE stable identity. `sv.symbol` "
+           "here is MSFT (the side that released the tuple); reporting it "
+           "would make the output symbol depend on arrival order.";
+
+    // The barrier resets: the next tuple needs BOTH sides again.
+    feed(j, 0, "AAPL", 1001.0);
+    EXPECT_EQ(j.parent->count.load(), 2) << "half a tuple is not a tuple";
+    feed(j, 1, "MSFT", 5001.0);
+    ASSERT_EQ(j.parent->count.load(), 4);
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[2].value), 1001.0);
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[3].value), 5001.0);
+}
+
+// Order-independence: the identity of the tuple must not depend on which side
+// arrives second. Drive the SAME two symbols with the arrival order reversed
+// and demand the same output symbol — the direct negative control on Q6.
+TEST(AggregateTest, ByNoneOutputIdentityDoesNotDependOnArrivalOrder) {
+    Join a = makeJoinBy(2, JoinBy::None, "AAPL");
+    feed(a, 0, "AAPL", 1000.0);
+    feed(a, 1, "MSFT", 5000.0);          // MSFT releases the tuple
+
+    Join b = makeJoinBy(2, JoinBy::None, "AAPL");
+    feed(b, 1, "MSFT", 5000.0);
+    feed(b, 0, "AAPL", 1000.0);          // AAPL releases the tuple
+
+    ASSERT_EQ(a.parent->count.load(), 2);
+    ASSERT_EQ(b.parent->count.load(), 2);
+    for (int i = 0; i < 2; ++i) {
+        EXPECT_EQ(a.parent->received[i].symbol, "AAPL");
+        EXPECT_EQ(b.parent->received[i].symbol, "AAPL");
+        EXPECT_DOUBLE_EQ(extractDouble(a.parent->received[i].value),
+                         extractDouble(b.parent->received[i].value))
+            << "declared port order must survive a reversed arrival order";
+    }
+}
+
+// Under `by:"none"` a tuple is shared across symbols, so last-value-wins is
+// across symbols too: a second AAPL tick before MSFT reports replaces the
+// first. Stated because it is a consequence of the key, not of the port.
+TEST(AggregateTest, ByNoneIsLastValueWinsPerPortAcrossSymbols) {
+    Join j = makeJoinBy(2, JoinBy::None, "AAPL");
+    feed(j, 0, "AAPL", 1000.0);
+    feed(j, 0, "AAPL", 1001.0);          // same port, replaces
+    feed(j, 1, "MSFT", 5000.0);
+    ASSERT_EQ(j.parent->count.load(), 2);
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[0].value), 1001.0);
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[1].value), 5000.0);
+}
+
+// SPEC section 5 Q6, the other half: a join that ignores the symbol has no
+// identity unless it is given one, and emitting under the empty symbol would
+// be a silent wrong answer on the wire. The builder guards this too; this is
+// the node's own guard, for every other construction path.
+TEST(AggregateTest, ByNoneWithNoOutputStreamKeyIsRefused) {
+    auto parent = std::make_shared<TestParent>();
+    EXPECT_THROW(Aggregate(2, parent, JoinBy::None, ""), std::invalid_argument);
+    EXPECT_THROW(Aggregate(2, parent, JoinBy::None), std::invalid_argument);
+
+    // ...and the default mode does NOT require one, because each symbol keeps
+    // its own identity there.
+    EXPECT_NO_THROW(Aggregate(2, parent, JoinBy::StreamKey, ""));
+    EXPECT_NO_THROW(Aggregate(2, parent));
+}
+
+// The pipeline edge stays closed under `by:"none"` too. ENC-1291 made a value
+// arriving there a warn-and-drop; a new correlation key must not reopen it,
+// because with one shared tuple a stray value would complete tuples for every
+// symbol at once rather than for one.
+TEST(AggregateTest, ByNonePipelineEdgeValueIsStillNotAJoinMember) {
+    Join j = makeJoinBy(2, JoinBy::None, "AAPL");
+    feed(j, 0, "AAPL", 1000.0);
+    for (int n = 0; n < 8; ++n)
+        j.agg->onValue(StreamValue{"MSFT", 5000.0 + n});
+    EXPECT_EQ(j.parent->count.load(), 0)
+        << "8 pipeline-edge values completed a tuple against port 0 — a "
+           "fan-in joins its own declared inputs (SPEC D2), and by:\"none\" "
+           "does not change that.";
+    feed(j, 1, "MSFT", 5000.0);
+    ASSERT_EQ(j.parent->count.load(), 2);
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[1].value), 5000.0);
+}
+
+// The per-symbol buffer cap. Nothing covered it before ENC-1292, and ENC-1292
+// rewrote the lookup that enforces it (find+emplace -> try_emplace, to remove
+// an equivalent-mutation surface), so it is gated here rather than left to be
+// trusted. It can only trip under `by:"streamKey"` — `by:"none"` has exactly
+// one buffer entry by construction.
+TEST(AggregateTest, MaxSymbolsCapDropsNewSymbolsAndSparesExistingOnes) {
+    Join j = makeJoin(2);
+
+    constexpr int kCap = 10000;      // Aggregate::MAX_SYMBOLS
+    // Fill the map to the cap with half-open tuples (port 0 only, so nothing
+    // has emitted yet).
+    for (int n = 0; n < kCap; ++n)
+        feed(j, 0, ("S" + std::to_string(n)).c_str(), double(n));
+    ASSERT_EQ(j.parent->count.load(), 0) << "no tuple is complete yet";
+
+    // One more DISTINCT symbol is over the cap: both its ports are fed and it
+    // must still emit nothing, because it never got a buffer.
+    feed(j, 0, "OVERFLOW", 1.0);
+    feed(j, 1, "OVERFLOW", 2.0);
+    EXPECT_EQ(j.parent->count.load(), 0)
+        << "a symbol past the " << kCap << "-entry cap was admitted; the cap "
+           "is what bounds this node's memory under an unbounded symbol space";
+
+    // ...and an ALREADY-BUFFERED symbol still completes. A cap that also broke
+    // the symbols it already accepted would be a far worse bug than the leak
+    // it prevents, and `size() >= cap` vs `size() > cap` is exactly the
+    // off-by-one that causes it.
+    feed(j, 1, "S0", 99.0);
+    ASSERT_EQ(j.parent->count.load(), 2)
+        << "an existing buffered symbol must still complete its tuple";
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[0].value), 0.0);
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[1].value), 99.0);
 }

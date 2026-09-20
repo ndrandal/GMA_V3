@@ -498,6 +498,21 @@ TEST_F(ComposedChain, Corpus111PullOnlyJoinFiresForTheFirstTime) {
 // landmine planted in the path of the next two tickets in this project. 29 can
 // only go up as the join is fixed. The actual count is printed either way, so
 // a real regression is still visible in the message.
+//
+// ENC-1292 HAS LANDED AND THE COUNT IS STILL EXACTLY 29. That is the correct
+// outcome, not a shortfall, and it is worth saying because "the cross-symbol
+// join now works, so this should be 52" is the natural misreading. This test
+// drives every entry VERBATIM, and no corpus entry declares a `by` — the
+// member did not exist when the corpus was authored and forum does not emit
+// one. Under D1's locked default those 23 still (correctly) emit nothing, and
+// D6's no-migration guarantee for stored forum graphs is exactly that
+// property. What they do once the key IS declared is measured separately, on a
+// copy of each entry, by `EveryCrossStreamKeyCorpusRequestJoinsUnderByNone` in
+// tests/treebuilder/FanInJoinKeyTest.cpp — 23 of 23, against 0 of 23 under the
+// default, both halves in the one test.
+//
+// So this floor moves only if the CORPUS gains a `by`, which is a forum-side
+// change (SPEC §3), not an engine one.
 TEST_F(ComposedChain, EveryNodePlusPipelineEntryReachesTheTerminalOnlyViaThePipeline) {
   rapidjson::Document& doc = corpusDoc();
   ASSERT_FALSE(doc.IsNull()) << "corpus_requests.json not found next to the test binary";
