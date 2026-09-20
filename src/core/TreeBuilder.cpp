@@ -362,8 +362,7 @@ namespace {
 // goes back to discarding its upstream in silence, and nothing goes red. That
 // unclosable gap is why this paragraph is a warning rather than a cross-ref.
 bool isFanInType(const std::string& type) {
-  return type == "Aggregate" || type == "Pack" || type == "Let"
-      || type == "Worker";  // MUTANT: over-broad
+  return type == "Aggregate" || type == "Pack" || type == "Let";
 }
 
 std::string fanInPipelineStageMessage(const std::string& type,
