@@ -54,6 +54,20 @@ void Dispatcher::unregisterListener(const std::string& symbol,
   if (fieldMap.empty()) _listeners.erase(symIt);
 }
 
+// ENC-1338. See the header: a diagnostic snapshot, never a synchronisation
+// point. Takes the same shared lock and makes the same copy `notifyListeners`
+// does.
+std::vector<std::shared_ptr<INode>>
+Dispatcher::listenersFor(const std::string& symbol,
+                         const std::string& field) const {
+  std::shared_lock<std::shared_mutex> lock(_listenerMutex);
+  auto sit = _listeners.find(symbol);
+  if (sit == _listeners.end()) return {};
+  auto fit = sit->second.find(field);
+  if (fit == sit->second.end()) return {};
+  return fit->second;
+}
+
 void Dispatcher::onTick(const Event& tick) {
   if (tick.symbol.empty() || !tick.payload) return;
 
