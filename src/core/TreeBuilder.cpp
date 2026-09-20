@@ -771,7 +771,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   // block is scheduled for deletion by ENC-1295 and nothing here moves with it.
   {
     const bool hasNode = rq.HasMember("node") && rq["node"].IsObject();
-    for (const char* k : {"pipeline", "stages"}) {
+    for (const char* k : {"pipeline"}) {   // MUTANT: `stages` not checked
       if (!rq.HasMember(k) || !rq[k].IsArray()) continue;
       const auto arr = rq[k].GetArray();
       for (rapidjson::SizeType i = 0; i < arr.Size(); ++i) {
@@ -784,7 +784,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
         // THE ACCEPTED CASE, and it is §5 Q1 rather than an exception: with no
         // `node`, `midHead` starts at `terminal`, so the head Listener is this
         // stage's only upstream — the same wiring the fan-in gets under `node`.
-        if (i == 0) continue;  // MUTANT: ignores `node`
+        if (!hasNode && i == 0) continue;
         throw std::runtime_error(
           fanInPipelineStageMessage(type, k, static_cast<std::size_t>(i), hasNode));
       }
