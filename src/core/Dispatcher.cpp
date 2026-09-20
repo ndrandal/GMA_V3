@@ -222,7 +222,7 @@ void Dispatcher::onTick(const Event& tick) {
     computeAndStoreAtomics(tick.symbol, field, histVec);
 
     StreamValue out{ tick.symbol, raw };
-    if (_threadPool) {
+    if (false && _threadPool) {
       _threadPool->post([node, out]() {
         if (node) node->onValue(out);
       });
