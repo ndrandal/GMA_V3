@@ -358,15 +358,11 @@ void Dispatcher::computeAndStoreAtomics(const std::string& symbol,
       _store->set(symbol, nsByField ? nsKey : fnName, result);
     }
 
+    // Same routing rule as the raw-field path — see Dispatcher::deliver.
+    const StreamValue derived{ symbol, result };
     const auto notify = [&](const std::vector<std::shared_ptr<INode>>& targets) {
       for (auto& listener : targets) {
-        if (_threadPool) {
-          _threadPool->post([listener, symbol, result]() {
-            if (listener) listener->onValue(StreamValue{ symbol, result });
-          });
-        } else {
-          if (listener) listener->onValue(StreamValue{ symbol, result });
-        }
+        deliver(listener, derived);
       }
     };
 

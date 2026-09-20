@@ -74,6 +74,12 @@ public:
                        double value);
 
 private:
+  // ENC-1005 / SPEC D3. The single routing decision for every value this
+  // Dispatcher hands to a subscriber: pool post (the default, unchanged) or an
+  // inline call for a node that re-posts onto its own serializing executor.
+  // Defined in Dispatcher.cpp with the full rationale.
+  void deliver(const std::shared_ptr<INode>& node, const StreamValue& out);
+
   // Recompute FunctionMap builtins over `history` and publish them.
   //
   // ATOMIC-KEY CONTRACT (ENC-792/M9, amended by ENC-1008).
