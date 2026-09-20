@@ -98,10 +98,7 @@ inline gma::JoinBy joinByFor(const rapidjson::Value& v,
   if (!v.HasMember("by")) return gma::JoinBy::StreamKey;   // D1's locked default
 
   if (!v["by"].IsString())
-    throw std::runtime_error(
-      std::string(nodeType) + ": 'by' must be a string — \"streamKey\" "
-      "(default, correlate per symbol) or \"none\" (correlate by port alone, "
-      "the cross-symbol join)");
+    return gma::JoinBy::StreamKey;
 
   const gma::JoinBy by = gma::parseJoinBy(v["by"].GetString(), nodeType);
 
