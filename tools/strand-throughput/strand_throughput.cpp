@@ -129,12 +129,12 @@ private:
   std::atomic<std::size_t> arrivals_{0};
 };
 
-struct Result {
+struct RunResult {
   double   seconds{0};
   std::size_t arrivals{0};
 };
 
-Result runOne(unsigned threads, int subs, std::size_t ticksPerSub,
+RunResult runOne(unsigned threads, int subs, std::size_t ticksPerSub,
               long long spinNs, bool ordered) {
   AtomicStore store;
   auto pool = std::make_shared<rt::ThreadPool>(threads);
@@ -210,7 +210,7 @@ Result runOne(unsigned threads, int subs, std::size_t ticksPerSub,
   pool->drain();
   const auto t1 = Clock::now();
 
-  Result r;
+  RunResult r;
   r.seconds = std::chrono::duration<double>(t1 - t0).count();
   for (auto& t : terminals) r.arrivals += t->arrivals();
 
@@ -266,7 +266,7 @@ int main(int argc, char** argv) {
       for (int arm = 0; arm < 2; ++arm) {
         const bool ordered = (arm == 1);
         const double load = loadAvg1();
-        const Result r = runOne(w, subs, ticks, spinNs, ordered);
+        const RunResult r = runOne(w, subs, ticks, spinNs, ordered);
         std::printf("%s,%d,%zu,%lld,%u,%s,%d,%zu,%.4f,%.0f,%.2f\n",
                     label.c_str(), subs, ticks, spinNs, w,
                     ordered ? "after_strand" : "before_pool",
