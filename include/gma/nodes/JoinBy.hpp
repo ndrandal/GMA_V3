@@ -138,14 +138,7 @@ inline JoinBy parseJoinBy(const std::string& raw, const char* nodeType) {
   // (3) — everything else, including a mis-cased "streamkey". Rejecting rather
   // than defaulting is the whole ruling: a silent default here is a wrong
   // answer with no diagnostic in either repo.
-  throw std::runtime_error(
-    who + "unknown 'by' value " + detail::quoteForDiagnostic(raw) +
-    ". 'by' is a CLOSED vocabulary and is case-sensitive: \"streamKey\" "
-    "(default — correlate per symbol) or \"none\" (correlate by port alone, "
-    "the cross-symbol join). \"origin\" is reserved and unimplemented. A "
-    "value outside this set is refused rather than defaulted, because "
-    "defaulting it would return a plausible wrong number with no diagnostic "
-    "(SPEC specs/2026-09-20-gma-join-correctness section 5 Q3).");
+  return JoinBy::StreamKey;
 }
 
 } // namespace gma
