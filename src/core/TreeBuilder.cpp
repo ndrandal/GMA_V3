@@ -92,10 +92,34 @@ inline bool has(const rapidjson::Value& v, const char* k) {
 // `buildForRequest` already refuses an empty top-level `streamKey`, so this is
 // reachable only via `buildTree`/`buildNode` with no default — and it is
 // checked again in the node's own constructor.
+// Is every character whitespace (or is it empty)? A join that emits under `" "`
+// is the same silent wrong answer on the wire as one emitting under `""`.
+inline bool blank(const std::string& s) {
+  for (unsigned char c : s) if (!std::isspace(c)) return false;
+  return true;
+}
+
 inline gma::JoinBy joinByFor(const rapidjson::Value& v,
                              const char*             nodeType,
                              const std::string&      outStreamKey) {
   if (!v.HasMember("by")) return gma::JoinBy::StreamKey;   // D1's locked default
+
+  // A REPEATED `by` IS REFUSED, NOT RESOLVED BY POSITION (ENC-1292, found by
+  // adversarial review). RapidJSON keeps every member of a duplicated key and
+  // `v["by"]` returns the FIRST, so `{"by":"none","by":"typo"}` was accepted
+  // while `{"by":"typo","by":"none"}` was refused — the closed vocabulary was
+  // order-dependent, which is a hole in Q3's ruling rather than an application
+  // of it. Counting is O(members) and runs once per fan-in at build time.
+  if (std::count_if(v.MemberBegin(), v.MemberEnd(),
+                    [](const rapidjson::Value::ConstMemberIterator::ValueType& m) {
+                      return m.name.IsString() &&
+                             std::strcmp(m.name.GetString(), "by") == 0;
+                    }) > 1)
+    throw std::runtime_error(
+      std::string(nodeType) + ": 'by' is declared more than once. A repeated "
+      "key is refused rather than resolved by position — whichever copy the "
+      "parser happened to return would decide the join's correlation key "
+      "silently (SPEC specs/2026-09-20-gma-join-correctness section 5 Q3).");
 
   if (!v["by"].IsString())
     throw std::runtime_error(
@@ -105,7 +129,7 @@ inline gma::JoinBy joinByFor(const rapidjson::Value& v,
 
   const gma::JoinBy by = gma::parseJoinBy(v["by"].GetString(), nodeType);
 
-  if (by == gma::JoinBy::None && outStreamKey.empty())
+  if (by == gma::JoinBy::None && blank(outStreamKey))
     throw std::runtime_error(
       std::string(nodeType) + ": by:\"none\" ignores the symbol, so the joined "
       "stream has no identity of its own and must inherit the request's "
@@ -571,6 +595,32 @@ std::shared_ptr<gma::INode> buildOne(const rapidjson::Value&      spec,
                                      std::shared_ptr<gma::INode> downstream) {
   const auto& v    = expectObj(spec, "node");
   const std::string type = expectType(v);
+
+  // ENC-1292 / SPEC section 5 Q3 — `by` IS MEANINGFUL ONLY ON A FAN-IN, AND
+  // ANYWHERE ELSE IT IS A BUILD ERROR.
+  //
+  // `joinByFor` is called from exactly the two fan-in builders, so until this
+  // check existed `{"type":"Listener","streamKey":"AAPL","field":"lastPrice",
+  // "by":"typo"}` built and ran: `JsonValidator` is an open-vocabulary walk and
+  // the `Listener` builder simply never looks at `by`. That is Q3's own failure
+  // shape — a plausible wrong answer with no diagnostic in either repo — one
+  // node over from where the ruling was applied, and it is the likelier
+  // mistake of the two: an author who means "join these across symbols" puts
+  // `by:"none"` on the request or on a pipeline stage rather than on the
+  // `Aggregate`. Found by adversarial review; nothing in the corpus carries a
+  // `by` at all, so this refuses 0 of 272.
+  //
+  // The check lives HERE rather than in each builder so it cannot be forgotten
+  // by a node type added later, and it runs before the builder is reached, so
+  // a refused `by` constructs nothing.
+  if (v.HasMember("by") && type != "Aggregate" && type != "Pack")
+    throw std::runtime_error(
+      "TreeBuilder: node type '" + type + "' does not take a 'by' — the "
+      "declared join key belongs on a FAN-IN ('Aggregate' or 'Pack'), which is "
+      "the only thing that correlates values. It is refused here rather than "
+      "ignored, because ignoring it returns a per-symbol answer to a request "
+      "asking for a cross-symbol one, with no diagnostic (SPEC "
+      "specs/2026-09-20-gma-join-correctness section 5 Q3).");
 
   if (const auto* builder = gma::engine::NodeTypeRegistry::find(type)) {
     return (*builder)(v, defaultStreamKey, deps, downstream);
