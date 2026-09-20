@@ -95,9 +95,15 @@ push and order-book-derived state).
   could mis-generate a Listener-on-`ob.*`. When real AI boxes
   replace aibox-mock, the prompt update lands as part of that
   migration, informed by the doc this proposal produces.
-- **No GMA_V3 perf changes.** Hot-path benchmarks
-  (`PackAppend` 0.85 ns/op / 0 allocs;
-  `OrchestratorThroughput` ≥40M ops/sec) must remain unchanged.
+- **No GMA_V3 perf changes.** `ObProvider` stays pull-only and the
+  `Listener` reject is a single string-prefix check at construct
+  time, so nothing on a per-tick path moves. Nothing in this repo
+  measures that today — see **Corrections C1**.
+  ~~Hot-path benchmarks (`PackAppend` 0.85 ns/op / 0 allocs;
+  `OrchestratorThroughput` ≥40M ops/sec) must remain unchanged.~~
+  — **struck 2026-09-19 (ENC-1269): both are *embassy* Go
+  benchmarks, not GMA_V3 ones, and both figures are
+  stub-broadcaster numbers. C1.**
 - **No backward-compat shim.** No production deployment has a
   Listener on `ob.*` that fires today (it never did); making the
   failure explicit at construct time doesn't break any working
@@ -135,9 +141,13 @@ push and order-book-derived state).
    original repro saw zero. Documented in
    `gma_v3/docs/atomic-keys.md` as a self-contained `apps/poc-client`
    command.
-7. **No bench regression**: `mage Bench` on embassy and
+7. ~~**No bench regression**: `mage Bench` on embassy and
    `mage Bench` on gma_v3 (if present) report unchanged numbers
-   for `PackAppend` / hot-path benchmarks (within ±2%).
+   for `PackAppend` / hot-path benchmarks (within ±2%).~~
+   — **struck 2026-09-19 (ENC-1269): unrunnable as written.
+   GMA_V3 has no `mage` target and no `PackAppend`; `PackAppend`
+   is embassy's. ±2% is also below the run-to-run noise of a
+   sub-nanosecond Go microbenchmark. See Corrections C1.**
 
 ## Constraints
 
@@ -228,3 +238,97 @@ client are unaffected).
 ## Open questions
 
 - None at spec time.
+
+---
+
+## Corrections
+
+Struck in place and dated, never deleted — the house convention
+(`DynaCharting/LIMITATIONS.md` §C, `HANDOFF-2026-09-16.md`), and the rule
+`specs/2026-09-14-gma-flow-control-replay/recheck.sh` is written against
+(*"the row struck through — D9: nothing is deleted"*). A reader who
+half-remembers the wrong version needs to find the correction, not a silence.
+
+### C1 — this SPEC gated on two embassy Go benchmarks, presented as GMA_V3 ones
+
+**Struck 2026-09-19 under ENC-1269**, from the ENC-1263 performance-claim
+audit (`workspace:specs/2026-09-19-chart-quality-bar/PERF-CLAIMS.md` row B6).
+Two places were affected: the *Non-goals* bullet above and acceptance
+criterion **#7**.
+
+**What was claimed.** *"Hot-path benchmarks (`PackAppend` 0.85 ns/op / 0
+allocs; `OrchestratorThroughput` ≥40M ops/sec) must remain unchanged"*, and
+AC#7's ±2% restatement of it.
+
+**Neither benchmark is in this repo.** `BenchmarkPackAppend` is
+`embassy/internal/pipeline/binary_test.go:46`; `BenchmarkOrchestratorThroughput`
+is `embassy/bench/throughput_bench_test.go:28`. Both are Go. GMA_V3 is C++20 and
+has no Go toolchain, no `mage` target, and no function of either name — so no
+GMA_V3 build, test or CI step ever evaluated this clause. It sat unchallenged
+from 2026-05-06.
+
+**Where the numbers came from.** `customer-layer/specs/2026-05-02-go-backend-rewrite/DECISIONS.md:318-322`
+(ADR-014, dated 2026-05-03), a five-row table of `embassy` per-op costs
+measured against *"current main"* — no machine, no Go version, no `-count`,
+no commit. `0.85` is its `BenchmarkPackAppend` row verbatim. `≥40M ops/sec`
+is its `BenchmarkOrchestratorThroughput` row (21.6 ns/op → *"≈46M /s"*)
+rounded down into a floor. This SPEC is the only other committed home of
+either figure.
+
+**What retracted them.**
+
+- `embassy/CLAUDE.md:134-139` — `BenchmarkBroadcastFanout` with **real
+  WebSocket clients** attached, 256-byte records: *0 conns 67.1 ns/op 0 allocs;
+  1 conn 250.7 ns/op 289 B 1 alloc; **8 conns 2,277 ns/op, 2,458 B, 13
+  allocs***. It names the benchmark, the payload, the connection count and
+  what it supersedes, and is the maintained embassy number. PERF-CLAIMS B1
+  rules it **STANDS** and calls it the house standard for a CPU claim.
+- `BenchmarkOrchestratorThroughput` routes into `noopBroadcaster`
+  (`embassy/bench/throughput_bench_test.go:13-21`), which discards every frame.
+  Its implied rate is an upper bound on **packing + routing in isolation**, and
+  says nothing about the data plane: the shipped 8-connection path measures
+  ≈0.44M ops/sec, ≈91× below the ≥40M figure this SPEC froze as a system
+  constraint. The same benchmark's own doc comment targets *"≥ 100k
+  records/sec"* — 400× below what was copied here.
+- `workspace:specs/2026-09-14-local-data-plane/SPEC.md` **D2** (ENC-1012,
+  2026-08-24) already rules that a stub-broadcaster figure *"must not be cited
+  as the data-plane number"*. `noopBroadcaster` is the same construction as the
+  `nullBroadcaster` D2 names.
+
+**One thing PERF-CLAIMS B6 and ENC-1269 both got wrong, corrected here.** They
+state that `PackAppend` *"has two committed values (0.85 and 2.463 ns/op)"*.
+It does not. `2.463 ns/op` is `BenchmarkOrchestratorRouteValue`, not
+`PackAppend` — `embassy/CLAUDE.md:138` says so explicitly, and
+`encultured-decisions-prompt.md:105-106` is where it is (mis)certified as
+*"verified"*. `PackAppend`'s `0.85` has exactly one source, ADR-014, quoted in
+exactly two committed places: ADR-014 itself and this SPEC. The defect is that
+it carries no conditions, not that it disagrees with itself.
+
+**Not re-measured, deliberately.** A GMA_V3 design record must not carry an
+embassy benchmark number at all — re-measuring would reproduce the
+misattribution with fresher digits. The number that belongs here is a **GMA_V3**
+one, and there is none: `GMA_BUILD_BENCHMARKS` is `OFF` by default
+(`CMakeLists.txt:6`), the five suites under `benchmarks/` get no `add_test`
+registration, and nothing in CI runs them — so *"no GMA_V3 perf changes"* is
+today an assertion about the diff, not a measurement. **ENC-997** (*"[GMA_V3]
+Commit a real performance baseline"*) owns closing that with a `BASELINE.md`
+and a perf job; this correction discharges only its *"false numbers deleted or
+corrected"* clause.
+
+**Same defect, noted but not changed:** AC#3 gates on *"`mage Test` (gma_v3 ws
+tests)"*. There is no `mage` in this repo either — tests are
+`cmake -B build -DGMA_BUILD_TESTS=ON && ctest --test-dir build`. It is not a
+performance claim, so it is left standing and recorded here; it belongs to
+ENC-997.
+
+**Re-check:**
+
+```bash
+# the two figures are struck, not merely gone
+grep -n '~~' specs/2026-05-06-ob-keys-pipeline-only/SPEC.md
+# neither benchmark exists in this repo, in any language
+grep -rn 'PackAppend\|OrchestratorThroughput' --include='*.cpp' --include='*.hpp' \
+     --include='*.cc' --include='*.h' . ; echo "exit=$?  (1 = correct: no hits)"
+# the maintained embassy number
+sed -n '134,139p' ../embassy/CLAUDE.md
+```
