@@ -9,6 +9,7 @@
 #include "gma/Span.hpp"
 #include "gma/StreamValue.hpp"
 #include "gma/nodes/INode.hpp"
+#include "gma/rt/Strand.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include <rapidjson/document.h>
 
@@ -42,6 +43,25 @@ namespace tree {
     rt::ThreadPool*       pool       { nullptr };   // for Listener queues
     Dispatcher* dispatcher { nullptr };   // for Listener wiring
     BindingScope*     bindingScope { nullptr }; // active let-binding scope (ENC-647)
+
+    // ENC-1005 / SPEC specs/2026-09-20-gma-join-correctness D3, D4.
+    //
+    // THE REQUEST DAG's serializing executor. ONE per request — shared by every
+    // Listener the request builds, which is precisely what orders the two sides
+    // of a join against each other. `ClientSession::handleSubscribe` mints one
+    // per subscription; `buildForRequest` mints one when the caller did not, so
+    // the ordering guarantee is a property of the DAG rather than of the
+    // caller's discipline.
+    //
+    // PER-REQUEST, NOT PER-SYMBOL (D4). A per-symbol shard puts the two sides
+    // of a cross-symbol join on two shards with no ordering relation at all,
+    // which would make the 23 cross-streamKey `Aggregate` corpus requests
+    // permanently unfixable rather than merely broken. `Aggregate` and `Pack`
+    // hold pending state for the REQUEST, so the request is the unit.
+    //
+    // Sub-builds (`Let` bodies, fan-in inputs) copy `Deps` and MUST keep this
+    // pointer: two strands inside one DAG is two orderings, i.e. none.
+    std::shared_ptr<rt::Strand> strand;
   };
 
   // Result of buildForRequest – head plus the downstream chain.
