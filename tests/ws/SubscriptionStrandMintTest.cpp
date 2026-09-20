@@ -260,12 +260,19 @@ TEST(SubscriptionStrandMint, ProductionSubscribeMintsItsOwnStrandAtTheSessionSit
       << "` means tree::buildForRequest's backstop silently supplied one — "
          "which is ENC-1005's M7, and the production mint is gone.";
 
-  // ... and the DAG built on that strand is live.
+  // ... and the DAG built on that strand is live, and its values went THROUGH
+  // that strand. `tasksRun()` is the difference between "the DAG was handed
+  // this strand" and "the DAG is running on it": a Listener can hold a strand,
+  // answer `strand()` with it, and still deliver down the unordered pool path.
+  const auto ranBefore = strand->tasksRun();
   srv.dispatcher->notifyListeners("AAPL", "lastPrice", 101.25);
   const auto update = readUntilType(stream, "update", std::chrono::seconds(3));
   ASSERT_FALSE(update.empty())
       << "no 'update' frame — the origin assertion above would have been made "
          "about a DAG that delivers nothing";
+  EXPECT_GT(strand->tasksRun(), ranBefore)
+      << "the value was delivered, but NOT through the strand the session "
+         "minted — the Listener holds it and bypasses it";
 
   rapidjson::Document d;
   d.Parse(update.c_str());
@@ -412,6 +419,14 @@ TEST(SubscriptionStrandMint, APoollessExecutorRejectsTheSubscriptionAndBuildsNoD
   ASSERT_FALSE(d.HasParseError());
   ASSERT_TRUE(d.HasMember("where") && d["where"].IsString());
   EXPECT_STREQ(d["where"].GetString(), "build");
+  // The MESSAGE matters, not just that something rejected it: this test's job
+  // is to pin WHY test 3 has to live at the mint, and that reason is
+  // `buildForRequest`'s pool check (TreeBuilder.cpp) firing before anything is
+  // constructed. Any other build rejection would leave the claim unproven.
+  ASSERT_TRUE(d.HasMember("message") && d["message"].IsString());
+  EXPECT_NE(std::string(d["message"].GetString()).find("missing dispatcher/pool"),
+            std::string::npos)
+      << "rejected for a different reason: " << d["message"].GetString();
 
   EXPECT_TRUE(srv.dispatcher->listenersFor("AAPL", "lastPrice").empty())
       << "a rejected subscription left a Listener registered";
