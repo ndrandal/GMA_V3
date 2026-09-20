@@ -20,9 +20,50 @@
 #include <string_view>
 #include <unordered_map>
 
+#include "gma/rt/Strand.hpp"
+#include "gma/rt/ThreadPool.hpp"
 #include "gma/server/RequestKey.hpp"
 
 namespace gma {
+namespace server {
+
+// ENC-1338 / ENC-1005 / SPEC specs/2026-09-20-gma-join-correctness D3, D4.
+//
+// THE PRODUCTION SUBSCRIPTION-STRAND MINT. `ClientSession::handleSubscribe`
+// calls `mint()` once per subscription and puts the result in
+// `tree::Deps::strand`. It is D3's named mint site, the one every real
+// subscription goes through.
+//
+// It is a named type rather than two inline lines because those two lines could
+// be DELETED WITH A GREEN SUITE. ENC-1005 mutation-tested its own work ten ways
+// and published the two that reddened nothing — M7 (delete this mint) and M10
+// (drop its null-pool guard) — both because `tree::buildForRequest`'s backstop
+// quietly mints a replacement that no assertion could tell apart.
+//
+// THIS CLASS IS THE SOLE HOLDER OF `rt::Strand::Attribution`. That is what
+// makes the gate a gate rather than a convention: an attributed `Strand` can
+// only be constructed inside `mint()`, so a mint inlined at the call site —
+// guarded or not — cannot carry the tag and is caught by the origin assertion
+// in `tests/ws/SubscriptionStrandMintTest.cpp`. An earlier draft used a
+// file-local string literal for this and an adversarial review broke it in two
+// independent ways; see the comment on `rt::Strand::Attribution`.
+class SubscriptionStrandMint {
+public:
+  // Returns null when `pool` is null, and that is the guard M10 removes: with
+  // no executor there is nothing to serialise, delivery is already inline and
+  // already in order, and a pool-less Strand would additionally make the
+  // `Listener` answer `deliversOnOwnExecutor()` — so `Dispatcher` would go
+  // inline too and the entire DAG compute would run on the WebSocket read
+  // thread. The backstop has always had this guard; before ENC-1005 the
+  // production site did not.
+  static std::shared_ptr<gma::rt::Strand> mint(gma::rt::ThreadPool* pool);
+
+  // The `rt::Strand::origin()` tag `mint()` stamps. Compare against this rather
+  // than re-spelling the literal.
+  static const char* origin() noexcept;
+};
+
+} // namespace server
 
 class WebSocketServer;
 class ExecutionContext;

@@ -54,6 +54,24 @@ public:
                           const std::string& field,
                           std::shared_ptr<INode> listener);
 
+  // ENC-1338 — DIAGNOSTIC SNAPSHOT of the nodes currently registered on
+  // (symbol, field). Empty when nothing is registered there.
+  //
+  // Snapshot semantics, exactly like `notifyListeners`: the listener lock is
+  // held only while copying the `shared_ptr`s out, and the returned vector is
+  // a copy. It is NOT a synchronisation point and a registration may land or
+  // be torn down the instant it returns — do not build routing on it.
+  //
+  // It exists so the strand a DAG is really running on can be observed from
+  // OUTSIDE the DAG. `ClientSession::handleSubscribe` mints the request's
+  // strand and hands it to `buildForRequest`, which hands it to every
+  // `Listener` it builds and registers here; reading it back off a registered
+  // `Listener` is the only route from a live WebSocket subscription to the
+  // executor it was actually given. Used by
+  // `tests/ws/SubscriptionStrandMintTest.cpp`.
+  std::vector<std::shared_ptr<INode>> listenersFor(const std::string& symbol,
+                                                   const std::string& field) const;
+
   // Generic event ingress. Invokes every registered computer, then fans the
   // raw payload fields out to direct-field subscribers.
   //

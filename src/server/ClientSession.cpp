@@ -43,6 +43,34 @@ namespace websocket = boost::beast::websocket;
 namespace beast     = boost::beast;
 namespace http      = boost::beast::http;
 
+namespace server {
+namespace {
+// ENC-1338. The origin tag. Its containment is NOT what makes the gate work —
+// `rt::Strand::Attribution`'s private constructor is, and only
+// `SubscriptionStrandMint` is its friend. A string literal alone was the
+// earlier draft and an adversarial review broke it twice over; see the comment
+// on `rt::Strand::Attribution`. Static storage duration, as `Attribution`
+// requires.
+constexpr const char* kSubscriptionStrandOrigin =
+    "gma::ClientSession::handleSubscribe";
+} // namespace
+
+const char* SubscriptionStrandMint::origin() noexcept {
+  return kSubscriptionStrandOrigin;
+}
+
+// ENC-1338 / ENC-1005 / SPEC D3, D4. See the long comment in the header: this
+// is D3's named mint site, and the null-pool guard below is what ENC-1005's
+// M10 removes. Both are gated by `tests/ws/SubscriptionStrandMintTest.cpp`.
+std::shared_ptr<gma::rt::Strand>
+SubscriptionStrandMint::mint(gma::rt::ThreadPool* pool) {
+  if (!pool) return nullptr;          // <-- the guard M10 deletes
+  return std::make_shared<gma::rt::Strand>(
+      pool, gma::rt::Strand::Attribution(kSubscriptionStrandOrigin));
+}
+
+} // namespace server
+
 // ------------------------------
 // Construction / lifecycle
 // ------------------------------
@@ -737,8 +765,16 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     // `Dispatcher` would go inline too and the entire DAG compute would run
     // synchronously on the WebSocket read thread. The two mint sites are now
     // symmetric; the asymmetry was found by the ENC-1005 adversarial review.
-    if (deps.pool)
-      deps.strand = std::make_shared<gma::rt::Strand>(deps.pool);
+    //
+    // ENC-1338: the mint itself lives in `SubscriptionStrandMint::mint` and
+    // stamps the strand with this site's attribution, so BOTH halves of this
+    // line are gated. Deleting the call (ENC-1005's M7) makes the DAG's strand
+    // read `unattributed`, because the backstop minted it. Dropping the guard
+    // (M10) inside the mint reddens the mint's own test — and dropping it by
+    // INLINING a mint here does not compile, because `rt::Strand::Attribution`
+    // has a private constructor and `SubscriptionStrandMint` is its only
+    // friend. Before ENC-1338 neither mutation reddened a single test.
+    deps.strand = gma::server::SubscriptionStrandMint::mint(deps.pool);
 
     try {
       // Check subscription limit BEFORE building the pipeline to avoid
