@@ -579,12 +579,8 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   // Not minted when there is no pool: with no executor there is nothing to
   // serialise, delivery is already inline and already in order.
   Deps depsWithStrand = depsIn;
-  static std::weak_ptr<gma::rt::Strand> gShared;  // MUTATION M5
-  if (!depsWithStrand.strand && depsWithStrand.pool) {
-    auto sp = gShared.lock();
-    if (!sp) { sp = std::make_shared<gma::rt::Strand>(depsWithStrand.pool); gShared = sp; }
-    depsWithStrand.strand = sp;
-  }
+  if (!depsWithStrand.strand && depsWithStrand.pool)
+    depsWithStrand.strand = std::make_shared<gma::rt::Strand>(depsWithStrand.pool);
   const Deps& deps = depsWithStrand;   // everything below builds against this
 
   // ENC-1293 / SPEC specs/2026-09-20-gma-join-correctness D7 — TEMPORARY, and
