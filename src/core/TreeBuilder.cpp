@@ -21,6 +21,7 @@
 #include "gma/nodes/VectorReducer.hpp"
 #include "gma/nodes/Tee.hpp"
 #include "gma/nodes/InputPort.hpp"
+#include "gma/nodes/JoinBy.hpp"
 #include "gma/nodes/Pack.hpp"
 #include "gma/nodes/Field.hpp"
 #include "gma/nodes/Expr.hpp"
@@ -72,6 +73,48 @@ inline std::size_t sizeOr(const rapidjson::Value& v, const char* k, std::size_t 
 
 inline bool has(const rapidjson::Value& v, const char* k) {
   return v.HasMember(k);
+}
+
+// ENC-1292 / SPEC specs/2026-09-20-gma-join-correctness D1 + section 5 Q3
+// (RULED) and Q6 — READ THE DECLARED JOIN KEY OF A FAN-IN NODE.
+//
+// Deliberately NOT written as `strOr(v, "by", "streamKey")`, which is the shape
+// every other optional member here uses. `strOr` gates on `IsString()` and
+// silently falls back on anything else, and a silent fallback is precisely what
+// Q3 ruled against: `JsonValidator::validateTree` is an open-vocabulary walk
+// that never looks at a key, so `by:"streamkey"`, `by:"origin"` and `by:12`
+// would all reach this point, take the default, and return a plausible WRONG
+// NUMBER with no diagnostic in either repo. Every one of them is refused, by
+// name where the name matters. See include/gma/nodes/JoinBy.hpp.
+//
+// The empty-`outStreamKey` check is Q6's: a `by:"none"` join ignores the symbol
+// and therefore has no output identity unless it is given one.
+// `buildForRequest` already refuses an empty top-level `streamKey`, so this is
+// reachable only via `buildTree`/`buildNode` with no default — and it is
+// checked again in the node's own constructor.
+inline gma::JoinBy joinByFor(const rapidjson::Value& v,
+                             const char*             nodeType,
+                             const std::string&      outStreamKey) {
+  if (!v.HasMember("by")) return gma::JoinBy::StreamKey;   // D1's locked default
+
+  if (!v["by"].IsString())
+    throw std::runtime_error(
+      std::string(nodeType) + ": 'by' must be a string — \"streamKey\" "
+      "(default, correlate per symbol) or \"none\" (correlate by port alone, "
+      "the cross-symbol join)");
+
+  const gma::JoinBy by = gma::parseJoinBy(v["by"].GetString(), nodeType);
+
+  if (by == gma::JoinBy::None && outStreamKey.empty())
+    throw std::runtime_error(
+      std::string(nodeType) + ": by:\"none\" ignores the symbol, so the joined "
+      "stream has no identity of its own and must inherit the request's "
+      "top-level 'streamKey' — but none is in scope here. Build this node "
+      "through buildForRequest (which requires a non-empty 'streamKey'), or "
+      "use the default by:\"streamKey\" (SPEC "
+      "specs/2026-09-20-gma-join-correctness section 5 Q6).");
+
+  return by;
 }
 
 } // namespace
@@ -1006,7 +1049,19 @@ void registerBuiltinNodeTypes() {
           "position (SPEC specs/2026-09-20-gma-join-correctness D2), so "
           "'arity' is just the length of 'inputs' and cannot disagree with it.");
 
-      auto agg = std::make_shared<Aggregate>(arity, downstream);
+      // ENC-1292 / SPEC D1 — the declared correlation key. Validated with
+      // everything else, BEFORE anything is constructed (see the note at the
+      // top of this builder): a refused `by` must not leave a subscribed
+      // Listener behind.
+      const gma::JoinBy by = joinByFor(v, "Aggregate", defaultStreamKey);
+
+      // `defaultStreamKey` is the request's own top-level `streamKey` (or the
+      // group's symbol inside a GroupSplit, which is the same question asked
+      // one level down). It is the join's output identity under `by:"none"`
+      // and is ignored under the default — SPEC section 5 Q6 and
+      // include/gma/nodes/JoinBy.hpp.
+      auto agg = std::make_shared<Aggregate>(arity, downstream, by,
+                                             defaultStreamKey);
 
       // ENC-1291: a throw on input N must not strand inputs 0..N-1. See
       // SubBuildUnwind above.
@@ -1139,7 +1194,12 @@ void registerBuiltinNodeTypes() {
       for (auto it = fobj.MemberBegin(); it != fobj.MemberEnd(); ++it)
         names.push_back(it->name.GetString());
 
-      auto pack = std::make_shared<Pack>(names, downstream);
+      // ENC-1292 / SPEC D1 — same declared join key as Aggregate's, same
+      // closed vocabulary, same output identity rule under `by:"none"`.
+      const gma::JoinBy by = joinByFor(v, "Pack", defaultStreamKey);
+
+      auto pack = std::make_shared<Pack>(names, downstream, by,
+                                         defaultStreamKey);
 
       SubBuildUnwind unwind;          // ENC-1291, same hole as Aggregate's
       unwind.keep(pack);
