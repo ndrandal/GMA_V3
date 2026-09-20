@@ -422,12 +422,23 @@ TEST_F(ComposedChain, Corpus111PullOnlyJoinFiresForTheFirstTime) {
 // must go completely silent. Under the old two-chain wiring the `node` subtree
 // bypassed the pipeline entirely, so it kept emitting straight past the filter.
 //
-// Two runs per entry, and BOTH assertions matter:
-//   A. verbatim              -> at least one arrival   (the driver really
-//                               exercises this entry; without this, B passes
-//                               vacuously for a chain that was simply dead)
-//   B. + always-false Filter -> exactly zero arrivals  (the only path to the
-//                               terminal runs through the pipeline)
+// Two runs per entry:
+//   A. verbatim              -> did this entry emit anything at all? Without
+//                               this, B passes vacuously for a chain that was
+//                               simply dead.
+//   B. + always-false Filter -> exactly zero arrivals, FOR ALL 52. This is the
+//                               D5 property, and it is true of any correct
+//                               engine, now or later.
+//
+// A's floor is deliberately **29, not 52**, and that is not slack. 29 of the 52
+// are same-`streamKey` joins; the other 23 are cross-`streamKey` and emit today
+// ONLY because `Aggregate::buf_` is keyed on `sv.symbol` and counts values
+// rather than ports — SPEC §1.1 defects 2 and 3, i.e. the very thing ENC-1291
+// removes. The moment per-port arity is enforced those 23 emit nothing until
+// ENC-1292's `by:"none"` exists, so `EXPECT_EQ(silentA, 0)` here would be a
+// landmine planted in the path of the next two tickets in this project. 29 can
+// only go up as the join is fixed. The actual count is printed either way, so
+// a real regression is still visible in the message.
 TEST_F(ComposedChain, EveryNodePlusPipelineEntryReachesTheTerminalOnlyViaThePipeline) {
   rapidjson::Document& doc = corpusDoc();
   ASSERT_FALSE(doc.IsNull()) << "corpus_requests.json not found next to the test binary";
@@ -533,7 +544,14 @@ TEST_F(ComposedChain, EveryNodePlusPipelineEntryReachesTheTerminalOnlyViaThePipe
          "§5 Q1's classification); found " << seen
       << ". If the corpus changed size, re-run the classification before "
          "trusting anything below.";
-  EXPECT_EQ(silentA, 0) << silentA << " entr(ies) emitted nothing at all:" << detail;
+  EXPECT_GE(seen - silentA, 29)
+      << "only " << (seen - silentA) << " of " << seen
+      << " entries emitted anything at all, so run B is vacuous for the rest.\n"
+         "    At least the 29 same-streamKey joins must emit under any engine "
+         "that has a working join;\n"
+         "    the 23 cross-streamKey ones legitimately go silent once ENC-1291 "
+         "enforces per-port arity.\n"
+         "    Currently silent:" << detail;
   EXPECT_EQ(leakedB, 0)
       << leakedB << " of " << seen << " entries reach the terminal WITHOUT "
          "passing through the pipeline.\n"
