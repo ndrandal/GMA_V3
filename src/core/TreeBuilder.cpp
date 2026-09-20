@@ -506,10 +506,17 @@ void registerBuiltinNodeTypes() {
         throw std::runtime_error("Aggregate: 'inputs' must be an array");
 
       const auto& inputArr = v["inputs"];
+      // THROWAWAY PROTOTYPE (ENC-1289 falsification only — not for merge).
+      if (inputArr.Size() != arity)
+        throw std::runtime_error("Aggregate: 'arity' must equal inputs.size()");
       std::vector<std::shared_ptr<INode>> roots;
-      roots.reserve(inputArr.Size() + 1);
-      for (auto& it : inputArr.GetArray())
-        roots.push_back(tree::buildOne(it, defaultStreamKey, deps, agg));
+      roots.reserve(inputArr.Size() * 2 + 1);
+      std::size_t portIdx = 0;
+      for (auto& it : inputArr.GetArray()) {
+        auto port = std::make_shared<AggPort>(std::weak_ptr<Aggregate>(agg), portIdx++);
+        roots.push_back(port);
+        roots.push_back(tree::buildOne(it, defaultStreamKey, deps, port));
+      }
       if (roots.empty())
         throw std::runtime_error("Aggregate: empty 'inputs' array");
 
