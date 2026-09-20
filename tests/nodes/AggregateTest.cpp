@@ -190,16 +190,31 @@ TEST(AggregateTest, LastValueWinsWithinAnOpenTuple) {
 TEST(AggregateTest, SeparateSymbolsAreIndependentBuffers) {
     Join j = makeJoin(2);
 
+    // INTERLEAVED ON PURPOSE. Driving X to completion and then Y to completion
+    // does not test this at all: a single shared buffer produces the same four
+    // values in the same order, and the first draft of this test was green
+    // under exactly that mutation (ENC-1291 mutation M13, `buf_.find("")`).
+    // Interleaving makes the two readings diverge — with one buffer, Y's value
+    // on port 0 overwrites X's before X's port 1 arrives.
     feed(j, 0, "X", 1.0);
-    feed(j, 1, "X", 2.0);
-    feed(j, 0, "Y", 3.0);
-    feed(j, 1, "Y", 4.0);
+    feed(j, 0, "Y", 3.0);      // a DIFFERENT symbol, same port, X still open
+    feed(j, 1, "X", 2.0);      // completes X, and only X
 
-    ASSERT_EQ(j.parent->count.load(), 4);
+    ASSERT_EQ(j.parent->count.load(), 2)
+        << "expected exactly X's tuple; Y is still waiting on port 1";
     EXPECT_EQ(j.parent->received[0].symbol, "X");
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[0].value), 1.0)
+        << "X's port-0 value was overwritten by Y's — the two symbols are "
+           "sharing one buffer";
     EXPECT_EQ(j.parent->received[1].symbol, "X");
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[1].value), 2.0);
+
+    feed(j, 1, "Y", 4.0);      // now Y completes, from ITS OWN slots
+    ASSERT_EQ(j.parent->count.load(), 4);
     EXPECT_EQ(j.parent->received[2].symbol, "Y");
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[2].value), 3.0);
     EXPECT_EQ(j.parent->received[3].symbol, "Y");
+    EXPECT_DOUBLE_EQ(extractDouble(j.parent->received[3].value), 4.0);
 }
 
 TEST(AggregateTest, CrossSymbolPortsCompleteNothingUntilENC1292) {
