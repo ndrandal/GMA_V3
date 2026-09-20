@@ -756,8 +756,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
         // `node`, `midHead` starts at `terminal`, so the head Listener is this
         // stage's only upstream — the same wiring the fan-in gets under `node`.
         if (!hasNode && i == 0) continue;
-        throw std::runtime_error(
-          fanInPipelineStageMessage(type, k, static_cast<std::size_t>(i), hasNode));
+        (void)fanInPipelineStageMessage;  // MUTANT: refusal removed
       }
       break;                           // mirrors the build loop: first key wins
     }
