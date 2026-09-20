@@ -1,0 +1,404 @@
+// tests/integration/OrderedDeliveryTest.cpp
+//
+// ENC-1005 — SPEC specs/2026-09-20-gma-join-correctness D3, D4.
+// "Delivery is serialized per request DAG."
+//
+// `tests/treebuilder/CorpusTest.cpp`'s `Corpus86_SpreadIsExactlyTwoCents` is
+// the PRODUCT gate for this: it says the bid-ask spread of a real corpus entry
+// comes out at 0.02 under concurrency. It is a value assertion, so it can only
+// tell you that *something* about the join went wrong. These tests pin the
+// MECHANISM underneath it, one property per test, so a future regression names
+// itself:
+//
+//   1. `rt::Strand` really is a strand — FIFO, and never two tasks at once.
+//   2. One DAG's delivery is in production order, end to end, at 8 threads.
+//   3. The two sides of one tick reach the join in the order the Dispatcher
+//      produced them — the half that the strand alone does NOT buy, because
+//      that ordering is decided one hop UPSTREAM of it.
+//   4. The strand is per REQUEST, not per process: four DAGs still occupy four
+//      cores. This is the structural claim SPEC §5 Q2's ruling rests on, and
+//      it is the difference between "serialize a DAG" and "serialize the
+//      engine".
+//
+// Every one of these was mutation-tested: the defect each names was introduced
+// into the engine and each test was confirmed to go red, and the others to stay
+// green. The mutations and their results are in the ENC-1005 ticket.
+//
+// NOTHING IS STUBBED. Each test builds through the real `tree::buildForRequest`
+// from a real request object and drives values through the real
+// `Dispatcher::onTick`. The only substitution is the terminal, the parameter
+// `buildForRequest` already takes.
+
+#include <gtest/gtest.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <rapidjson/document.h>
+
+#include "gma/AtomicStore.hpp"
+#include "gma/Dispatcher.hpp"
+#include "gma/Event.hpp"
+#include "gma/StreamValue.hpp"
+#include "gma/TreeBuilder.hpp"
+#include "gma/rt/Strand.hpp"
+#include "gma/rt/ThreadPool.hpp"
+
+using namespace gma;
+
+namespace {
+
+// ─── A terminal that records GLOBAL arrival order ──────────────────────────
+//
+// Deliberately NOT the per-thread bucketing `CorpusTest`'s RecordingTerminal
+// does. That exists because without ordered delivery the arrival sequence is
+// only recoverable per thread. The whole claim under test here is that ONE
+// global sequence exists, so recording one is the assertion's precondition:
+// if delivery were still concurrent this vector would interleave and every
+// order assertion below would fail — which is exactly what it should do.
+class SequenceTerminal final : public INode {
+public:
+  void onValue(const StreamValue& sv) override {
+    // Track the maximum number of onValue calls in flight at once. For a
+    // strand-serialised DAG this must never exceed 1.
+    const int now = ++inFlight_;
+    int prev = maxInFlight_.load(std::memory_order_relaxed);
+    while (now > prev &&
+           !maxInFlight_.compare_exchange_weak(prev, now,
+                                               std::memory_order_relaxed)) {}
+    if (const double* d = std::get_if<double>(&sv.value)) {
+      std::lock_guard<std::mutex> lk(mx_);
+      seq_.push_back(*d);
+    } else {
+      ++nonNumeric_;
+    }
+    --inFlight_;
+  }
+  void shutdown() noexcept override {}
+
+  std::vector<double> sequence() const {
+    std::lock_guard<std::mutex> lk(mx_);
+    return seq_;
+  }
+  int  maxInFlight() const { return maxInFlight_.load(); }
+  std::size_t nonNumeric() const { return nonNumeric_.load(); }
+
+private:
+  mutable std::mutex  mx_;
+  std::vector<double> seq_;
+  std::atomic<int>    inFlight_{0};
+  std::atomic<int>    maxInFlight_{0};
+  std::atomic<std::size_t> nonNumeric_{0};
+};
+
+rapidjson::Document parse(const char* json) {
+  rapidjson::Document d;
+  d.Parse(json);
+  EXPECT_FALSE(d.HasParseError()) << "bad test JSON: " << json;
+  return d;
+}
+
+void tick(Dispatcher& d, const char* symbol,
+          std::initializer_list<std::pair<const char*, double>> fields) {
+  auto payload = std::make_shared<rapidjson::Document>();
+  payload->SetObject();
+  auto& al = payload->GetAllocator();
+  for (const auto& [name, value] : fields)
+    payload->AddMember(rapidjson::StringRef(name), value, al);
+  Event ev;
+  ev.symbol  = symbol;
+  ev.payload = payload;            // ev.type defaults to "tick", the production type
+  d.onTick(ev);
+}
+
+} // namespace
+
+// ═══ 1. `rt::Strand` is a strand ═══════════════════════════════════════════
+//
+// The primitive on its own, with no engine around it: tasks posted to one
+// strand run one at a time and in post order, while running on a shared pool's
+// worker threads. Posted from four threads at once so the "one at a time" claim
+// is exercised against real contention rather than against a single producer.
+//
+// Post order is only *defined* per producer thread, so each producer stamps its
+// own monotonically increasing counter and the test asserts each producer's
+// subsequence came out ascending. The mutual-exclusion claim is global and is
+// asserted globally.
+TEST(OrderedDelivery, StrandRunsOneTaskAtATimeInPostOrder) {
+  constexpr int kProducers = 4;
+  constexpr int kPerProducer = 2000;
+
+  rt::ThreadPool pool(8);
+  auto strand = std::make_shared<rt::Strand>(&pool);
+
+  std::atomic<int> inFlight{0};
+  std::atomic<int> maxInFlight{0};
+  std::mutex mx;
+  std::vector<std::pair<int, int>> ran;   // (producer, its counter)
+  ran.reserve(kProducers * kPerProducer);
+
+  std::vector<std::thread> producers;
+  for (int p = 0; p < kProducers; ++p) {
+    producers.emplace_back([&, p] {
+      for (int i = 0; i < kPerProducer; ++i) {
+        strand->post([&, p, i] {
+          const int now = ++inFlight;
+          int prev = maxInFlight.load(std::memory_order_relaxed);
+          while (now > prev &&
+                 !maxInFlight.compare_exchange_weak(prev, now,
+                                                    std::memory_order_relaxed)) {}
+          {
+            std::lock_guard<std::mutex> lk(mx);
+            ran.emplace_back(p, i);
+          }
+          --inFlight;
+        });
+      }
+    });
+  }
+  for (auto& t : producers) t.join();
+  pool.drain();
+
+  std::vector<std::pair<int, int>> got;
+  { std::lock_guard<std::mutex> lk(mx); got = ran; }
+
+  ASSERT_EQ(got.size(), std::size_t(kProducers * kPerProducer))
+      << "the strand dropped or duplicated work";
+  EXPECT_EQ(maxInFlight.load(), 1)
+      << "rt::Strand ran " << maxInFlight.load() << " tasks CONCURRENTLY. A "
+         "strand that does that is a queue, not a strand, and every ordering "
+         "guarantee above it is void.";
+
+  // Each producer's own posts must come out in the order that producer made
+  // them.
+  std::vector<int> nextExpected(kProducers, 0);
+  for (const auto& [p, i] : got) {
+    ASSERT_EQ(i, nextExpected[p])
+        << "producer " << p << "'s task " << i << " ran out of post order";
+    ++nextExpected[p];
+  }
+}
+
+// ═══ 2. One DAG delivers in production order, at 8 threads ═════════════════
+//
+// The simplest possible request — a bare `Listener` straight to the terminal,
+// no node, no pipeline — driven with 5,000 strictly increasing values from one
+// ingress thread. Every value must arrive, exactly once, in that order.
+//
+// This is D3 reduced to its smallest true statement, and it needs no join to
+// state it. Before ENC-1005 `Listener::onValue` posted each value to the shared
+// pool as an independent task, so at 8 workers this sequence came out shuffled.
+//
+// NOTE the `Deps` here sets NO strand. That is deliberate: it is the assertion
+// that `buildForRequest` mints one for a caller who did not, so ordered
+// delivery is a property of the DAG and not of the caller remembering.
+TEST(OrderedDelivery, OneDagDeliversEveryValueOnceInProductionOrder) {
+  constexpr std::size_t kTicks = 5000;
+
+  AtomicStore store;
+  auto pool = std::make_shared<rt::ThreadPool>(8);
+  auto prevPool = gThreadPool;
+  gThreadPool = pool;
+
+  Dispatcher dispatcher(pool.get(), &store);
+  tree::Deps deps;
+  deps.store      = &store;
+  deps.pool       = pool.get();
+  deps.dispatcher = &dispatcher;
+  // deps.strand deliberately left null — see the note above.
+
+  auto terminal = std::make_shared<SequenceTerminal>();
+  auto req = parse(R"({"streamKey":"AAPL","field":"px"})");
+  auto chain = tree::buildForRequest(req, deps, terminal);
+
+  for (std::size_t n = 0; n < kTicks; ++n)
+    tick(dispatcher, "AAPL", {{"px", double(n)}});
+  pool->drain();
+
+  const auto seq = terminal->sequence();
+
+  EXPECT_EQ(terminal->maxInFlight(), 1)
+      << "two values of ONE request DAG were in the terminal concurrently";
+  ASSERT_EQ(seq.size(), kTicks)
+      << "expected every tick to arrive exactly once";
+  for (std::size_t n = 0; n < kTicks; ++n) {
+    ASSERT_DOUBLE_EQ(seq[n], double(n))
+        << "value " << n << " of a single request DAG arrived out of order "
+           "(got " << seq[n] << "). Delivery is not serialized — see "
+           "tree::Deps::strand and Dispatcher::deliver.";
+  }
+
+  for (auto& nptr : chain.keepAlive) if (nptr) nptr->shutdown();
+  if (chain.head) chain.head->shutdown();
+  pool->shutdown();
+  gThreadPool = prevPool;
+}
+
+// ═══ 3. The two sides of ONE tick keep the Dispatcher's order ══════════════
+//
+// THIS IS THE HALF THE STRAND CANNOT BUY ON ITS OWN, and it is why ENC-1005
+// touches `Dispatcher` at all.
+//
+// `Dispatcher::onTick` walks its listener map for the symbol. The inner
+// container is a `std::map<field, …>`, so for a tick carrying both `ask` and
+// `bid` it produces `ask` first, deterministically. Posting each notification
+// as an independent pool task hands that order straight back to the scheduler:
+// at four workers both tasks run at once, each calls `Listener::onValue`, and
+// whichever wins reaches the strand first. The strand then faithfully preserves
+// an order that was already lost one hop upstream.
+//
+// So a strand-bearing Listener is called INLINE (`Dispatcher::deliver` /
+// `INode::deliversOnOwnExecutor`), and the assertion below is the gate on that.
+//
+// The shape is corpus 86's, written out here rather than read from the corpus
+// so this test states its own premise: `Aggregate(2)` over `ask` and `bid` of
+// one symbol forwards a completed batch member by member
+// (`src/nodes/Aggregate.cpp:39-45`), so the terminal must see exactly
+//     ask(0), bid(0), ask(1), bid(1), …
+// with no pair swapped and no pair straddling two ticks.
+TEST(OrderedDelivery, BothSidesOfOneTickReachTheJoinInDispatcherOrder) {
+  constexpr std::size_t kTicks = 2000;
+  constexpr double kBase = 1000.0;
+  constexpr double kSpread = 0.02;
+
+  AtomicStore store;
+  auto pool = std::make_shared<rt::ThreadPool>(4);
+  auto prevPool = gThreadPool;
+  gThreadPool = pool;
+
+  Dispatcher dispatcher(pool.get(), &store);
+  tree::Deps deps;
+  deps.store      = &store;
+  deps.pool       = pool.get();
+  deps.dispatcher = &dispatcher;
+
+  auto terminal = std::make_shared<SequenceTerminal>();
+  auto req = parse(R"({
+    "streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Aggregate","arity":2,"inputs":[
+      {"type":"Listener","streamKey":"AAPL","field":"ask"},
+      {"type":"Listener","streamKey":"AAPL","field":"bid"}]}
+  })");
+  auto chain = tree::buildForRequest(req, deps, terminal);
+
+  for (std::size_t n = 0; n < kTicks; ++n)
+    tick(dispatcher, "AAPL", {{"bid", kBase + double(n)},
+                              {"ask", kBase + double(n) + kSpread}});
+  pool->drain();
+
+  const auto seq = terminal->sequence();
+
+  EXPECT_EQ(terminal->maxInFlight(), 1);
+  ASSERT_EQ(seq.size(), kTicks * 2)
+      << "the join emitted " << seq.size() << " values for " << kTicks
+      << " two-input ticks; expected " << (kTicks * 2);
+  for (std::size_t n = 0; n < kTicks; ++n) {
+    ASSERT_DOUBLE_EQ(seq[2 * n], kBase + double(n) + kSpread)
+        << "position " << (2 * n) << " should be ask(" << n << "). The `ask`/"
+           "`bid` of one tick reached the join in the wrong order, or a pair "
+           "straddles two ticks.";
+    ASSERT_DOUBLE_EQ(seq[2 * n + 1], kBase + double(n))
+        << "position " << (2 * n + 1) << " should be bid(" << n << ").";
+  }
+
+  for (auto& nptr : chain.keepAlive) if (nptr) nptr->shutdown();
+  if (chain.head) chain.head->shutdown();
+  pool->shutdown();
+  gThreadPool = prevPool;
+}
+
+// ═══ 4. A strand is per REQUEST — four DAGs still occupy four cores ════════
+//
+// SPEC §5 Q2 rules the single-subscription regression acceptable, and the
+// reason it gives is structural: *"A strand is not a thread and does not reduce
+// the pool; N subscriptions still occupy up to N cores."* That is an assertion
+// about this code, so it is asserted here.
+//
+// Four independent requests are built — four `buildForRequest` calls, hence
+// four strands — and each one's terminal parks until all four have arrived.
+// If the four DAGs share one ordering (one process-wide strand, or a strand
+// minted per session rather than per subscription) the first terminal parks
+// forever and the others never arrive, so this test hangs to its own timeout
+// and fails. If they are genuinely independent it completes immediately.
+//
+// A DEADLINE, NOT A SLEEP. There is no "wait 200ms and hope": each terminal
+// spins on the shared counter until it reaches four or the deadline passes, so
+// the pass is proof of real overlap and the failure is bounded.
+TEST(OrderedDelivery, DistinctRequestsAreNotSerializedAgainstEachOther) {
+  constexpr int kDags = 4;
+
+  AtomicStore store;
+  auto pool = std::make_shared<rt::ThreadPool>(kDags * 2);
+  auto prevPool = gThreadPool;
+  gThreadPool = pool;
+
+  Dispatcher dispatcher(pool.get(), &store);
+
+  std::atomic<int> arrived{0};
+  std::atomic<bool> allOverlapped{false};
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+
+  class ParkingTerminal final : public INode {
+  public:
+    ParkingTerminal(std::atomic<int>& arrived, std::atomic<bool>& ok,
+                    std::chrono::steady_clock::time_point deadline, int target)
+      : arrived_(arrived), ok_(ok), deadline_(deadline), target_(target) {}
+    void onValue(const StreamValue&) override {
+      if (done_.exchange(true)) return;       // one park per DAG is enough
+      ++arrived_;
+      while (arrived_.load() < target_ &&
+             std::chrono::steady_clock::now() < deadline_) {
+        std::this_thread::yield();
+      }
+      if (arrived_.load() >= target_) ok_.store(true);
+    }
+    void shutdown() noexcept override {}
+  private:
+    std::atomic<int>&  arrived_;
+    std::atomic<bool>& ok_;
+    std::chrono::steady_clock::time_point deadline_;
+    int                target_;
+    std::atomic<bool>  done_{false};
+  };
+
+  std::vector<tree::BuiltChain> chains;
+  for (int i = 0; i < kDags; ++i) {
+    tree::Deps deps;                       // a fresh Deps per request: one
+    deps.store      = &store;              // strand each, which is exactly what
+    deps.pool       = pool.get();          // handleSubscribe does per
+    deps.dispatcher = &dispatcher;         // subscription.
+    auto terminal = std::make_shared<ParkingTerminal>(arrived, allOverlapped,
+                                                      deadline, kDags);
+    const std::string json =
+        std::string(R"({"streamKey":"SYM)") + char('A' + i) +
+        R"(","field":"px"})";
+    auto req = parse(json.c_str());
+    chains.push_back(tree::buildForRequest(req, deps, terminal));
+  }
+
+  for (int i = 0; i < kDags; ++i) {
+    const std::string sym = std::string("SYM") + char('A' + i);
+    tick(dispatcher, sym.c_str(), {{"px", 1.0}});
+  }
+  pool->drain();
+
+  EXPECT_TRUE(allOverlapped.load())
+      << "only " << arrived.load() << " of " << kDags << " request DAGs were "
+         "running at once. The strand is supposed to serialize ONE DAG, not "
+         "the engine: SPEC D3/D4 mint one per subscription, and SPEC §5 Q2's "
+         "ruling on the single-subscription regression rests on N "
+         "subscriptions still occupying N cores.";
+
+  for (auto& c : chains) {
+    for (auto& nptr : c.keepAlive) if (nptr) nptr->shutdown();
+    if (c.head) c.head->shutdown();
+  }
+  pool->shutdown();
+  gThreadPool = prevPool;
+}
