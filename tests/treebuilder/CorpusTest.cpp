@@ -851,15 +851,23 @@ TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents) {
 
 // ═══ 2c. ENC-1290 — the CONTROL on corpus 87's observation point ═══════════
 //
-// PASSES today, and must keep passing. NOT registered WILL_FAIL.
+// PASSES today, and must keep passing.
 //
-// Gate 3 below carries a `>= 900.0` filter and an assertion that the filter
-// dropped nothing. That assertion cannot gate anything from where it sits:
-// gate 3 is registered `WILL_FAIL TRUE`, so it is *required* to fail and ctest
-// reads a second failure inside it as the expected one. Injecting the exact
+// WHY IT EXISTS, IN THE PAST TENSE (ENC-1292). Gate 3 below carries a
+// `>= 900.0` filter and an assertion that the filter dropped nothing. While
+// gate 3 was registered `WILL_FAIL TRUE` that assertion could not gate
+// anything from where it sat: the case was *required* to fail, so ctest read a
+// second failure inside it as the expected one, and injecting the exact
 // regression it guards against (stop stripping the pipeline, so the terminal
-// sees `Worker{fn:"diff"}` output and the filter keeps 0 of 12 arrivals) leaves
+// sees `Worker{fn:"diff"}` output and the filter keeps 0 of 12 arrivals) left
 // `gma_enc1289_xfail_no_cross_symbol_join` reporting **Passed**.
+//
+// That registration is GONE — ENC-1292 cleared the gate and deleted the whole
+// expected-failure block from CMakeLists.txt — so gate 3's own assertions now
+// gate normally. This control is kept anyway, and it is not redundant: it
+// drives the entry BOTH ways from one corpus row, so it is the only thing that
+// measures the DEFAULT's zero against a driver it simultaneously proves is
+// live.
 //
 // Corpus 86 already has such a control (2a, and it is what caught D5 hollowing
 // out gate 2). Corpus 87 had none. This is it: the same drive as gate 3, with
