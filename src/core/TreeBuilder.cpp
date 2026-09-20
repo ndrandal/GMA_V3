@@ -626,6 +626,45 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   //
   // ORDER MATTERS AND IS NOW REVERSED: the pipeline is built first, from the
   // terminal backwards, so that the `node` subtree can be built INTO its head.
+  //
+  // A PARTIAL BUILD MUST NOT SURVIVE A THROW. `Dispatcher::_listeners` holds a
+  // `shared_ptr<INode>` per subscription and the ONLY thing that unregisters is
+  // `Listener::shutdown()` (`src/nodes/Listener.cpp`), so every Listener built
+  // before a later builder throws would stay subscribed for the life of the
+  // process, with nothing left holding a handle to shut it down. `Interval` and
+  // `BucketTime` likewise have a live thread by the time their builder returns.
+  //
+  // That leak is older than ENC-1290 — the previous order leaked on the mirror
+  // input (a good `node` followed by a bad pipeline stage) — but reversing the
+  // order moved the trigger onto the `node` subtree, which is the deeper and
+  // far more failure-prone one (`unknown node type`, `Aggregate: empty
+  // 'inputs'`, `Worker: unknown fn`, `Ref: unknown binding`, `Interval:
+  // positive 'ms' required`). It is reachable from untrusted client JSON:
+  // `ClientSession::handleSubscribe` catches the throw and replies
+  // `{"type":"error","where":"build"}`, so a client can drive it in a loop.
+  // Measured before this guard: 1000 rejected builds left 1000 subscriptions
+  // live and took `onTick` from 0.02 ms to 932 ms for 50 ticks, growing
+  // without bound.
+  //
+  // So everything constructed below is torn down on the way out unless the
+  // build reaches the end. This fixes BOTH orders, not just the new one.
+  struct Unwind {
+    std::vector<std::shared_ptr<gma::INode>>* alive;
+    std::shared_ptr<gma::INode>*              head;
+    bool                                      armed{true};
+    ~Unwind() {
+      if (!armed) return;
+      if (head && *head) (*head)->shutdown();
+      if (alive)
+        for (auto it = alive->rbegin(); it != alive->rend(); ++it)
+          if (*it) (*it)->shutdown();
+    }
+  };
+  std::shared_ptr<gma::INode> builtHead;
+  // `keepAlive[0]` is the caller's terminal — never ours to shut down.
+  std::vector<std::shared_ptr<gma::INode>> ours;
+  Unwind unwind{&ours, &builtHead};
+
   std::shared_ptr<gma::INode> midHead = terminal;
 
   // The pipeline, built tail-first. `midHead` stays `terminal` when absent.
@@ -640,6 +679,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
                            deps,
                            curDown);
         keepAlive.push_back(curDown);
+        ours.push_back(curDown);
       }
       midHead = curDown;
       break;
@@ -650,6 +690,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   if (rq.HasMember("node") && rq["node"].IsObject()) {
     midHead = buildOne(rq["node"], streamKey, deps, midHead);
     keepAlive.push_back(midHead);
+    ours.push_back(midHead);
   }
 
   if (!deps.dispatcher || !deps.pool)
@@ -674,7 +715,9 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
     throw std::runtime_error(headRes.error().message);
   }
   auto head = std::move(headRes.value());
+  builtHead = head;          // now owned by the unwind guard too
 
+  unwind.armed = false;      // the build succeeded; the caller owns it all
   BuiltChain out;
   out.head      = head;
   out.keepAlive = std::move(keepAlive);
