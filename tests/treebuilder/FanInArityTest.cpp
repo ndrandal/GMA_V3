@@ -364,6 +364,81 @@ TEST_F(FanInArity, NonIntegerArityIsRefusedForTheRightReason) {
   }
 }
 
+// ═══ 2b. A THROW INSIDE A FAN-IN'S INPUT LOOP STRANDS NOTHING ════════════════
+//
+// SPEC section 1.5's leak, in the one place `buildForRequest`'s `Unwind` guard
+// does not reach. That guard only ever receives the node `buildOne` RETURNS, so
+// anything built inside a sub-build that then throws is invisible to it — and a
+// fan-in builder is exactly that shape.
+//
+// MEASURED BEFORE THE FIX (ENC-1291 adversarial pass, on the committed tree):
+// 25 refused builds of the nested request below left **25 live
+// `Dispatcher` subscriptions**. They deliver nothing anyone can observe — their
+// downstream is a port that died with the rejected inner `Aggregate` — so no
+// value-watching test can see them, which is why this counts subscriptions.
+//
+// The path predates ENC-1291 (a bad node type inside `inputs` reaches it), but
+// ENC-1291 ADDED a throw site in that loop: the arity check fires for a NESTED
+// fan-in too. `SubBuildUnwind` in src/core/TreeBuilder.cpp is the fix, and it
+// covers `Aggregate`, `Pack` and `Let` because the hole is identical in each.
+TEST_F(FanInArity, NestedFanInThrowLeavesNothingSubscribed) {
+  // Each of these builds a real Listener for input 0, then throws on input 1.
+  const char* kReqs[] = {
+    // inner fan-in with a mismatching arity — the throw site ENC-1291 ADDED
+    R"({"key":1,"streamKey":"AAPL","field":"lastPrice",
+        "node":{"type":"Aggregate","arity":2,"inputs":[
+          {"type":"Listener","streamKey":"AAPL","field":"ask"},
+          {"type":"Aggregate","arity":3,"inputs":[
+            {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]}})",
+    // a bad node type in input position — pre-existing, same hole
+    R"({"key":1,"streamKey":"AAPL","field":"lastPrice",
+        "node":{"type":"Aggregate","arity":2,"inputs":[
+          {"type":"Listener","streamKey":"AAPL","field":"ask"},
+          {"type":"NoSuchNodeType"}]}})",
+    // and the same through a Pack, whose builder has the identical shape
+    R"({"key":1,"streamKey":"AAPL","field":"lastPrice",
+        "node":{"type":"Pack","fields":{
+          "a":{"type":"Listener","streamKey":"AAPL","field":"ask"},
+          "b":{"type":"NoSuchNodeType"}}},
+        "pipeline":[{"type":"Field","name":"a"}]})",
+  };
+
+  for (const char* req : kReqs) {
+    rapidjson::Document d;
+    d.Parse(req);
+    ASSERT_FALSE(d.HasParseError()) << req;
+
+    const std::size_t before = dispatcher_->subscriptionCount();
+
+    auto sink = std::make_shared<Sink>();
+    constexpr int kRejects = 25;
+    int rejected = 0;
+    for (int i = 0; i < kRejects; ++i) {
+      try {
+        auto chain = tree::buildForRequest(d, deps_, sink);
+        for (auto& n : chain.keepAlive) if (n) n->shutdown();
+        if (chain.head) chain.head->shutdown();
+      } catch (const std::exception&) { ++rejected; }
+    }
+    ASSERT_EQ(rejected, kRejects)
+        << "this request must be REFUSED for the test to mean anything: " << req;
+
+    EXPECT_EQ(dispatcher_->subscriptionCount(), before)
+        << (dispatcher_->subscriptionCount() - before) << " subscription(s) "
+           "survived " << kRejects << " REFUSED builds of:\n    " << req
+        << "\n\n    A fan-in builder loops over its declared inputs calling "
+           "`buildOne`. A throw on input N\n"
+           "    must tear down inputs 0..N-1, because each already-built "
+           "`Listener` registered with the\n"
+           "    Dispatcher as it was constructed and only "
+           "`Listener::shutdown()` ever unregisters.\n"
+           "    `buildForRequest`'s own `Unwind` guard cannot see them: it "
+           "receives only the node\n"
+           "    `buildOne` RETURNS, and `buildOne` threw. See `SubBuildUnwind` "
+           "in src/core/TreeBuilder.cpp.";
+  }
+}
+
 // ═══ 3. What the check costs the checked-in corpus ═══════════════════════════
 
 TEST_F(FanInArity, EveryCorpusAggregateDeclaresArityEqualToItsInputCount) {
