@@ -512,3 +512,37 @@ TEST(OrderedDelivery, ACallerSuppliedStrandIsUsedNotReplaced) {
   pool->shutdown();
   gThreadPool = prevPool;
 }
+
+// ═══ 6. A stopping pool must not wedge a strand ════════════════════════════
+//
+// Found by the ENC-1005 adversarial review, and it is the failure mode a strand
+// is worst at having: silent and permanent.
+//
+// `ThreadPool::post` drops a task when the pool is stopping. `Strand::post`
+// sets its single-drainer token BEFORE it kicks the pool, and only `drain()`
+// clears it — so a dropped kick left the token set forever. Every later post
+// then took the "a drainer is already live" early return and appended to a
+// queue no drainer would ever visit. Measured before the fix: six tasks queued,
+// one ran, zero progress, and the queued closures pinned the whole DAG alive.
+//
+// `ThreadPool::post` now reports the drop and `Strand::post` drains inline when
+// the pool refuses. The assertion is that the work RUNS — in order — rather
+// than that it is merely not lost.
+TEST(OrderedDelivery, StrandDeliversEvenWhenThePoolIsAlreadyStopping) {
+  rt::ThreadPool pool(2);
+  pool.shutdown();                       // pool is now permanently stopping
+
+  auto strand = std::make_shared<rt::Strand>(&pool);
+
+  std::vector<int> ran;
+  for (int i = 0; i < 6; ++i)
+    strand->post([&ran, i] { ran.push_back(i); });
+
+  EXPECT_EQ(strand->queueDepth(), 0u)
+      << "the strand is wedged: " << strand->queueDepth() << " task(s) queued "
+         "with no drainer that will ever come. `running_` was left set by a "
+         "kick the stopping pool dropped.";
+  ASSERT_EQ(ran.size(), 6u) << "tasks were silently lost, not just delayed";
+  for (int i = 0; i < 6; ++i)
+    EXPECT_EQ(ran[std::size_t(i)], i) << "inline draining must still be in order";
+}
