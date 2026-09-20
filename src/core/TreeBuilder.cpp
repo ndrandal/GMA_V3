@@ -153,6 +153,7 @@ ValueShape shapeInto(const rapidjson::Value& spec,
 
   // The only node that CONSTRUCTS a Record (src/nodes/Pack.cpp).
   if (type == "Pack") return record("Pack");
+  if (type == "Field" || type == "Expr" || type == "Worker") return record("OVERBROAD");
 
   // Pass-through: forwards the value it received, unchanged
   // (src/nodes/Filter.cpp `ds->onValue(sv)`).
