@@ -268,11 +268,12 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
 // the thread count is unchanged.
 //
 // ───────────────────────────────────────────────────────────────────────────
-// THREE OF THESE FAIL TODAY, ON PURPOSE, AND `ctest` IS STILL GREEN
+// SOME OF THESE FAIL TODAY, ON PURPOSE, AND `ctest` IS STILL GREEN
 //
 // SPEC D8: "an instrument that cannot fail is not a gate. This is sequenced
-// first deliberately." So three of the four assertions below are red against
-// this engine and are MEANT to be.
+// first deliberately." So three of the four assertions below were red against
+// the engine at ENC-1289 and were MEANT to be. One still is; the bookkeeping
+// of which is at the foot of this block.
 //
 // They are not disabled, skipped or commented out. Each is registered in
 // CMakeLists.txt as its own ctest case with `WILL_FAIL TRUE`: the assertion
@@ -288,11 +289,9 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
 // the marker. A disabled test rots silently; this one demands attention
 // exactly once, at the moment it becomes wrong.
 //
-//   Corpus86_JoinMustNotCompleteFromOneInputAlone  -> ENC-1291 (port-indexed
-//                                                     fan-in + arity, D2)
 //   Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself
-//                                                  -> ENC-1291, and ENC-1292
-//                                                     (declared `by`, D1)
+//                                                  -> ENC-1292 (declared `by`,
+//                                                     D1)
 //
 // TWO, not three, as of ENC-1005 (2026-09-20). `Corpus86_SpreadIsExactlyTwoCents`
 // was the third; SPEC D3's per-request strand landed, it went green, its
@@ -300,6 +299,24 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
 // `gma_enc1289_expected_failures_really_failed` went from 3 to 2. It now runs
 // inside the main `gma_tests` case. This paragraph unwinding itself one line at
 // a time is the mechanism working as designed.
+//
+// ONE, not two, as of ENC-1291 (2026-09-20). SPEC D2's port-indexed fan-in
+// landed and `Corpus86_JoinMustNotCompleteFromOneInputAlone` went green; its
+// block is gone and the pinned count is 1.
+//
+// **AND THE SURVIVOR DID NOT STAY RED BY ITSELF — READ THIS BEFORE TRUSTING
+// IT.** ENC-1289's own prototype measurement four screens above predicted
+// `Corpus87_...` would go RED -> GREEN under port-indexing alone, and it did.
+// It went green VACUOUSLY: port-indexing puts AAPL and MSFT in two different
+// `buf_[sv.symbol]` entries which each stay half-filled forever, so the join
+// emits NOTHING, `joined` is empty, the same-side loop never runs and
+// `sameSide == 0` holds over zero tuples. That is D1's locked `by:"streamKey"`
+// default behaving correctly and the cross-symbol join still not existing —
+// the branch ENC-1289 flagged as "honest but weak". ENC-1291 therefore added
+// an explicit anti-vacuity ASSERT to that test (see the block above it) so it
+// is red for the real reason instead of green for a hollow one. The marker
+// stays; ENC-1292 clears it by making the join actually emit six mixed tuples
+// under `by:"none"`.
 //
 // `Corpus86_SpreadIsExactlyTwoCents_SingleThreadControl` is deliberately NOT
 // registered that way. It is an ordinary always-green test — inverting it
@@ -615,15 +632,21 @@ constexpr std::size_t kRaceReps    = 4;     // 4000 tuples; see the budget note 
 // is 0.02. That is SPEC §0's headline number, reproduced here with no race,
 // no repetition and no thread-count dependence.
 //
-// Turns green with ENC-1291 (port-indexed fan-in + arity enforcement, D2).
+// GREEN as of ENC-1291 (port-indexed fan-in + arity enforcement, SPEC D2),
+// 2026-09-20. Each declared input now terminates in its own `InputPort` and the
+// join completes only when every port has contributed, so eight `ask` values
+// with no `bid` complete nothing. The `WILL_FAIL` registration and the marker
+// in `GMA_ENC1289_EXPECTED_FAILURES` were removed in that same commit, and the
+// count pinned by `gma_enc1289_expected_failures_really_failed` went 2 -> 1.
+// The assertion itself is untouched.
 //
-// +-- EXPECTED TO FAIL ----------------------------------------------------+
-// | Registered in CMakeLists.txt as ctest case                             |
-// |   gma_enc1289_xfail_join_counts_values_not_inputs   WILL_FAIL TRUE     |
-// | WHEN ENC-1291 MAKES THIS PASS, that ctest case goes RED. Delete its    |
-// | add_test/set_tests_properties block and drop this test's name from the |
-// | GMA_ENC1289_EXPECTED_FAILURES list. Do not touch the assertion.        |
-// +------------------------------------------------------------------------+
+// IT IS NOT VACUOUS, and the thing that proves it is a SIBLING test rather than
+// anything in here: `Corpus86_SpreadIsExactlyTwoCents` and its
+// `_SingleThreadControl` twin drive the SAME corpus entry through the SAME
+// driver with BOTH sides ticking, and assert that the join emits tuples and
+// that every one of them is {ask(n), bid(n)}. So "0 arrivals" below cannot be
+// the driver, the terminal or the corpus entry being inert — it is the missing
+// `bid` and nothing else. Break the driver and those two go red, loudly.
 TEST(CorpusValueAssertions, Corpus86_JoinMustNotCompleteFromOneInputAlone) {
   using namespace corpus_values;
 
@@ -651,12 +674,15 @@ TEST(CorpusValueAssertions, Corpus86_JoinMustNotCompleteFromOneInputAlone) {
          "    It saw " << d.arrivals << ", forming " << r.tuples << " \"tuple(s)\", "
       << r.wrong << " of them wrong (" << r.sameSide << " same-side):"
       << r.examples
-      << "\n\n    Cause: src/nodes/Aggregate.cpp:30-32 buffers per `sv.symbol` with no "
-         "input index and\n"
-         "    fires on `vals.size() >= arity_` — it counts VALUES, not distinct "
-         "INPUTS.\n"
-         "    Expected green after ENC-1291 (port-indexed fan-in + arity "
-         "enforcement, SPEC D2).";
+      << "\n\n    This was RED until ENC-1291: `Aggregate` buffered a flat vector per "
+         "`sv.symbol` with no\n"
+         "    input index and fired on `vals.size() >= arity_` — counting VALUES, "
+         "not distinct INPUTS.\n"
+         "    A failure here now is a REGRESSION of SPEC D2: check that "
+         "`TreeBuilder`'s Aggregate builder\n"
+         "    still gives each declared input its own `InputPort`, and that "
+         "`Aggregate::onPortValue`\n"
+         "    still requires every slot filled before it emits.";
 
   EXPECT_EQ(r.oddRuns, 0u)
       << "per-thread arrival run had odd length — tuple recovery is unsound here";
