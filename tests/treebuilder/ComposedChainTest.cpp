@@ -1285,10 +1285,11 @@ TEST_F(ComposedChain, PackAtPipelineZeroWithNoNodeIsNotAPlacementError) {
 // 0 of 272. The measurement, as a test rather than a note: if a future corpus
 // edit ever authors the shape, this NAMES the entries instead of leaving them
 // to be discovered a month later. It is also the instrument that proves the
-// green is a measurement and not a vacuum — widen `isFanInType` to include
-// "Worker" and this fails naming 63 corpus ids (86-115, 146-170, 178, 181, 185,
-// 192, 195, 197, 198, 200), because `Worker` is the corpus's ONLY pipeline
-// stage type, 104 uses of it.
+// green is a measurement and not a vacuum. Measured: widen `isFanInType` to
+// include "Worker" and this fails naming **69 refused requests across 63
+// distinct corpus_ids** (86-115, 146-170, 178, 181, 185, 192, 195, 197, 198,
+// 200 — some ids carry more than one request key), because `Worker` is the
+// corpus's ONLY pipeline stage type at all, 104 uses of it.
 TEST_F(ComposedChain, NoCheckedInCorpusRequestIsRefusedForFanInPlacement) {
   rapidjson::Document& doc = corpusDoc();
   ASSERT_FALSE(doc.IsNull()) << "corpus_requests.json not found next to the "
@@ -1316,6 +1317,54 @@ TEST_F(ComposedChain, NoCheckedInCorpusRequestIsRefusedForFanInPlacement) {
   EXPECT_TRUE(refused.empty())
       << "the ENC-1336 placement rule refused " << refused.size()
       << " checked-in corpus request(s); it must refuse none:" << detail;
+}
+
+// forum's flagship graph, and the reason the accept half must not be widened.
+// `pipelinetranslate.Translate()` turns the ENC-672 "RSI overbought" node graph
+// (Listener -> Pack -> Filter -> Field -> Responder) into EXACTLY the request
+// below — a `Pack` at pipeline[0] with no `node`. Measured by running forum's
+// own translator, not copied from a doc. If ENC-1336's placement rule were one
+// condition broader, this would stop building, and nothing in GMA's corpus
+// would have said so.
+//
+// The other two graphs the same translator can emit —
+// `pipeline:[Filter, Pack, Field]` and `node:Aggregate + pipeline:[Pack, ...]`
+// — ARE refused, deliberately. At `b273278` both emitted a sequence identical
+// to the same request with the upstream stage deleted, which is the silent
+// discard this rule exists to convert into an error.
+TEST_F(ComposedChain, ForumsRsiOverboughtDemoShapeStillBuildsAndEmits) {
+  const char* kRequest = R"({
+    "key":42,"streamKey":"NEXO","field":"lastPrice",
+    "pipeline":[
+      {"type":"Pack","fields":{
+        "rsi":{"type":"Listener","streamKey":"NEXO","field":"rsi_14"},
+        "price":{"type":"Listener","streamKey":"NEXO","field":"lastPrice"}}},
+      {"type":"Filter","when":{"op":"gt","args":[{"ref":"rsi"},70]}},
+      {"type":"Field","name":"price"}]
+  })";
+  rapidjson::Document d;
+  d.Parse(kRequest);
+  ASSERT_FALSE(d.HasParseError());
+
+  auto sink = std::make_shared<Sink>();
+  tree::BuiltChain chain;
+  ASSERT_NO_THROW(chain = tree::buildForRequest(d, deps_, sink))
+      << "forum's ENC-672 demo request must still build: a fan-in at "
+         "pipeline[0] with no `node` is the ACCEPTED placement";
+
+  for (int n = 0; n < 3; ++n)
+    tick("NEXO", {{"lastPrice", 100.0 + n}, {"rsi_14", 71.0 + n}});
+  pool_->drain();
+
+  const auto vals = sink->values();
+  EXPECT_FALSE(vals.empty())
+      << "it must EMIT, not merely build — build success alone is the weakness "
+         "ENC-1289 spent a ticket removing";
+  for (double v : vals)
+    EXPECT_GE(v, 100.0) << "expected projected prices; got " << render(vals);
+
+  if (chain.head) chain.head->shutdown();
+  for (auto& n : chain.keepAlive) if (n) n->shutdown();
 }
 
 } // namespace
