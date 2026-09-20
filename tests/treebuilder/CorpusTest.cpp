@@ -232,6 +232,10 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
 //       lowest rate observed here the chance of a clean pass is (1-0.0362)^4000
 //       ~ 1e-64; at the probe's all-time minimum single-run rate (1.70%) it is
 //       ~1e-30.
+//       ENC-1005 (2026-09-20): GREEN 40/40 after the per-request strand —
+//       160,000 further tuples at threads=4, 0 wrong. The rates above are what
+//       the same binary measured the day before, and are what makes the green
+//       mean something.
 //   Corpus86_SpreadIsExactlyTwoCents_SingleThreadControl
 //                                                   green 40/40 runs
 //       = 40,000 further single-threaded tuples, 0 wrong.
@@ -254,6 +258,14 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
 //   + ordered delivery (a prototype of ENC-1005/D3: both ThreadPool hops made
 //       synchronous)
 //         -> all four GREEN at threads=4.
+//
+// ENC-1005 SHIPPED ordered delivery and it flipped EXACTLY ONE of the three, as
+// the line above predicts for the ordering defect alone: SpreadIsExactlyTwoCents
+// RED -> GREEN, and the two state-machine gates (defects 2 and 3, both driven at
+// threads=1) unmoved. The shipped form is not "both hops synchronous": hop one
+// (Dispatcher -> Listener) is inline, hop two (Listener -> the DAG) is a
+// per-request `rt::Strand`, so the compute is still off the ingress thread and
+// the thread count is unchanged.
 //
 // ───────────────────────────────────────────────────────────────────────────
 // THREE OF THESE FAIL TODAY, ON PURPOSE, AND `ctest` IS STILL GREEN
@@ -278,11 +290,16 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
 //
 //   Corpus86_JoinMustNotCompleteFromOneInputAlone  -> ENC-1291 (port-indexed
 //                                                     fan-in + arity, D2)
-//   Corpus86_SpreadIsExactlyTwoCents               -> ENC-1005 (per-request
-//                                                     strand, D3/D4)
 //   Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself
 //                                                  -> ENC-1291, and ENC-1292
 //                                                     (declared `by`, D1)
+//
+// TWO, not three, as of ENC-1005 (2026-09-20). `Corpus86_SpreadIsExactlyTwoCents`
+// was the third; SPEC D3's per-request strand landed, it went green, its
+// `WILL_FAIL` block was deleted and the count pinned by
+// `gma_enc1289_expected_failures_really_failed` went from 3 to 2. It now runs
+// inside the main `gma_tests` case. This paragraph unwinding itself one line at
+// a time is the mechanism working as designed.
 //
 // `Corpus86_SpreadIsExactlyTwoCents_SingleThreadControl` is deliberately NOT
 // registered that way. It is an ordinary always-green test — inverting it
