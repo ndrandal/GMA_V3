@@ -369,7 +369,7 @@ if (GMA_BUILD_TESTS)
   #
   # `tests/treebuilder/CorpusTest.cpp` gained real value assertions against
   # corpus entries 86 and 87 (SPEC specs/2026-09-20-gma-join-correctness D8).
-  # Three of them are red on `master` by design — an instrument that cannot
+  # They are red on `master` by design — an instrument that cannot
   # fail is not a gate — but leaving `ctest` red turns "is the build green?"
   # into a question every other session has to re-investigate, and the answer
   # decays to "ignore those three" within a day.
@@ -426,7 +426,7 @@ if (GMA_BUILD_TESTS)
   set_tests_properties(gma_enc1289_xfail_no_cross_symbol_join
     PROPERTIES WILL_FAIL TRUE)
 
-  # The guard on the three above. WILL_FAIL would read a segfault or an aborted
+  # The guard on the gate(s) above. WILL_FAIL would read a segfault or an aborted
   # process as "expected failure"; this case is NOT inverted and passes only on
   # gtest's own end-of-run summary, which a dying process never reaches. It also
   # pins the COUNT, so an expected failure that silently starts passing while
@@ -443,7 +443,7 @@ if (GMA_BUILD_TESTS)
     COMMAND gma_tests "--gtest_filter=${GMA_ENC1289_EXPECTED_FAILURES_FILTER}"
     WORKING_DIRECTORY "$<TARGET_FILE_DIR:gma_tests>")
   set_tests_properties(gma_enc1289_expected_failures_really_failed
-    PROPERTIES PASS_REGULAR_EXPRESSION "1 FAILED TEST")
+    PROPERTIES PASS_REGULAR_EXPRESSION "[^0-9]1 FAILED TEST")
 
   # ENC-1006: an occupied wsPort/feedPort must produce a clean non-zero exit,
   # not std::terminate. This drives the real gma_server binary, so it lives as
