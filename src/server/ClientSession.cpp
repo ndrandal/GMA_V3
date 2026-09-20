@@ -770,7 +770,7 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     // (M10), in the helper or by inlining a mint here, is caught by the helper's
     // own test or by the same origin assertion. Before ENC-1338 neither
     // mutation reddened a single test. Do not inline this back.
-    deps.strand = std::make_shared<gma::rt::Strand>(deps.pool); // M10b
+    // M7: mint deleted
 
     try {
       // Check subscription limit BEFORE building the pipeline to avoid
