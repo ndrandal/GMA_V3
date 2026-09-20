@@ -62,8 +62,7 @@ const char* subscriptionStrandOrigin() noexcept {
 // is D3's named mint site, and the null-pool guard below is what ENC-1005's
 // M10 removes. Both are gated by `tests/ws/SubscriptionStrandMintTest.cpp`.
 std::shared_ptr<gma::rt::Strand> mintSubscriptionStrand(gma::rt::ThreadPool* pool) {
-  if (!pool) return nullptr;          // <-- the guard M10 deletes
-  return std::make_shared<gma::rt::Strand>(pool, kSubscriptionStrandOrigin);
+  (void)pool; return nullptr;   // M7b: the helper mints nothing
 }
 
 } // namespace server
@@ -770,7 +769,7 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     // (M10), in the helper or by inlining a mint here, is caught by the helper's
     // own test or by the same origin assertion. Before ENC-1338 neither
     // mutation reddened a single test. Do not inline this back.
-    // M7: mint deleted
+    deps.strand = gma::server::mintSubscriptionStrand(deps.pool);
 
     try {
       // Check subscription limit BEFORE building the pipeline to avoid
