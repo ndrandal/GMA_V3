@@ -5,13 +5,23 @@
 #include "gma/AtomicStore.hpp"
 #include "gma/nodes/INode.hpp"
 #include "gma/nodes/Listener.hpp"
+#include "gma/Event.hpp"
+#include "gma/StreamValue.hpp"
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
 #include <rapidjson/istreamwrapper.h>
+#include <cmath>
 #include <fstream>
-#include <memory>
-#include <string>
+#include <functional>
+#include <iomanip>
 #include <iostream>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
 
 using namespace gma;
 
@@ -221,17 +231,6 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
 //                                                  -> ENC-1291, and ENC-1292
 //                                                     (declared `by`, D1)
 // ═══════════════════════════════════════════════════════════════════════════
-
-#include "gma/Event.hpp"
-#include "gma/StreamValue.hpp"
-
-#include <cmath>
-#include <functional>
-#include <map>
-#include <mutex>
-#include <sstream>
-#include <thread>
-#include <vector>
 
 namespace corpus_values {
 
