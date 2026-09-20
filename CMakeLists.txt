@@ -361,9 +361,85 @@ if (GMA_BUILD_TESTS)
       "$<TARGET_FILE_DIR:gma_tests>/corpus_requests.json"
     COMMENT "Copying corpus_requests.json next to gma_tests")
 
+  # ─── ENC-1289: three assertions that are EXPECTED TO FAIL until the join is
+  # fixed, registered so `ctest` stays green while they stay live.
+  #
+  # `tests/treebuilder/CorpusTest.cpp` gained real value assertions against
+  # corpus entries 86 and 87 (SPEC specs/2026-09-20-gma-join-correctness D8).
+  # Three of them are red on `master` by design — an instrument that cannot
+  # fail is not a gate — but leaving `ctest` red turns "is the build green?"
+  # into a question every other session has to re-investigate, and the answer
+  # decays to "ignore those three" within a day.
+  #
+  # So each is registered as its own ctest case with WILL_FAIL TRUE: the
+  # assertion still executes on every run, ctest reports it as a pass *because*
+  # it fails, and the moment the corresponding fix lands the test starts
+  # passing, WILL_FAIL flips the ctest case RED, and whoever landed the fix must
+  # come here and delete its block. It unwinds itself; a DISABLED_ test would
+  # have rotted silently instead.
+  #
+  # WHOEVER LANDS ENC-1291 / ENC-1005: delete the matching add_test block below
+  # AND its name from the gma_tests exclusion filter. All of this goes away
+  # together, including gma_enc1289_expected_failures_really_failed.
+  #
+  # NOTE on the WILL_FAIL hole: WILL_FAIL cannot tell a real assertion failure
+  # from a crash or a missing corpus file — both exit non-zero and both would
+  # read as "expected". Two things close it. A missing corpus is caught by
+  # AllCorpusRequestsBuild, which FAIL()s and is NOT inverted. A crash is caught
+  # by gma_enc1289_expected_failures_really_failed below, which requires gtest's
+  # own end-of-run summary line — a process that dies never prints it.
+  #
+  # NOTE on the exclusion filter: the ENC-1065 `--gtest_repeat` check must still
+  # be run against the RAW, UNFILTERED binary (`./gma_tests --gtest_repeat=N`),
+  # not through this ctest entry.
+  set(GMA_ENC1289_EXPECTED_FAILURES
+    "CorpusValueAssertions.Corpus86_JoinMustNotCompleteFromOneInputAlone"
+    "CorpusValueAssertions.Corpus86_SpreadIsExactlyTwoCents"
+    "CorpusValueAssertions.Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself")
+  string(JOIN ":" GMA_ENC1289_EXPECTED_FAILURES_FILTER
+         ${GMA_ENC1289_EXPECTED_FAILURES})
+
   add_test(NAME gma_tests
-    COMMAND gma_tests
+    COMMAND gma_tests "--gtest_filter=-${GMA_ENC1289_EXPECTED_FAILURES_FILTER}"
     WORKING_DIRECTORY "$<TARGET_FILE_DIR:gma_tests>")
+
+  # ENC-1291 (SPEC D2 — port-indexed fan-in + arity enforcement) makes this
+  # pass. When it does, DELETE THIS BLOCK.
+  add_test(NAME gma_enc1289_xfail_join_counts_values_not_inputs
+    COMMAND gma_tests
+            "--gtest_filter=CorpusValueAssertions.Corpus86_JoinMustNotCompleteFromOneInputAlone"
+    WORKING_DIRECTORY "$<TARGET_FILE_DIR:gma_tests>")
+  set_tests_properties(gma_enc1289_xfail_join_counts_values_not_inputs
+    PROPERTIES WILL_FAIL TRUE)
+
+  # ENC-1005 (SPEC D3/D4 — serialize delivery per request DAG) makes this pass.
+  # When it does, DELETE THIS BLOCK.
+  add_test(NAME gma_enc1289_xfail_spread_is_not_two_cents_under_concurrency
+    COMMAND gma_tests
+            "--gtest_filter=CorpusValueAssertions.Corpus86_SpreadIsExactlyTwoCents"
+    WORKING_DIRECTORY "$<TARGET_FILE_DIR:gma_tests>")
+  set_tests_properties(gma_enc1289_xfail_spread_is_not_two_cents_under_concurrency
+    PROPERTIES WILL_FAIL TRUE)
+
+  # ENC-1291 (SPEC D2) makes this pass; ENC-1292 (SPEC D1, declared `by`) should
+  # then strengthen the assertion itself. When it passes, DELETE THIS BLOCK.
+  add_test(NAME gma_enc1289_xfail_no_cross_symbol_join
+    COMMAND gma_tests
+            "--gtest_filter=CorpusValueAssertions.Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself"
+    WORKING_DIRECTORY "$<TARGET_FILE_DIR:gma_tests>")
+  set_tests_properties(gma_enc1289_xfail_no_cross_symbol_join
+    PROPERTIES WILL_FAIL TRUE)
+
+  # The guard on the three above. WILL_FAIL would read a segfault or an aborted
+  # process as "expected failure"; this case is NOT inverted and passes only on
+  # gtest's own end-of-run summary, which a dying process never reaches. It also
+  # pins the COUNT, so an expected failure that silently starts passing while
+  # another starts failing cannot cancel out.
+  add_test(NAME gma_enc1289_expected_failures_really_failed
+    COMMAND gma_tests "--gtest_filter=${GMA_ENC1289_EXPECTED_FAILURES_FILTER}"
+    WORKING_DIRECTORY "$<TARGET_FILE_DIR:gma_tests>")
+  set_tests_properties(gma_enc1289_expected_failures_really_failed
+    PROPERTIES PASS_REGULAR_EXPRESSION "3 FAILED TESTS")
 
   # ENC-1006: an occupied wsPort/feedPort must produce a clean non-zero exit,
   # not std::terminate. This drives the real gma_server binary, so it lives as
