@@ -729,7 +729,7 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     // `buildForRequest` would mint one if this line were absent. It is here
     // anyway so the production path states its own ordering guarantee rather
     // than inheriting it from a default several files away.
-    // MUTATION M7: line removed
+    deps.strand = std::make_shared<gma::rt::Strand>(deps.pool);
 
     try {
       // Check subscription limit BEFORE building the pipeline to avoid
