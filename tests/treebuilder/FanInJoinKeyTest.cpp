@@ -461,7 +461,7 @@ TEST_F(FanInJoinKey, MisCasedAndUnknownByValuesAreRefusedNotDefaulted) {
            "have silently taken the `\"streamKey\"` default and returned a "
            "plausible wrong number with no diagnostic in either repo — the "
            "precise failure SPEC section 5 Q3 ruled against.";
-    EXPECT_NE(msg.find("closed"), std::string::npos)
+    EXPECT_NE(msg.find("CLOSED vocabulary"), std::string::npos)
         << "the message must say `by` is a CLOSED vocabulary, so the author "
            "knows the value was refused rather than mis-parsed. Got: " << msg;
     EXPECT_NE(msg.find("case-sensitive"), std::string::npos)
