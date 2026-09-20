@@ -330,6 +330,16 @@ TEST(OrderedDelivery, BothSidesOfOneTickReachTheJoinInDispatcherOrder) {
 // A DEADLINE, NOT A SLEEP. There is no "wait 200ms and hope": each terminal
 // spins on the shared counter until it reaches four or the deadline passes, so
 // the pass is proof of real overlap and the failure is bounded.
+//
+// EVERY terminal must see all four, not just one of them. The first draft of
+// this test asserted a single shared flag, and it SURVIVED ITS OWN MUTATION:
+// with all four DAGs forced onto one strand the first terminal parked to the
+// deadline and the other three then ran one after another, and the FOURTH
+// still observed a count of four — trivially, because it was itself the
+// fourth — and set the flag. It reported "they overlapped" about a run that was
+// perfectly serial. Counting the terminals that succeeded fixes it: under one
+// shared strand the first one times out, the count is 3 of 4, and the test goes
+// red. Verified against that exact mutation.
 TEST(OrderedDelivery, DistinctRequestsAreNotSerializedAgainstEachOther) {
   constexpr int kDags = 4;
 
@@ -341,14 +351,14 @@ TEST(OrderedDelivery, DistinctRequestsAreNotSerializedAgainstEachOther) {
   Dispatcher dispatcher(pool.get(), &store);
 
   std::atomic<int> arrived{0};
-  std::atomic<bool> allOverlapped{false};
+  std::atomic<int> sawAllFour{0};
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
 
   class ParkingTerminal final : public INode {
   public:
-    ParkingTerminal(std::atomic<int>& arrived, std::atomic<bool>& ok,
+    ParkingTerminal(std::atomic<int>& arrived, std::atomic<int>& sawAll,
                     std::chrono::steady_clock::time_point deadline, int target)
-      : arrived_(arrived), ok_(ok), deadline_(deadline), target_(target) {}
+      : arrived_(arrived), sawAll_(sawAll), deadline_(deadline), target_(target) {}
     void onValue(const StreamValue&) override {
       if (done_.exchange(true)) return;       // one park per DAG is enough
       ++arrived_;
@@ -356,12 +366,18 @@ TEST(OrderedDelivery, DistinctRequestsAreNotSerializedAgainstEachOther) {
              std::chrono::steady_clock::now() < deadline_) {
         std::this_thread::yield();
       }
-      if (arrived_.load() >= target_) ok_.store(true);
+      // Counted per terminal, and only before the deadline: a terminal that
+      // ran AFTER the others had given up would also see the full count, which
+      // is exactly how the first draft of this test lied.
+      if (arrived_.load() >= target_ &&
+          std::chrono::steady_clock::now() < deadline_) {
+        ++sawAll_;
+      }
     }
     void shutdown() noexcept override {}
   private:
     std::atomic<int>&  arrived_;
-    std::atomic<bool>& ok_;
+    std::atomic<int>&  sawAll_;
     std::chrono::steady_clock::time_point deadline_;
     int                target_;
     std::atomic<bool>  done_{false};
@@ -373,7 +389,7 @@ TEST(OrderedDelivery, DistinctRequestsAreNotSerializedAgainstEachOther) {
     deps.store      = &store;              // strand each, which is exactly what
     deps.pool       = pool.get();          // handleSubscribe does per
     deps.dispatcher = &dispatcher;         // subscription.
-    auto terminal = std::make_shared<ParkingTerminal>(arrived, allOverlapped,
+    auto terminal = std::make_shared<ParkingTerminal>(arrived, sawAllFour,
                                                       deadline, kDags);
     const std::string json =
         std::string(R"({"streamKey":"SYM)") + char('A' + i) +
@@ -388,9 +404,10 @@ TEST(OrderedDelivery, DistinctRequestsAreNotSerializedAgainstEachOther) {
   }
   pool->drain();
 
-  EXPECT_TRUE(allOverlapped.load())
-      << "only " << arrived.load() << " of " << kDags << " request DAGs were "
-         "running at once. The strand is supposed to serialize ONE DAG, not "
+  EXPECT_EQ(sawAllFour.load(), kDags)
+      << "only " << sawAllFour.load() << " of " << kDags << " request DAGs "
+         "observed all " << kDags << " running at once (" << arrived.load()
+      << " arrived in total). The strand is supposed to serialize ONE DAG, not "
          "the engine: SPEC D3/D4 mint one per subscription, and SPEC §5 Q2's "
          "ruling on the single-subscription regression rests on N "
          "subscriptions still occupying N cores.";
