@@ -25,6 +25,8 @@ WIDTHS="${WIDTHS:-1,2,4,8,16}"
 TICKS_HEAVY="${TICKS_HEAVY:-20000}"
 TICKS_LIGHT="${TICKS_LIGHT:-200000}"
 SPIN_HEAVY="${SPIN_HEAVY:-2000}"
+SPIN_HEAVIER="${SPIN_HEAVIER:-20000}"
+TICKS_HEAVIER="${TICKS_HEAVIER:-4000}"
 SUBS_FANOUT="${SUBS_FANOUT:-8}"
 
 work="$(mktemp -d)"
@@ -55,6 +57,11 @@ emit() {
   run single_light  1              "$TICKS_LIGHT" 0            | tail -n +2
   run fanout_heavy  "$SUBS_FANOUT" "$TICKS_HEAVY" "$SPIN_HEAVY" | tail -n +2
   run fanout_light  "$SUBS_FANOUT" "$TICKS_LIGHT" 0            | tail -n +2
+  # The regression Q2 rules on is a FUNCTION OF THE PER-VALUE COMPUTE, not a
+  # constant of the change: one DAG gets one core, so the deeper the compute the
+  # closer `after/before` gets to 1/cores. This profile exists to show that
+  # slope rather than to quote a single ratio — it is 10x the heavy spin.
+  run single_heavier 1             "$TICKS_HEAVIER" "$SPIN_HEAVIER" | tail -n +2
 }
 
 if [[ -n "${OUT:-}" ]]; then
