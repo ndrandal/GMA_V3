@@ -370,6 +370,50 @@ const rapidjson::Value* corpusRequest(int corpusId) {
   return nullptr;
 }
 
+// ─── The join's observation point (ENC-1290) ───────────────────────────────
+//
+// Every assertion in this block is about the JOIN: which values `Aggregate`
+// pairs into a tuple. Until ENC-1290 the join's raw members reached the
+// terminal directly, because a request carrying both `node` and `pipeline`
+// built TWO live chains into one Responder (SPEC §1.1 defect 1) and the
+// `node` chain was one of them. Driving only the join's own input fields left
+// the other chain silent, so the terminal stream WAS the join's output.
+//
+// D5 composed the two into one chain, so for corpus 86 and 87 the terminal now
+// sees `Worker{fn:"diff"}` output instead. That is the fix working, and it
+// moves the observation point rather than changing what the join does. Left
+// alone, these tests would have gone quietly wrong in three different ways —
+// all three measured before this change landed:
+//
+//   * Corpus86_SpreadIsExactlyTwoCents      — HOLLOWED OUT. `decodeBidAsk`
+//     decodes 0 of 6 arrivals, every tuple scores UNDECODABLE, and it stays
+//     red for a reason ENC-1005 can never clear.
+//   * ..._SingleThreadControl               — the same checker, and it is NOT
+//     in GMA_ENC1289_EXPECTED_FAILURES, so it runs inside the MAIN `gma_tests`
+//     ctest case and took the primary target red.
+//   * Corpus87_CrossSymbolJoin...           — BROKEN. Its `>= 900.0` filter
+//     (there to drop the second chain's small diffs) kept 0 values, the test
+//     passed vacuously, and its WILL_FAIL ctest case flipped to FAILED —
+//     taking `gma_enc1289_expected_failures_really_failed` with it.
+//
+// So each of them drives the corpus entry's `node` WITHOUT its pipeline. The
+// request is still built by the real `tree::buildForRequest` and driven
+// through the real `Dispatcher`, the `node` is the corpus entry's own
+// verbatim, and `tests/treebuilder/corpus_requests.json` is NOT touched. The
+// assertions, their thread counts, their tick encodings and their expected
+// red/green states are all byte-for-byte what ENC-1289 committed.
+//
+// What D5 itself introduced — the composed chain end to end, including corpus
+// 86's exact emitted values through `Worker{fn:"diff"}` — is asserted in
+// tests/treebuilder/ComposedChainTest.cpp, not here.
+rapidjson::Document nodeWithoutPipeline(const rapidjson::Value& request) {
+  rapidjson::Document d;
+  d.CopyFrom(request, d.GetAllocator());
+  d.RemoveMember("pipeline");
+  d.RemoveMember("stages");
+  return d;
+}
+
 // ─── Driver ────────────────────────────────────────────────────────────────
 struct Drive {
   std::map<std::thread::id, std::vector<double>> byThread;
@@ -568,10 +612,11 @@ TEST(CorpusValueAssertions, Corpus86_JoinMustNotCompleteFromOneInputAlone) {
 
   const rapidjson::Value* req = corpusRequest(86);
   ASSERT_NE(req, nullptr) << "corpus_id 86 not found in corpus_requests.json";
+  rapidjson::Document join = nodeWithoutPipeline(*req);   // ENC-1290, see above
 
   constexpr std::size_t kTicks = 8;
 
-  Drive d = driveCorpus(*req, /*threads=*/1, [](gma::Dispatcher& disp) {
+  Drive d = driveCorpus(join, /*threads=*/1, [](gma::Dispatcher& disp) {
     for (std::size_t n = 0; n < kTicks; ++n)
       tick(disp, "AAPL", {{"ask", kBase + double(n) + kSpread}});  // no "bid"
   });
@@ -620,8 +665,9 @@ TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents_SingleThreadControl
 
   const rapidjson::Value* req = corpusRequest(86);
   ASSERT_NE(req, nullptr) << "corpus_id 86 not found in corpus_requests.json";
+  rapidjson::Document join = nodeWithoutPipeline(*req);   // ENC-1290, see above
 
-  Drive d = driveCorpus(*req, /*threads=*/1, [](gma::Dispatcher& disp) {
+  Drive d = driveCorpus(join, /*threads=*/1, [](gma::Dispatcher& disp) {
     for (std::size_t n = 0; n < kRaceTicks; ++n)
       tick(disp, "AAPL", {{"bid", kBase + double(n)},
                           {"ask", kBase + double(n) + kSpread}});
@@ -669,9 +715,11 @@ TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents) {
   const rapidjson::Value* req = corpusRequest(86);
   ASSERT_NE(req, nullptr) << "corpus_id 86 not found in corpus_requests.json";
 
+  rapidjson::Document join = nodeWithoutPipeline(*req);   // ENC-1290, see above
+
   TupleReport r;
   for (std::size_t rep = 0; rep < kRaceReps; ++rep) {
-    Drive d = driveCorpus(*req, kRaceThreads, [](gma::Dispatcher& disp) {
+    Drive d = driveCorpus(join, kRaceThreads, [](gma::Dispatcher& disp) {
       for (std::size_t n = 0; n < kRaceTicks; ++n)
         tick(disp, "AAPL", {{"bid", kBase + double(n)},
                             {"ask", kBase + double(n) + kSpread}});
@@ -730,10 +778,12 @@ TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents) {
 // a wrong answer) but it is weak, and ENC-1292 should strengthen it to the
 // `by:"none"` form once `by` exists.
 //
-// Corpus 87 also carries `pipeline:[Worker{fn:"diff"}]`, which SPEC §1.1
-// defect 1 wires as a SECOND live chain into the same terminal. Its values are
-// differences of AAPL prices (0..5 here), two orders of magnitude below any raw
-// price, so they are filtered out by value rather than assumed away.
+// Corpus 87 also carries `pipeline:[Worker{fn:"diff"}]`. SPEC §1.1 defect 1
+// wired that as a SECOND live chain into the same terminal, and the `>= 900.0`
+// filter below existed to drop its values. ENC-1290/D5 composed the chains, so
+// this test now drives corpus 87's `node` alone (see the ENC-1290 note above
+// the driver) and there is no second chain left to filter — which the
+// assertion next to the filter now checks rather than assumes.
 // +-- EXPECTED TO FAIL ----------------------------------------------------+
 // | Registered in CMakeLists.txt as ctest case                             |
 // |   gma_enc1289_xfail_no_cross_symbol_join            WILL_FAIL TRUE     |
@@ -747,26 +797,37 @@ TEST(CorpusValueAssertions, Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself)
 
   const rapidjson::Value* req = corpusRequest(87);
   ASSERT_NE(req, nullptr) << "corpus_id 87 not found in corpus_requests.json";
+  rapidjson::Document join = nodeWithoutPipeline(*req);   // ENC-1290, see above
 
   constexpr double kAaplBase = 1000.0;   // AAPL lastPrice(n) = 1000 + n
   constexpr double kMsftBase = 5000.0;   // MSFT lastPrice(n) = 5000 + n
   constexpr std::size_t kTicksPerSide = 6;
 
-  Drive d = driveCorpus(*req, /*threads=*/1, [](gma::Dispatcher& disp) {
+  Drive d = driveCorpus(join, /*threads=*/1, [](gma::Dispatcher& disp) {
     for (std::size_t n = 0; n < kTicksPerSide; ++n) {
       tick(disp, "AAPL", {{"lastPrice", kAaplBase + double(n)}});
       tick(disp, "MSFT", {{"lastPrice", kMsftBase + double(n)}});
     }
   });
 
-  // Keep only raw prices: the second (pipeline) chain emits diffs of AAPL
-  // prices, all < 10 here. Aggregate forwards a batch back-to-back from one
-  // thread, so dropping the interlopers preserves batch adjacency.
+  // Keep only raw prices. This filter was written to drop the SECOND chain's
+  // small diffs; since ENC-1290 composed the chains and this test drives the
+  // `node` alone, there is no second chain and nothing to drop. The filter
+  // stays — and the assertion below is new — because a filter that silently
+  // starts dropping everything is exactly how this test passes VACUOUSLY,
+  // which is what D5 would have done to it. It must now say so out loud.
   std::vector<double> joined;
   for (const auto& [tid, vals] : d.byThread) {
     (void)tid;
     for (double v : vals) if (v >= 900.0) joined.push_back(v);
   }
+  ASSERT_EQ(joined.size(), d.arrivals)
+      << "the >= 900.0 filter dropped " << (d.arrivals - joined.size())
+      << " of " << d.arrivals << " arrivals. Driving corpus 87's `node` alone, "
+         "every arrival is a raw AAPL/MSFT price and NOTHING should be "
+         "filtered. If the terminal is seeing computed values again, this test "
+         "is measuring the wrong thing and any verdict below is worthless — "
+         "see the ENC-1290 note at the top of this block.";
 
   auto sym = [&](double v) { return v >= kMsftBase ? 'M' : 'A'; };
 
