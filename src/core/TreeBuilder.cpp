@@ -1158,6 +1158,7 @@ void registerBuiltinNodeTypes() {
       }
       roots.push_back(pack);   // lifecycle, NOT a clock target (ENC-1290)
 
+      unwind.disarm();
       return std::make_shared<CompositeRoot>(std::move(roots),
                                              std::move(clockTargets));
     });
@@ -1283,7 +1284,9 @@ void registerBuiltinNodeTypes() {
       scope.parent   = deps.bindingScope;
       tree::Deps bodyDeps = deps;
       bodyDeps.bindingScope = &scope;
+      SubBuildUnwind unwind;          // ENC-1291, same hole as Aggregate's
       auto bodyHead = tree::buildOne(v["body"], defaultStreamKey, bodyDeps, downstream);
+      unwind.keep(bodyHead);
 
       // Pass 2: build each referenced binding's producer once -> Tee/consumer.
       std::vector<std::shared_ptr<INode>> roots;
@@ -1304,6 +1307,7 @@ void registerBuiltinNodeTypes() {
           tree::buildOne(bindings[name.c_str()], defaultStreamKey, deps, sink);
         if (!declaredInputIsSelfClocked(bindings[name.c_str()]))
           clockTargets.emplace_back(prodHead);
+        unwind.keep(prodHead);
         roots.push_back(prodHead);
       }
 
@@ -1312,6 +1316,8 @@ void registerBuiltinNodeTypes() {
       // head Listener is there to drive.
       if (!declaredInputIsSelfClocked(v["body"])) clockTargets.emplace_back(bodyHead);
       roots.push_back(bodyHead);
+
+      unwind.disarm();
       return std::make_shared<CompositeRoot>(std::move(roots),
                                              std::move(clockTargets));
     });
