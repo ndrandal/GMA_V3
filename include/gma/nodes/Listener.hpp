@@ -7,6 +7,7 @@
 
 #include "gma/Result.hpp"
 #include "gma/nodes/INode.hpp"
+#include "gma/rt/Strand.hpp"
 #include "gma/rt/ThreadPool.hpp"
 
 namespace gma {
@@ -32,18 +33,24 @@ public:
   // returned Result carries an Error whose `message` field begins
   // with `"listener: field '<field>' is pipeline-only"` and points
   // at `docs/atomic-keys.md`.
+  // `strand` (ENC-1005 / SPEC D3) is this request DAG's serializing executor.
+  // When present every value is delivered through it, so the whole DAG sees
+  // values in the order the Dispatcher produced them. When null the Listener
+  // keeps the pre-ENC-1005 behaviour exactly: a bare `pool->post`, unordered.
   static gma::Result<std::shared_ptr<Listener>> Create(
       std::string symbol,
       std::string field,
       std::shared_ptr<INode> downstream,
       gma::rt::ThreadPool* pool,
-      gma::Dispatcher* dispatcher);
+      gma::Dispatcher* dispatcher,
+      std::shared_ptr<gma::rt::Strand> strand = nullptr);
 
   Listener(std::string symbol,
            std::string field,
            std::shared_ptr<INode> downstream,
            gma::rt::ThreadPool* pool,
-           gma::Dispatcher* dispatcher);
+           gma::Dispatcher* dispatcher,
+           std::shared_ptr<gma::rt::Strand> strand = nullptr);
 
   // IMPORTANT:
   // Do NOT register with Dispatcher from the constructor.
@@ -54,6 +61,13 @@ public:
   // INode
   void onValue(const StreamValue& sv) override;
   void shutdown() noexcept override;
+
+  // ENC-1005 / SPEC D3. True exactly when this Listener holds a strand: the
+  // strand does the off-threading, so Dispatcher must deliver inline rather
+  // than interposing its own pool hop and losing the order. See INode.
+  bool deliversOnOwnExecutor() const noexcept override {
+    return static_cast<bool>(strand_);
+  }
 
   const std::string& symbol() const noexcept { return symbol_; }
   const std::string& field()  const noexcept { return field_;  }
@@ -66,6 +80,11 @@ private:
   std::weak_ptr<INode> downstream_;
   gma::rt::ThreadPool* pool_;          // canonical type
   gma::Dispatcher* dispatcher_;
+  // This request DAG's serializing executor (ENC-1005). Shared by every
+  // Listener in the same DAG — that sharing is what orders the two sides of a
+  // join against each other, and what a per-SYMBOL shard could never do
+  // (SPEC D4).
+  std::shared_ptr<gma::rt::Strand> strand_;
 
   std::atomic<bool> started_{false};
   std::atomic<bool> stopping_{false};

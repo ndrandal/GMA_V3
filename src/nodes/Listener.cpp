@@ -28,7 +28,8 @@ gma::Result<std::shared_ptr<Listener>> Listener::Create(
     std::string field,
     std::shared_ptr<INode> downstream,
     gma::rt::ThreadPool* pool,
-    gma::Dispatcher* dispatcher) {
+    gma::Dispatcher* dispatcher,
+    std::shared_ptr<gma::rt::Strand> strand) {
   if (isPipelineOnlyKey(field)) {
     return gma::Error{
       "listener: field '" + field +
@@ -42,7 +43,8 @@ gma::Result<std::shared_ptr<Listener>> Listener::Create(
       std::move(field),
       std::move(downstream),
       pool,
-      dispatcher);
+      dispatcher,
+      std::move(strand));
   self->start();
   return self;
 }
@@ -51,12 +53,14 @@ Listener::Listener(std::string symbol,
                    std::string field,
                    std::shared_ptr<INode> downstream,
                    gma::rt::ThreadPool* pool,
-                   gma::Dispatcher* dispatcher)
+                   gma::Dispatcher* dispatcher,
+                   std::shared_ptr<gma::rt::Strand> strand)
   : symbol_(std::move(symbol))
   , field_(std::move(field))
   , downstream_(std::move(downstream))
   , pool_(pool)
   , dispatcher_(dispatcher)
+  , strand_(std::move(strand))
 {
 }
 
@@ -81,7 +85,27 @@ void Listener::onValue(const gma::StreamValue& sv) {
   }
   if (!down) return;
 
-  if (pool_) {
+  // ENC-1005 / SPEC specs/2026-09-20-gma-join-correctness D3, D4.
+  //
+  // The STRAND is the whole fix. Every Listener in one request DAG shares one,
+  // so the values this DAG is built to join arrive downstream in the order the
+  // Dispatcher produced them, tick after tick. Posting to the bare pool (the
+  // `else if` below) is what put tick N and tick N+1 — and `ask` and `bid` of
+  // one tick — on two workers at once, which is how `Aggregate`'s buffer came
+  // to pair `ask(n)` with `ask(n+1)` and report a spread of +-1.00 where the
+  // truth is 0.02 (SPEC §1.1 defect 4).
+  //
+  // A strand is not a thread and adds none: the work still runs on the shared
+  // pool, one task at a time per DAG. The cost is that one DAG can no longer
+  // occupy more than one core, which SPEC §5 Q2 rules acceptable.
+  //
+  // `bucketStartMs` is carried through (ENC-1280) — the old pool path dropped
+  // it, silently un-bucketing every value that crossed a Listener.
+  if (strand_) {
+    strand_->post([d = down, sv]() mutable {
+      d->onValue(sv);
+    });
+  } else if (pool_) {
     pool_->post([d = std::move(down), sym = sv.symbol, val = sv.value]() mutable {
       d->onValue(gma::StreamValue{std::move(sym), std::move(val)});
     });
