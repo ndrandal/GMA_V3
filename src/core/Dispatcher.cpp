@@ -38,6 +38,16 @@ void Dispatcher::registerListener(const std::string& symbol,
   _listeners[symbol][field].emplace_back(std::move(listener));
 }
 
+std::size_t Dispatcher::subscriptionCount() const {
+  std::shared_lock<std::shared_mutex> lock(_listenerMutex);
+  std::size_t n = 0;
+  for (const auto& [symbol, byField] : _listeners) {
+    (void)symbol;
+    for (const auto& [field, subs] : byField) { (void)field; n += subs.size(); }
+  }
+  return n;
+}
+
 void Dispatcher::unregisterListener(const std::string& symbol,
                                           const std::string& field,
                                           std::shared_ptr<INode> listener)
