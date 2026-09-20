@@ -544,7 +544,7 @@ std::shared_ptr<gma::INode> buildSimple(const std::string&      streamKey,
 
 // High-level entry: request JSON -> Listener head wired into optional pipeline -> terminal
 BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
-                           const Deps&                  deps,
+                           const Deps&                  depsIn,
                            std::shared_ptr<gma::INode>  terminal) {
   const auto& rq = expectObj(requestJson, "request");
 
@@ -578,10 +578,10 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   //
   // Not minted when there is no pool: with no executor there is nothing to
   // serialise, delivery is already inline and already in order.
-  Deps depsWithStrand = deps;
+  Deps depsWithStrand = depsIn;
   if (!depsWithStrand.strand && depsWithStrand.pool)
     depsWithStrand.strand = std::make_shared<gma::rt::Strand>(depsWithStrand.pool);
-  const Deps& deps = depsWithStrand;   // shadow: everything below builds on it
+  const Deps& deps = depsWithStrand;   // everything below builds against this
 
   // ENC-1293 / SPEC specs/2026-09-20-gma-join-correctness D7 — TEMPORARY, and
   // lifted by ENC-1295 (embassy). See the long comment on `shapeInto` above for
@@ -720,7 +720,8 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
                                   field,
                                   midHead,
                                   deps.pool,
-                                  deps.dispatcher);
+                                  deps.dispatcher,
+                                  deps.strand);   // ENC-1005 / D3
   if (!headRes) {
     // Propagate the ENC-101 reject (and any future Listener::Create
     // pre-flight errors) up through ClientSession's
@@ -771,8 +772,13 @@ void registerBuiltinNodeTypes() {
         throw std::runtime_error("Listener: missing 'field'");
 
       using gma::nodes::Listener;
+      // ENC-1005 / SPEC D3: the same strand as every other Listener in this
+      // request. This is the site that matters for a join — corpus 86's `ask`
+      // and `bid` inputs are both built here, and sharing one strand is what
+      // makes them arrive in the order the Dispatcher produced them.
       auto sp = std::make_shared<Listener>(streamKey, field, downstream,
-                                           deps.pool, deps.dispatcher);
+                                           deps.pool, deps.dispatcher,
+                                           deps.strand);
       sp->start();
       return sp;
     });

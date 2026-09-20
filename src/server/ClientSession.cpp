@@ -5,6 +5,7 @@
 #include "gma/ExecutionContext.hpp"
 #include "gma/Dispatcher.hpp"
 #include "gma/TreeBuilder.hpp"
+#include "gma/rt/Strand.hpp"
 #include "gma/JsonValidator.hpp"
 #include "gma/nodes/Responder.hpp"
 #include "gma/util/Logger.hpp"
@@ -709,6 +710,26 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     deps.store      = exec_->store();
     deps.pool       = exec_->pool();
     deps.dispatcher = dispatcher_;
+    // ENC-1005 / SPEC specs/2026-09-20-gma-join-correctness D3, D4 — ONE
+    // STRAND PER SUBSCRIPTION. This is the site D3 names, and the granularity
+    // is the point: per SUBSCRIPTION, not per session and not per symbol.
+    //
+    //   * Per session would serialise 256 independent charts behind each
+    //     other (`MAX_SUBSCRIPTIONS`), turning one slow DAG into every DAG's
+    //     latency.
+    //   * Per symbol is what this ticket was re-scoped AWAY from (D4): it puts
+    //     the two sides of a cross-symbol join on two strands with no ordering
+    //     relation at all.
+    //
+    // A re-subscribe on the same request key builds a fresh DAG and so gets a
+    // fresh strand, exactly like `subId` above: a straggling value from the
+    // shut-down chain can never be ordered against the new one, because they
+    // share nothing.
+    //
+    // `buildForRequest` would mint one if this line were absent. It is here
+    // anyway so the production path states its own ordering guarantee rather
+    // than inheriting it from a default several files away.
+    deps.strand = std::make_shared<gma::rt::Strand>(deps.pool);
 
     try {
       // Check subscription limit BEFORE building the pipeline to avoid
