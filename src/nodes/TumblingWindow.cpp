@@ -2,6 +2,7 @@
 #include "gma/nodes/BucketTime.hpp"   // for BucketTime::nextAlignedAfter
 #include "gma/util/Logger.hpp"
 
+#include <cstdint>
 #include <utility>
 #include <variant>
 
@@ -74,6 +75,12 @@ void TumblingWindow::timerLoop(const std::shared_ptr<State>& st) {
 
     const auto now = std::chrono::system_clock::now();
     const auto target = BucketTime::nextAlignedAfter(now, st->period);
+    // ENC-1280: `target` used to be consumed only as the wait_until deadline
+    // and destroyed at the end of the iteration. The bucket that closes at
+    // `target` is exactly the bucket whose accumulated values are emitted
+    // below, so its start is this bar's identity (SPEC D9/D10) — carry it.
+    const std::int64_t bucketStartMs =
+        BucketTime::bucketStartMsFor(target, st->period);
     {
       std::unique_lock<std::mutex> lk(st->mx);
       // wait_until lets shutdown wake us early without re-arming. The
@@ -118,11 +125,12 @@ void TumblingWindow::timerLoop(const std::shared_ptr<State>& st) {
           // tick payload. Move into the lambda capture to skip a copy.
           auto sym_cap = sym;
           auto vec_cap = std::make_shared<std::vector<double>>(std::move(vec));
-          st->pool->post([ds, s = std::move(sym_cap), v = std::move(vec_cap)] {
-            ds->onValue(StreamValue{s, ArgType{*v}});
+          st->pool->post([ds, s = std::move(sym_cap), v = std::move(vec_cap),
+                          bucketStartMs] {
+            ds->onValue(StreamValue{s, ArgType{*v}, bucketStartMs});
           });
         } else {
-          ds->onValue(StreamValue{sym, ArgType{std::move(vec)}});
+          ds->onValue(StreamValue{sym, ArgType{std::move(vec)}, bucketStartMs});
         }
       } catch (const std::exception& ex) {
         gma::util::logger().log(gma::util::LogLevel::Error,
