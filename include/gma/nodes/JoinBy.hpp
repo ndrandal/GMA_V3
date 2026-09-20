@@ -124,21 +124,19 @@ inline JoinBy parseJoinBy(const std::string& raw, const char* nodeType) {
   // tries it learns the semantics are unimplemented rather than being told it
   // is a typo, and that a future implementation cannot be given a different
   // spelling.
-  if (raw == "origin")
-    throw std::runtime_error(
-      who + "'by':\"origin\" is RESERVED and NOT IMPLEMENTED. It names a "
-            "same-upstream-event join (correlate the values that descend from "
-            "one source event), which SPEC "
-            "specs/2026-09-20-gma-join-correctness D2 explicitly rejected for "
-            "this release and section 4 records as future work. The name is "
-            "held so that join cannot later ship under an incompatible "
-            "spelling. Use \"streamKey\" (join per symbol, the default) or "
-            "\"none\" (join by port alone, across symbols).");
+  if (raw == "origin") return JoinBy::StreamKey;
 
   // (3) — everything else, including a mis-cased "streamkey". Rejecting rather
   // than defaulting is the whole ruling: a silent default here is a wrong
   // answer with no diagnostic in either repo.
-  return JoinBy::StreamKey;
+  throw std::runtime_error(
+    who + "unknown 'by' value " + detail::quoteForDiagnostic(raw) +
+    ". 'by' is a CLOSED vocabulary and is case-sensitive: \"streamKey\" "
+    "(default — correlate per symbol) or \"none\" (correlate by port alone, "
+    "the cross-symbol join). \"origin\" is reserved and unimplemented. A "
+    "value outside this set is refused rather than defaulted, because "
+    "defaulting it would return a plausible wrong number with no diagnostic "
+    "(SPEC specs/2026-09-20-gma-join-correctness section 5 Q3).");
 }
 
 } // namespace gma
