@@ -3,6 +3,8 @@
 
 #include <functional>
 #include <algorithm>
+#include <atomic>
+#include <cstring>
 #include <numeric>
 #include <cmath>
 #include <limits>
@@ -264,20 +266,63 @@ std::string recordTerminalMessage(const std::string& culprit) {
 //
 // ---------- CompositeRoot: fan-out root for many inputs ----------
 //
+// ENC-1290 / SPEC specs/2026-09-20-gma-join-correctness D5, section 5 Q1
+// (ruled 2026-09-20 by ENC-1317, then corrected by that ticket's adversarial
+// review — Corrections C4.0).
+//
+// THE OUTER `Listener(streamKey, field)` IS A CLOCK, NOT A DATA SOURCE.
+// A request carrying `node` always builds a head Listener (`buildForRequest`
+// throws without `streamKey`/`field`), and for a FAN-IN node that Listener is
+// not one of the join's members — the members are the node's own declared
+// `inputs`. So the head Listener's value must never enter the join's buffer;
+// it exists to *clock* inputs that have no clock of their own.
+//
+// `clockTargets_` is that set, and `onValue` forwards to it AND TO NOTHING
+// ELSE. It is filled by each fan-in builder from its DECLARED INPUT HEADS
+// only, and only from those whose declared subtree contains no `Listener`
+// (see `declaredInputIsSelfClocked`).
+//
+// `roots_` IS NOT THAT SET, AND MUST NEVER BE USED AS ONE. It is a lifecycle
+// list: every fan-in builder appends the fan-in node ITSELF to it (`agg`,
+// `pack`, the `Tee`s and the body head below), because Listeners hold only a
+// weak_ptr to their downstream. Forwarding the clock to `roots_` — or to "the
+// roots that are not Dispatcher-subscribed", which was the rule's first and
+// retracted wording — pushes the clock's value straight into
+// `Aggregate::onValue` -> `buf_[sv.symbol]` AS A JOIN MEMBER, manufacturing
+// SPEC section 1.1 defect 2 inside the builder. `ClockIsNeverAJoinMember` in
+// tests/treebuilder/ComposedChainTest.cpp is the gate on that.
+//
+// SCOPE. Only the three fan-in builders construct a CompositeRoot. A
+// single-input transform node (Worker, AtomicAccessor, Interval, GroupSplit)
+// is returned as its own head and is wired to the head Listener directly, so
+// for it the outer Listener IS the data source — today and after D5. All 162
+// `node`-only corpus requests are in that second category and none of them
+// builds a CompositeRoot; nothing here touches them.
+//
 namespace {
 
 class CompositeRoot final : public gma::INode {
 public:
-  explicit CompositeRoot(std::vector<std::shared_ptr<gma::INode>> roots)
-    : roots_(std::move(roots)) {}
+  CompositeRoot(std::vector<std::shared_ptr<gma::INode>> roots,
+                std::vector<std::weak_ptr<gma::INode>>   clockTargets)
+    : roots_(std::move(roots)), clockTargets_(std::move(clockTargets)) {}
 
-  void onValue(const gma::StreamValue&) override {
-    // No-op. CompositeRoot is a lifecycle wrapper for multiple Listener
-    // source nodes. Listeners receive values from Dispatcher, not
-    // from upstream pipeline wiring.
+  void onValue(const gma::StreamValue& sv) override {
+    // The clock tick. Empty for every fan-in whose inputs are all Listeners
+    // (45 of the 52 `node`+`pipeline` corpus entries), which is exactly the
+    // pre-ENC-1290 no-op.
+    if (stopping_.load(std::memory_order_acquire)) return;
+    for (const auto& w : clockTargets_) {
+      // `clockTargets_` is immutable after construction, so no lock is needed
+      // here; the strong refs live in `roots_`, and locking the weak_ptr keeps
+      // the target alive for the duration of the call even if shutdown() is
+      // concurrently clearing `roots_`.
+      if (auto t = w.lock()) t->onValue(sv);
+    }
   }
 
   void shutdown() noexcept override {
+    stopping_.store(true, std::memory_order_release);
     for (auto& r : roots_) {
       if (r) r->shutdown();
     }
@@ -285,8 +330,71 @@ public:
   }
 
 private:
-  std::vector<std::shared_ptr<gma::INode>> roots_;
+  std::vector<std::shared_ptr<gma::INode>>       roots_;         // lifecycle only
+  const std::vector<std::weak_ptr<gma::INode>>   clockTargets_;  // the clock's fan-out
+  std::atomic<bool>                              stopping_{false};
 };
+
+// Does this DECLARED input subtree carry its own clock?
+//
+// A `Listener` anywhere inside it means the Dispatcher drives it, so the outer
+// Listener must not drive it a second time. Everything else — `AtomicAccessor`
+// above all — is a pull node with no subscription: without the clock its
+// branch of the join never fires at all, which is what makes the 7 pull-only
+// corpus entries (ids 111-115, 192, 200) a DEAD join today rather than the
+// "two live chains" SPEC section 1.1 defect 1 describes (corrected there by
+// C2.1).
+//
+// The test is structural and build-time, over the request JSON, and is never a
+// property of the authored `streamKey`/`field` — which is why all 52 affected
+// corpus entries are RE-WIRED and none is re-authored.
+//
+// THREE THINGS SELF-CLOCK, and the list is exhaustive by construction — a node
+// is self-clocked iff something other than its upstream calls its `onValue`:
+//   * `Listener`      — the Dispatcher pushes to it.
+//   * `Interval` /
+//     `BucketTime`    — a timer thread drives their child directly
+//                       (`timerLoop`). Their own `onValue` is an explicit
+//                       no-op ("source node: no upstream input"), so before
+//                       ENC-1290 named them here the clock was forwarded to
+//                       them and was correct ONLY by accident, via that no-op.
+//                       Saying it out loud costs nothing and stops the next
+//                       edit to `Interval::onValue` from silently double-firing
+//                       every timer-headed join input.
+//
+// `Ref` IS NOT ONE OF THEM, and an earlier draft of this function wrongly said
+// it was. A `Ref`'s own head is a `RefStub` no-op, so clocking it is harmless —
+// but the test runs over the WHOLE declared subtree, so `Ref -> true` poisoned
+// every enclosing node: a `Let` whose bindings are pull-only and whose body
+// merely mentions a `Ref` (i.e. every non-degenerate `Let`) was declared
+// self-clocked, and its join stayed dead — the exact failure this rule exists
+// to end for the 7 pull-only corpus entries. Caught by adversarial review; the
+// `Let` cases in tests/treebuilder/ComposedChainTest.cpp are the gate, and no
+// test covered the clause before.
+//
+// CONSERVATIVE DIRECTION. Returning `true` (do not clock) reproduces the
+// pre-ENC-1290 behaviour exactly, so it is the safe answer when we cannot
+// tell — hence depth overflow -> `true`. Returning a wrong `false` is the
+// harmful direction: it injects the clock where something else already drives
+// the input.
+bool declaredInputIsSelfClocked(const rapidjson::Value& spec, int depth = 0) {
+  if (depth > kMaxShapeDepth) return true;
+  if (spec.IsArray()) {
+    for (const auto& v : spec.GetArray())
+      if (declaredInputIsSelfClocked(v, depth + 1)) return true;
+    return false;
+  }
+  if (!spec.IsObject()) return false;
+  if (spec.HasMember("type") && spec["type"].IsString()) {
+    const char* t = spec["type"].GetString();
+    if (std::strcmp(t, "Listener")   == 0) return true;
+    if (std::strcmp(t, "Interval")   == 0) return true;
+    if (std::strcmp(t, "BucketTime") == 0) return true;
+  }
+  for (auto m = spec.MemberBegin(); m != spec.MemberEnd(); ++m)
+    if (declaredInputIsSelfClocked(m->value, depth + 1)) return true;
+  return false;
+}
 
 // RefStub: the no-op head a `Ref` returns (ENC-647). A Ref has no local
 // upstream — its binding's producer feeds the Ref's downstream directly (via a
@@ -464,24 +572,34 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   // BucketTime builders spawn threads and call start(), so a reject after the
   // fact would leak live work for a request that is never going to be served.
   //
-  // Both `node` and the `pipeline`/`stages` array are examined, because today
-  // a request carrying both leaves BOTH chains wired into the terminal (SPEC
-  // §1.1 defect 1 — `midHead` is overwritten at the loop below but the `node`
-  // subtree stays live). Whoever lands ENC-1290/D5 and composes them into one
-  // chain should narrow this to the composed tail.
+  // NARROWED BY ENC-1290 (SPEC D5, §5 Q1 "Consequence for D7 and ENC-1293").
+  //
+  // This used to analyse `node` and the pipeline as two INDEPENDENT feeders of
+  // the terminal, which was correct while they were two live chains (SPEC §1.1
+  // defect 1). They are now ONE chain — `node` subtree -> pipeline stages ->
+  // terminal — so exactly one thing feeds the terminal: the LAST pipeline stage
+  // when a pipeline is present, the `node` subtree's output when it is not.
+  //
+  // Threading the node's output shape INTO the pipeline (rather than starting
+  // the pipeline from Opaque and OR-ing the two verdicts) is the whole point:
+  // it is what lets `node:Pack` + `pipeline:[Field]` through. That is the
+  // canonical shape D7 blesses one line above its own restriction, and the old
+  // form rejected it. Nothing in the corpus goes red on the day that becomes
+  // wrong — the 272 entries construct no Record at all — so the gate is
+  // `NodePackPipelineFieldIsAcceptedAndEmits` in
+  // tests/treebuilder/ComposedChainTest.cpp, not a corpus count.
   {
     std::string culprit;
+    // The chain's own upstream is the head Listener, which emits a scalar.
     ValueShape intoTerminal = ValueShape::Opaque;
 
     if (rq.HasMember("node") && rq["node"].IsObject())
-      intoTerminal = shapeInto(rq["node"], ValueShape::Opaque, nullptr, 0, &culprit);
+      intoTerminal = shapeInto(rq["node"], intoTerminal, nullptr, 0, &culprit);
 
     for (const char* k : {"pipeline", "stages"}) {
       if (!rq.HasMember(k) || !rq[k].IsArray()) continue;
-      ValueShape cur = ValueShape::Opaque;
       for (const auto& stage : rq[k].GetArray())
-        cur = shapeInto(stage, cur, nullptr, 0, &culprit);
-      if (cur == ValueShape::Record) intoTerminal = ValueShape::Record;
+        intoTerminal = shapeInto(stage, intoTerminal, nullptr, 0, &culprit);
       break;                                // mirrors the build loop: first key wins
     }
 
@@ -493,16 +611,63 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   std::vector<std::shared_ptr<gma::INode>> keepAlive;
   keepAlive.push_back(terminal);
 
-  // Optional mid-pipeline, ultimately forwarding into terminal
+  // ENC-1290 / SPEC D5 — `node` and `pipeline` COMPOSE INTO ONE CHAIN:
+  //
+  //     Listener(streamKey, field) -> node subtree -> pipeline stages -> terminal
+  //
+  // and nothing reaches the terminal except through the pipeline.
+  //
+  // This used to build the `node` subtree wired straight to `terminal` and then
+  // restart from `terminal` for the pipeline, overwriting `midHead` — leaving
+  // BOTH chains live on one Responder, so the client received two unrelated
+  // streams interleaved on one request key and the pipeline never saw the
+  // values it exists to reduce (SPEC §1.1 defect 1; 52 of the 272 checked-in
+  // corpus requests carry both keys).
+  //
+  // ORDER MATTERS AND IS NOW REVERSED: the pipeline is built first, from the
+  // terminal backwards, so that the `node` subtree can be built INTO its head.
+  //
+  // A PARTIAL BUILD MUST NOT SURVIVE A THROW. `Dispatcher::_listeners` holds a
+  // `shared_ptr<INode>` per subscription and the ONLY thing that unregisters is
+  // `Listener::shutdown()` (`src/nodes/Listener.cpp`), so every Listener built
+  // before a later builder throws would stay subscribed for the life of the
+  // process, with nothing left holding a handle to shut it down. `Interval` and
+  // `BucketTime` likewise have a live thread by the time their builder returns.
+  //
+  // That leak is older than ENC-1290 — the previous order leaked on the mirror
+  // input (a good `node` followed by a bad pipeline stage) — but reversing the
+  // order moved the trigger onto the `node` subtree, which is the deeper and
+  // far more failure-prone one (`unknown node type`, `Aggregate: empty
+  // 'inputs'`, `Worker: unknown fn`, `Ref: unknown binding`, `Interval:
+  // positive 'ms' required`). It is reachable from untrusted client JSON:
+  // `ClientSession::handleSubscribe` catches the throw and replies
+  // `{"type":"error","where":"build"}`, so a client can drive it in a loop.
+  // Measured before this guard: 1000 rejected builds left 1000 subscriptions
+  // live and took `onTick` from 0.02 ms to 932 ms for 50 ticks, growing
+  // without bound.
+  //
+  // So everything constructed below is torn down on the way out unless the
+  // build reaches the end. This fixes BOTH orders, not just the new one.
+  struct Unwind {
+    std::vector<std::shared_ptr<gma::INode>>* built;
+    bool                                      armed{true};
+    ~Unwind() {
+      if (!armed || !built) return;
+      // Reverse order: tear down upstream before the downstream it feeds.
+      for (auto it = built->rbegin(); it != built->rend(); ++it)
+        if (*it) (*it)->shutdown();
+    }
+  };
+  // Deliberately NOT `keepAlive`, whose first element is the CALLER's terminal
+  // — that is never ours to shut down. `Listener::Create` is the last thing
+  // that can fail, and it reports failure instead of throwing, so the head
+  // never needs unwinding: on its error path it was never constructed.
+  std::vector<std::shared_ptr<gma::INode>> ours;
+  Unwind unwind{&ours};
+
   std::shared_ptr<gma::INode> midHead = terminal;
 
-  // Single node under "node"
-  if (rq.HasMember("node") && rq["node"].IsObject()) {
-    midHead = buildOne(rq["node"], streamKey, deps, terminal);
-    keepAlive.push_back(midHead);
-  }
-
-  // Or an array pipeline under "pipeline" or "stages"
+  // The pipeline, built tail-first. `midHead` stays `terminal` when absent.
   const char* pipeKeys[] = {"pipeline", "stages"};
   for (const char* k : pipeKeys) {
     if (rq.HasMember(k) && rq[k].IsArray()) {
@@ -514,10 +679,18 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
                            deps,
                            curDown);
         keepAlive.push_back(curDown);
+        ours.push_back(curDown);
       }
       midHead = curDown;
       break;
     }
+  }
+
+  // The `node` subtree, upstream of whatever the pipeline left in `midHead`.
+  if (rq.HasMember("node") && rq["node"].IsObject()) {
+    midHead = buildOne(rq["node"], streamKey, deps, midHead);
+    keepAlive.push_back(midHead);
+    ours.push_back(midHead);
   }
 
   if (!deps.dispatcher || !deps.pool)
@@ -543,6 +716,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   }
   auto head = std::move(headRes.value());
 
+  unwind.armed = false;      // the build succeeded; the caller owns it all
   BuiltChain out;
   out.head      = head;
   out.keepAlive = std::move(keepAlive);
@@ -728,19 +902,30 @@ void registerBuiltinNodeTypes() {
 
       const auto& inputArr = v["inputs"];
       std::vector<std::shared_ptr<INode>> roots;
+      std::vector<std::weak_ptr<INode>>   clockTargets;   // ENC-1290 (D5/Q1)
       roots.reserve(inputArr.Size() + 1);
-      for (auto& it : inputArr.GetArray())
-        roots.push_back(tree::buildOne(it, defaultStreamKey, deps, agg));
+      for (auto& it : inputArr.GetArray()) {
+        auto inHead = tree::buildOne(it, defaultStreamKey, deps, agg);
+        // A declared input with no Listener anywhere in it (AtomicAccessor and
+        // friends) has no clock of its own; the request's head Listener is it.
+        // An input that carries a Listener is already Dispatcher-driven and
+        // must NOT be driven a second time.
+        if (!declaredInputIsSelfClocked(it)) clockTargets.emplace_back(inHead);
+        roots.push_back(std::move(inHead));
+      }
       if (roots.empty())
         throw std::runtime_error("Aggregate: empty 'inputs' array");
 
       // Keep Aggregate alive alongside input heads — Listeners hold only a
       // weak_ptr to their downstream, so without this the Aggregate would be
       // destroyed when the local shared_ptr goes out of scope.
+      // NOTE (ENC-1290): this makes `roots` a LIFECYCLE list, not a list of
+      // input heads. It is deliberately not the clock's fan-out set — see the
+      // CompositeRoot comment.
       roots.push_back(agg);
 
-      if (roots.size() == 1) return roots.front();
-      return std::make_shared<CompositeRoot>(std::move(roots));
+      return std::make_shared<CompositeRoot>(std::move(roots),
+                                             std::move(clockTargets));
     });
 
   // Canonical name "GroupSplit"; "SymbolSplit" registered as a legacy alias
@@ -837,16 +1022,20 @@ void registerBuiltinNodeTypes() {
       auto pack = std::make_shared<Pack>(names, downstream);
 
       std::vector<std::shared_ptr<INode>> roots;
+      std::vector<std::weak_ptr<INode>>   clockTargets;   // ENC-1290 (D5/Q1)
       roots.reserve(fobj.MemberCount() + 1);
       std::size_t idx = 0;
       for (auto it = fobj.MemberBegin(); it != fobj.MemberEnd(); ++it, ++idx) {
         auto port = std::make_shared<PackPort>(std::weak_ptr<Pack>(pack), idx);
         pack->addPort(port);
-        roots.push_back(tree::buildOne(it->value, defaultStreamKey, deps, port));
+        auto inHead = tree::buildOne(it->value, defaultStreamKey, deps, port);
+        if (!declaredInputIsSelfClocked(it->value)) clockTargets.emplace_back(inHead);
+        roots.push_back(std::move(inHead));
       }
-      roots.push_back(pack);
+      roots.push_back(pack);   // lifecycle, NOT a clock target (ENC-1290)
 
-      return std::make_shared<CompositeRoot>(std::move(roots));
+      return std::make_shared<CompositeRoot>(std::move(roots),
+                                             std::move(clockTargets));
     });
 
   // Field extracts one named field from a Record flowing through. Pipeline
@@ -974,6 +1163,7 @@ void registerBuiltinNodeTypes() {
 
       // Pass 2: build each referenced binding's producer once -> Tee/consumer.
       std::vector<std::shared_ptr<INode>> roots;
+      std::vector<std::weak_ptr<INode>>   clockTargets;   // ENC-1290 (D5/Q1)
       for (auto& [name, consumers] : scope.consumers) {
         if (consumers.empty()) continue;
 
@@ -983,16 +1173,23 @@ void registerBuiltinNodeTypes() {
         } else {
           auto tee = std::make_shared<Tee>(consumers);
           roots.push_back(tee);  // own the Tee (a Listener producer holds it weakly)
-          sink = tee;
+          sink = tee;            // lifecycle, NOT a clock target (ENC-1290)
         }
 
         auto prodHead =
           tree::buildOne(bindings[name.c_str()], defaultStreamKey, deps, sink);
+        if (!declaredInputIsSelfClocked(bindings[name.c_str()]))
+          clockTargets.emplace_back(prodHead);
         roots.push_back(prodHead);
       }
 
+      // The body is a declared input head too — it is the branch that reaches
+      // `downstream`, so a body with no Listener of its own is exactly what the
+      // head Listener is there to drive.
+      if (!declaredInputIsSelfClocked(v["body"])) clockTargets.emplace_back(bodyHead);
       roots.push_back(bodyHead);
-      return std::make_shared<CompositeRoot>(std::move(roots));
+      return std::make_shared<CompositeRoot>(std::move(roots),
+                                             std::move(clockTargets));
     });
 }
 

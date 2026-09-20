@@ -183,8 +183,12 @@ TEST_F(RecordTerminal, PackAtTheTerminalIsRejected) {
   expectCanonicalRejection(msg, "Pack -> Responder");
 }
 
-// The same node reached through `node` rather than `pipeline`. Both keys wire
-// into the terminal today (SPEC §1.1 defect 1), so both must be analysed.
+// The same node reached through `node` rather than `pipeline`. With NO
+// pipeline the `node` subtree's output is what reaches the terminal, so it is
+// still analysed after ENC-1290 narrowed the check to the composed tail.
+// `ComposedChainTest.NodePackPipelineFieldIsAcceptedAndEmits` is the other
+// half: once a pipeline IS present, the node feeds the pipeline and not the
+// terminal, and `node:Pack` + `pipeline:[Field]` must be ACCEPTED.
 TEST_F(RecordTerminal, PackUnderNodeKeyIsRejected) {
   const std::string msg = buildAndReport(R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
