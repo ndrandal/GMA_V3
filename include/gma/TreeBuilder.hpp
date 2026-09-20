@@ -61,6 +61,24 @@ namespace tree {
     //
     // Sub-builds (`Let` bodies, fan-in inputs) copy `Deps` and MUST keep this
     // pointer: two strands inside one DAG is two orderings, i.e. none.
+    //
+    // WHAT THIS DOES NOT COVER, STATED SO IT IS NOT MISTAKEN FOR COVERED.
+    // The strand orders every value that enters the DAG through a `Listener`,
+    // which is every value the Dispatcher pushes. It does NOT order the three
+    // nodes that carry their own `std::thread` and post straight to the pool:
+    // `Interval` (`src/nodes/Interval.cpp:48`), `BucketTime` (`:92`) and
+    // `TumblingWindow` (`:128`). A DAG containing one of those has a second,
+    // unordered producer inside it, and a value from that branch can still
+    // interleave with a Listener-driven one.
+    //
+    // That is the SPEC's own descope, not an oversight:
+    // `specs/2026-09-20-gma-join-correctness/SPEC.md` §4 keeps the timer
+    // conversion out of this project because it collides file-for-line with
+    // ENC-1280 in the active *Timestamps on the wire* project. Note the case it
+    // does NOT leave open: a PULL-only fan-in input (`AtomicAccessor` and
+    // friends) is clocked by the head Listener under ENC-1290's clock rule, so
+    // it travels the strand like everything else. The gap is specifically a
+    // DAG that declares a timer node of its own.
     std::shared_ptr<rt::Strand> strand;
   };
 
