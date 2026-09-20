@@ -881,10 +881,30 @@ TEST(CorpusValueAssertions, Corpus87_ObservationPointIsSound_Control) {
 // tuples of {AAPL, AAPL} and {MSFT, MSFT} — a "price difference between AAPL
 // and MSFT" computed without ever looking at both.
 //
-// NOTE the vacuous-pass branch: under the locked default this test can go green
-// by the join emitting nothing. That is honest (an inert request is better than
-// a wrong answer) but it is weak, and ENC-1292 should strengthen it to the
-// `by:"none"` form once `by` exists.
+// THE VACUOUS-PASS BRANCH IS NOW LIVE, AND IS WHY THERE IS AN ANTI-VACUITY
+// ASSERT BELOW (ENC-1291, 2026-09-20). ENC-1289 wrote: "under the locked
+// default this test can go green by the join emitting nothing. That is honest
+// (an inert request is better than a wrong answer) but it is weak." SPEC D2
+// shipped and that is exactly what happened: with each declared input on its
+// own port, AAPL fills port 0 of `buf_["AAPL"]` and MSFT fills port 1 of
+// `buf_["MSFT"]`, neither entry ever completes, and the terminal sees ZERO
+// arrivals. `joined` is then empty, `joined.size() % 2 == 0` holds on `0 % 2`,
+// the same-side loop never executes and `sameSide == 0` is true over nothing.
+// The test would have gone GREEN — flipping its `WILL_FAIL` ctest case to
+// FAILED — having checked nothing at all.
+//
+// So ENC-1291 added `ASSERT_GT(d.arrivals, 0u)` below, and did NOT remove the
+// marker. The gate is red for the real, unfixed reason: SPEC section 1.1
+// defect 3, the correlation key is `sv.symbol`, so no cross-streamKey join
+// exists in the engine. That is ENC-1292's (SPEC D1, `by:"none"`), and when it
+// lands this test should be strengthened to assert SIX MIXED tuples — at which
+// point both the anti-vacuity ASSERT and the `sameSide == 0` EXPECT are
+// checking something, and the marker comes out.
+//
+// The ASSERT is deliberately on `d.arrivals` rather than on `joined.size()`:
+// `joined` is what the `>= 900.0` filter left, so asserting on it would confuse
+// "the join emitted nothing" with "the filter dropped everything", which are
+// different defects with different owners.
 //
 // Corpus 87 also carries `pipeline:[Worker{fn:"diff"}]`. SPEC §1.1 defect 1
 // wired that as a SECOND live chain into the same terminal, and the `>= 900.0`
@@ -895,10 +915,12 @@ TEST(CorpusValueAssertions, Corpus87_ObservationPointIsSound_Control) {
 // +-- EXPECTED TO FAIL ----------------------------------------------------+
 // | Registered in CMakeLists.txt as ctest case                             |
 // |   gma_enc1289_xfail_no_cross_symbol_join            WILL_FAIL TRUE     |
-// | WHEN ENC-1291 MAKES THIS PASS, that ctest case goes RED. Delete its    |
+// | WHEN ENC-1292 MAKES THIS PASS, that ctest case goes RED. Delete its    |
 // | add_test/set_tests_properties block and drop this test's name from the |
-// | GMA_ENC1289_EXPECTED_FAILURES list. ENC-1292 should then strengthen    |
-// | the assertion itself (see the note above about the vacuous pass).      |
+// | GMA_ENC1289_EXPECTED_FAILURES list, and change the pinned count in     |
+// | gma_enc1289_expected_failures_really_failed — which, being the last    |
+// | one, means deleting that case too. ENC-1292 should also strengthen the |
+// | assertion itself: 6 MIXED tuples under `by:"none"`, not 0.             |
 // +------------------------------------------------------------------------+
 TEST(CorpusValueAssertions, Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself) {
   using namespace corpus_values;
@@ -917,6 +939,34 @@ TEST(CorpusValueAssertions, Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself)
       tick(disp, "MSFT", {{"lastPrice", kMsftBase + double(n)}});
     }
   });
+
+  // ── ANTI-VACUITY (ENC-1291) ───────────────────────────────────────────────
+  // Everything below this line is a statement about the tuples the join
+  // emitted. Since SPEC D2's port-indexed fan-in it emits NONE for a
+  // cross-streamKey request, and every one of those statements is then true
+  // over an empty set. A gate that cannot distinguish "the join is correct"
+  // from "the join is silent" is not a gate — it is the exact failure this
+  // project has spent the week removing. So: it must emit something first.
+  ASSERT_GT(d.arrivals, 0u)
+      << "corpus_id 87 \"Price difference between AAPL and MSFT\" emitted "
+         "NOTHING from " << (2 * kTicksPerSide) << " ticks.\n"
+         "    Every assertion below this point would hold vacuously over an "
+         "empty tuple list, so this\n"
+         "    test would report GREEN having checked nothing.\n\n"
+         "    Cause: src/nodes/Aggregate.cpp keys its buffer on `sv.symbol` "
+         "(SPEC D1's locked default\n"
+         "    `by:\"streamKey\"`), so AAPL fills port 0 of one buffer and MSFT "
+         "fills port 1 of another and\n"
+         "    neither completes. That is SPEC section 1.1 defect 3 — the "
+         "correlation key caps the system —\n"
+         "    and 23 of the 52 corpus `Aggregate` requests ask for a join it "
+         "cannot express.\n"
+         "    Cleared by ENC-1292 (declared `by`, SPEC D1), which must ALSO "
+         "strengthen the check below\n"
+         "    to assert 6 MIXED tuples rather than 0. ENC-1291 (D2) deliberately "
+         "did not clear it: it turned\n"
+         "    six tuples pairing one symbol with ITSELF into no tuples at all, "
+         "which is inert, not correct.";
 
   // Keep only raw prices. This filter was written to drop the SECOND chain's
   // small diffs; since ENC-1290 composed the chains and this test drives the
