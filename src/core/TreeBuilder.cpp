@@ -579,8 +579,11 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   // Not minted when there is no pool: with no executor there is nothing to
   // serialise, delivery is already inline and already in order.
   Deps depsWithStrand = depsIn;
-  if (!depsWithStrand.strand && depsWithStrand.pool)
-    depsWithStrand.strand = std::make_shared<gma::rt::Strand>(depsWithStrand.pool);
+  static std::shared_ptr<gma::rt::Strand> gGlobalStrand;  // MUTATION M5
+  if (!depsWithStrand.strand && depsWithStrand.pool) {
+    if (!gGlobalStrand) gGlobalStrand = std::make_shared<gma::rt::Strand>(depsWithStrand.pool);
+    depsWithStrand.strand = gGlobalStrand;
+  }
   const Deps& deps = depsWithStrand;   // everything below builds against this
 
   // ENC-1293 / SPEC specs/2026-09-20-gma-join-correctness D7 — TEMPORARY, and
@@ -778,7 +781,7 @@ void registerBuiltinNodeTypes() {
       // makes them arrive in the order the Dispatcher produced them.
       auto sp = std::make_shared<Listener>(streamKey, field, downstream,
                                            deps.pool, deps.dispatcher,
-                                           std::make_shared<gma::rt::Strand>(deps.pool));  // MUTATION M3
+                                           deps.strand);
       sp->start();
       return sp;
     });
