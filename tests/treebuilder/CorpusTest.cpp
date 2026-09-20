@@ -256,11 +256,25 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
 //         -> all four GREEN at threads=4.
 //
 // ───────────────────────────────────────────────────────────────────────────
-// THIS FILE IS RED ON master, AND THAT IS THE POINT
+// THREE OF THESE FAIL TODAY, ON PURPOSE, AND `ctest` IS STILL GREEN
 //
 // SPEC D8: "an instrument that cannot fail is not a gate. This is sequenced
-// first deliberately." Each assertion below names the ticket that turns it
-// green:
+// first deliberately." So three of the four assertions below are red against
+// this engine and are MEANT to be.
+//
+// They are not disabled, skipped or commented out. Each is registered in
+// CMakeLists.txt as its own ctest case with `WILL_FAIL TRUE`: the assertion
+// executes on every run, ctest reports the case as a pass *because* the
+// assertion fails, and the suite stays green for the other sessions building
+// this repo. A red `ctest` on master would have turned "is the build green?"
+// into a question everyone has to re-investigate, and the answer decays to
+// "ignore those three" within a day.
+//
+// The property that makes this better than a DISABLED_ test: it unwinds
+// itself. When the fix lands the assertion starts passing, `WILL_FAIL` flips
+// its ctest case RED, and whoever landed the fix has to come here and remove
+// the marker. A disabled test rots silently; this one demands attention
+// exactly once, at the moment it becomes wrong.
 //
 //   Corpus86_JoinMustNotCompleteFromOneInputAlone  -> ENC-1291 (port-indexed
 //                                                     fan-in + arity, D2)
@@ -269,6 +283,15 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
 //   Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself
 //                                                  -> ENC-1291, and ENC-1292
 //                                                     (declared `by`, D1)
+//
+// `Corpus86_SpreadIsExactlyTwoCents_SingleThreadControl` is deliberately NOT
+// registered that way. It is an ordinary always-green test — inverting it
+// would assert that the checker must never return clean, which is the opposite
+// of what a control is for.
+//
+// To see the real verdicts rather than the inverted ones, run the binary
+// directly: `./gma_tests --gtest_filter='CorpusValueAssertions.*'`. That is
+// also the form the ENC-1065 `--gtest_repeat` check needs (full, unfiltered).
 // ═══════════════════════════════════════════════════════════════════════════
 
 namespace corpus_values {
@@ -532,6 +555,14 @@ constexpr std::size_t kRaceReps    = 4;     // 4000 tuples; see the budget note 
 // no repetition and no thread-count dependence.
 //
 // Turns green with ENC-1291 (port-indexed fan-in + arity enforcement, D2).
+//
+// +-- EXPECTED TO FAIL ----------------------------------------------------+
+// | Registered in CMakeLists.txt as ctest case                             |
+// |   gma_enc1289_xfail_join_counts_values_not_inputs   WILL_FAIL TRUE     |
+// | WHEN ENC-1291 MAKES THIS PASS, that ctest case goes RED. Delete its    |
+// | add_test/set_tests_properties block and drop this test's name from the |
+// | GMA_ENC1289_EXPECTED_FAILURES list. Do not touch the assertion.        |
+// +------------------------------------------------------------------------+
 TEST(CorpusValueAssertions, Corpus86_JoinMustNotCompleteFromOneInputAlone) {
   using namespace corpus_values;
 
@@ -580,6 +611,10 @@ TEST(CorpusValueAssertions, Corpus86_JoinMustNotCompleteFromOneInputAlone) {
 // return CORRECT at all — without which the red in 2b below would prove
 // nothing. It also pins, in the suite itself, the reason a single-threaded
 // value assertion is not a gate for defect 4.
+//
+// NOT registered WILL_FAIL, deliberately: this one is an ordinary always-green
+// ctest case. Inverting it would assert that the checker must never return
+// clean, which is the opposite of what a control is for.
 TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents_SingleThreadControl) {
   using namespace corpus_values;
 
@@ -619,6 +654,15 @@ TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents_SingleThreadControl
 // the probe's most favourable observed rate).
 //
 // Turns green with ENC-1005 (per-request strand, SPEC D3/D4).
+//
+// +-- EXPECTED TO FAIL ----------------------------------------------------+
+// | Registered in CMakeLists.txt as ctest case                             |
+// |   gma_enc1289_xfail_spread_is_not_two_cents_under_concurrency          |
+// |                                                     WILL_FAIL TRUE     |
+// | WHEN ENC-1005 MAKES THIS PASS, that ctest case goes RED. Delete its    |
+// | add_test/set_tests_properties block and drop this test's name from the |
+// | GMA_ENC1289_EXPECTED_FAILURES list. Do not touch the assertion.        |
+// +------------------------------------------------------------------------+
 TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents) {
   using namespace corpus_values;
 
@@ -690,6 +734,14 @@ TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents) {
 // defect 1 wires as a SECOND live chain into the same terminal. Its values are
 // differences of AAPL prices (0..5 here), two orders of magnitude below any raw
 // price, so they are filtered out by value rather than assumed away.
+// +-- EXPECTED TO FAIL ----------------------------------------------------+
+// | Registered in CMakeLists.txt as ctest case                             |
+// |   gma_enc1289_xfail_no_cross_symbol_join            WILL_FAIL TRUE     |
+// | WHEN ENC-1291 MAKES THIS PASS, that ctest case goes RED. Delete its    |
+// | add_test/set_tests_properties block and drop this test's name from the |
+// | GMA_ENC1289_EXPECTED_FAILURES list. ENC-1292 should then strengthen    |
+// | the assertion itself (see the note above about the vacuous pass).      |
+// +------------------------------------------------------------------------+
 TEST(CorpusValueAssertions, Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself) {
   using namespace corpus_values;
 
