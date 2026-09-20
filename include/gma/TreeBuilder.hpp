@@ -62,6 +62,16 @@ namespace tree {
     // Sub-builds (`Let` bodies, fan-in inputs) copy `Deps` and MUST keep this
     // pointer: two strands inside one DAG is two orderings, i.e. none.
     //
+    // CONSTRUCT A `Deps` PER REQUEST. `buildForRequest` mints only when this is
+    // null, so a caller that hoists one `Deps` out of a loop hands every
+    // subscription the SAME strand and serialises them all against each other —
+    // silently, and it is exactly the per-session granularity the comment at
+    // `ClientSession::handleSubscribe` explains why not to have. Both current
+    // callers build `Deps` inside the per-request scope; the hazard is that
+    // hoisting it reads as a pure cleanup. Honouring a supplied strand is
+    // deliberate and gated (`ACallerSuppliedStrandIsUsedNotReplaced`), so this
+    // cannot be fixed by ignoring the field — only written down.
+    //
     // WHAT THIS DOES NOT COVER, STATED SO IT IS NOT MISTAKEN FOR COVERED.
     // The strand orders every value that enters the DAG through a `Listener`,
     // which is every value the Dispatcher pushes. It does NOT order the three
@@ -69,7 +79,10 @@ namespace tree {
     // `Interval` (`src/nodes/Interval.cpp:48`), `BucketTime` (`:92`) and
     // `TumblingWindow` (`:128`). A DAG containing one of those has a second,
     // unordered producer inside it, and a value from that branch can still
-    // interleave with a Listener-driven one.
+    // interleave with a Listener-driven one. Measured on a single
+    // `Tee{Listener, Interval}` DAG: 206 arrivals, **max 4 concurrent** — so
+    // "delivery is serialized per request DAG" is literally false for that
+    // shape, and nothing gates it.
     //
     // That is the SPEC's own descope, not an oversight:
     // `specs/2026-09-20-gma-join-correctness/SPEC.md` §4 keeps the timer
