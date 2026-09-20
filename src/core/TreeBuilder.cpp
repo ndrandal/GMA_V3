@@ -330,15 +330,23 @@ std::string recordTerminalMessage(const std::string& culprit) {
 // `Pack -> Field -> Responder` and `ClientSessionTest`'s
 // `SubscribeAcceptsPackFieldResponder` are both written in exactly that form.
 //
-// DELIBERATELY NOT RECURSIVE into a stage's own sub-JSON. The only sub-node a
-// builder reachable from a pipeline stage can hold that could itself be a
-// fan-in is a fan-in's own `inputs` (or a `Let`'s `bindings`/`body`), and that
-// is the DECLARED-INPUT case the clock rule exists for — legal, and the thing
-// this check must not touch. A `Chain`/`Tee`/`Switch` stage wrapping a fan-in
-// is therefore NOT refused today; the shape is currently an empty forwarding
-// set rather than a designed behaviour, and inventing a rule for it is out of
-// scope here (ENC-1336 is explicitly non-recursive). Widen this only with a
-// ruling that says what the nested shape should MEAN.
+// DELIBERATELY NOT RECURSIVE into a stage's own sub-JSON — AND THAT IS A REAL,
+// MEASURED HOLE, not a vacuous one. SPEC §5 Q7 says "today no builder reachable
+// from a pipeline stage takes a sub-node that could hold a fan-in except a
+// fan-in's own `inputs`, so the question is currently empty." **That is false.**
+// `Chain` holds `stages`, `Tee` holds `outputs`, `Switch` holds `cases`, and
+// `Chain`'s builder ends `return curDown;` — it hands back its inner builder's
+// head verbatim, so a `Chain` wrapping a fan-in makes the STAGE HEAD literally
+// a `CompositeRoot`. Measured on this branch: `node:Worker{last}` +
+// `pipeline:[Chain{stages:[Aggregate{Listener ask, Listener bid}]}]` builds,
+// and the node's output does not appear at the terminal — exactly the failure
+// this check exists to abolish, one keyword away. Reproduced identically
+// through `Tee`. `FanInWrappedInAChainIsNotRefused_KnownGap` pins both.
+//
+// It stays out of scope because ENC-1336 was scoped non-recursive and because
+// inventing a rule for the nested shape would be inventing behaviour the SPEC
+// has not ruled. Widen this only with a ruling that says what the nested shape
+// should MEAN — but widen it from the fact above, not from Q7's premise.
 //
 namespace {
 
@@ -372,16 +380,24 @@ std::string fanInPipelineStageMessage(const std::string& type,
       ? "this request also carries a 'node', whose subtree is built directly "
         "upstream of the first pipeline stage"
       : "it is not the first stage — " + std::string(key) + "[" +
-        std::to_string(index - 1) + "] is built directly upstream of it";
+        std::to_string(index - 1) + "] precedes it and would be built directly"
+        " upstream of it";
 
   return "buildForRequest: node type '" + type + "' is a FAN-IN and it appears"
-         " as " + where + " of this request, with something built upstream of"
-         " it: " + because + ". That is rejected at build time. A fan-in takes"
-         " its data from its own declared inputs; a value arriving from"
-         " upstream is treated as a CLOCK for those inputs and is never"
-         " forwarded on, so everything upstream of this stage would be"
-         " DISCARDED IN SILENCE — no log, no metric, no error, and a chart"
-         " missing a value with no diagnostic in either repo. THE FIX: move the"
+         " as " + where + " of this request, with something upstream of it in"
+         " the composed chain: " + because + ". That is rejected at build time."
+         " A fan-in takes its data from its own declared inputs; a value"
+         " arriving from upstream is delivered as a CLOCK for those inputs,"
+         " never as a join member (SPEC section 5 Q1), so this stage is a break"
+         " in the chain and not a link in it. For 'Aggregate' and 'Pack' the"
+         " upstream's output never reaches this stage's downstream at all, and"
+         " where the declared inputs each carry their own Listener the"
+         " forwarding set is EMPTY and that output is discarded entirely, with"
+         " no log, no metric and no error — a chart missing a value with no"
+         " diagnostic in either repo. ('Let' is the one shape where a clock"
+         " reaching a body that carries no Listener is forwarded on; it is"
+         " refused here too because this rule is structural rather than a"
+         " per-shape audit.) THE FIX: move the"
          " fan-in to 'node' position. The composed chain is"
          " Listener(streamKey, field) -> node subtree -> pipeline stages ->"
          " terminal, so a fan-in under 'node' is clocked by the head Listener"
