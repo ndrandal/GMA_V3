@@ -39,6 +39,37 @@ namespace gma::rt {
 // thread.
 class Strand : public std::enable_shared_from_this<Strand> {
 public:
+  // ENC-1338 — WHICH SITE MINTED THIS STRAND.
+  //
+  // D3 names ONE mint site: `ClientSession::handleSubscribe`, one strand per
+  // subscription. `tree::buildForRequest` mints a second one as a backstop so
+  // ordering is a property of the DAG rather than of the caller's discipline
+  // (see the comment there). The two are behaviourally indistinguishable from
+  // outside — which is exactly why ENC-1005's mutations M7 (delete the
+  // `handleSubscribe` mint) and M10 (unguard it) reddened NOTHING: the backstop
+  // silently supplied a replacement and every assertion in the suite stayed
+  // true. The production guarantee rested on a line that could be deleted with
+  // a green suite.
+  //
+  // This tag is the missing observable. It is a `const char*` literal, set once
+  // at construction and never read on any hot path, that says which site minted
+  // this strand. `tests/ws/SubscriptionStrandMintTest.cpp` reads it off the
+  // head `Listener` of a subscription driven through a REAL WebSocket session
+  // and asserts it is the session site — so a DAG that silently fell back to
+  // the backstop names itself.
+  //
+  // It is not test-only scaffolding: with two mint sites and a granularity
+  // argument attached to each, "which executor is this DAG on, and who gave it
+  // one" is a question a log line should be able to answer.
+  //
+  // DEFAULT IS DELIBERATELY NOT "buildForRequest". Anything that did not go
+  // through a site that names itself reads `unattributed`, which today means
+  // the backstop or a test-constructed strand. A mint inlined at a call site —
+  // the shape M10 takes when it is applied to the call rather than to the
+  // helper — therefore also reads `unattributed` and is caught by the same
+  // assertion.
+  static constexpr const char* kUnattributedOrigin = "unattributed";
+
   // MUST BE OWNED BY A `shared_ptr` — `std::make_shared<Strand>(pool)`.
   // `post()` calls `shared_from_this()`, so a stack-allocated Strand throws
   // `std::bad_weak_ptr` on its first post. Same contract `nodes::Listener` has
@@ -47,7 +78,10 @@ public:
   //
   // `pool` must outlive every task posted to this strand. In production that is
   // ExecutionContext's pool, which outlives all sessions.
-  explicit Strand(ThreadPool* pool) : pool_(pool) {}
+  explicit Strand(ThreadPool* pool,
+                  const char* origin = kUnattributedOrigin)
+    : pool_(pool)
+    , origin_(origin ? origin : kUnattributedOrigin) {}
 
   Strand(const Strand&)            = delete;
   Strand& operator=(const Strand&) = delete;
@@ -73,10 +107,18 @@ public:
   // Diagnostics only — never a synchronisation point.
   std::size_t queueDepth() const;
 
+  // ENC-1338. The mint site that created this strand; see `kUnattributedOrigin`
+  // above. Never null — the constructor substitutes the default for a null
+  // argument. Compare with `==`/`strcmp` against the site's own accessor
+  // (e.g. `gma::server::subscriptionStrandOrigin()`), never against a literal
+  // spelled out a second time.
+  const char* origin() const noexcept { return origin_; }
+
 private:
   void drain();
 
   ThreadPool* pool_;
+  const char* origin_;
   mutable std::mutex                mx_;
   std::deque<std::function<void()>> q_;
   // True while a drain task is live on the pool. It is the token that makes
