@@ -4,6 +4,7 @@
 #include <functional>
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstring>
 #include <numeric>
 #include <cmath>
@@ -110,11 +111,11 @@ inline gma::JoinBy joinByFor(const rapidjson::Value& v,
   // while `{"by":"typo","by":"none"}` was refused — the closed vocabulary was
   // order-dependent, which is a hole in Q3's ruling rather than an application
   // of it. Counting is O(members) and runs once per fan-in at build time.
-  if (std::count_if(v.MemberBegin(), v.MemberEnd(),
-                    [](const rapidjson::Value::ConstMemberIterator::ValueType& m) {
-                      return m.name.IsString() &&
-                             std::strcmp(m.name.GetString(), "by") == 0;
-                    }) > 1)
+  std::size_t byCount = 0;
+  for (auto m = v.MemberBegin(); m != v.MemberEnd(); ++m)
+    if (m->name.IsString() && std::strcmp(m->name.GetString(), "by") == 0)
+      ++byCount;
+  if (byCount > 1)
     throw std::runtime_error(
       std::string(nodeType) + ": 'by' is declared more than once. A repeated "
       "key is refused rather than resolved by position — whichever copy the "
