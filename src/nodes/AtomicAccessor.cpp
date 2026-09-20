@@ -13,7 +13,7 @@ AtomicAccessor::AtomicAccessor(std::string symbol,
   , downstream_(std::move(downstream))
 {}
 
-void AtomicAccessor::onValue(const StreamValue&) {
+void AtomicAccessor::onValue(const StreamValue& sv) {
   // Early-out on stopping_ is an optimization; correctness is guaranteed by
   // the mutex: if shutdown() races, the lock ensures we see downstream_==nullptr.
   if (stopping_.load(std::memory_order_acquire)) return;
