@@ -217,6 +217,45 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
 // silent and makes the terminal stream unambiguously the join's output.
 //
 // ───────────────────────────────────────────────────────────────────────────
+// MEASURED, NOT ASSUMED (ENC-1289, GMA_V3@7928d78, g++ 16.2.1, AMD Ryzen 7
+// 5800XT 8C/16T, Fedora 44, Release; 1-minute load average 12.4-17.6
+// throughout — other agents were compiling)
+//
+//   Corpus86_JoinMustNotCompleteFromOneInputAlone   red 40/40 runs, and every
+//       run reported the SAME numbers (8 arrivals, 4 tuples, 4 same-side).
+//   Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself
+//                                                   red 40/40 runs, same
+//       numbers every run (6 tuples, 6 same-side).
+//   Corpus86_SpreadIsExactlyTwoCents                red 40/40 runs; wrong-tuple
+//       rate per invocation 3.62% - 8.22% of 4000 tuples (mean ~6.4%),
+//       consistent with the probe's pooled 6.62-7.27% at this width. At the
+//       lowest rate observed here the chance of a clean pass is (1-0.0362)^4000
+//       ~ 1e-64; at the probe's all-time minimum single-run rate (1.70%) it is
+//       ~1e-30.
+//   Corpus86_SpreadIsExactlyTwoCents_SingleThreadControl
+//                                                   green 40/40 runs
+//       = 40,000 further single-threaded tuples, 0 wrong.
+//
+// FALSIFIED IN BOTH DIRECTIONS. A check never seen fail is not a check; a check
+// that can only fail is not one either. Each assertion was run against a
+// throwaway prototype of the fixes it names (NOT committed, reverted after
+// measurement):
+//
+//   port-indexed fan-in alone (a prototype of ENC-1291/D2: one slot per
+//       declared input, emit only when all are filled)
+//         -> JoinMustNotCompleteFromOneInputAlone            RED  -> GREEN
+//         -> Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself
+//                                                            RED  -> GREEN
+//         -> SpreadIsExactlyTwoCents      still RED, and its failures changed
+//            character completely: 0 same-side, 0 sign-flip, 1303/3979 (32.75%)
+//            CROSS_TICK. Exactly what SPEC D3 predicts is left once the
+//            counting defect is gone, and evidence the classifier discriminates
+//            between the two defects rather than reporting one number.
+//   + ordered delivery (a prototype of ENC-1005/D3: both ThreadPool hops made
+//       synchronous)
+//         -> all four GREEN at threads=4.
+//
+// ───────────────────────────────────────────────────────────────────────────
 // THIS FILE IS RED ON master, AND THAT IS THE POINT
 //
 // SPEC D8: "an instrument that cannot fail is not a gate. This is sequenced
