@@ -1053,7 +1053,10 @@ void registerBuiltinNodeTypes() {
       // everything else, BEFORE anything is constructed (see the note at the
       // top of this builder): a refused `by` must not leave a subscribed
       // Listener behind.
-      const gma::JoinBy by = joinByFor(v, "Aggregate", defaultStreamKey);
+      gma::JoinBy by = gma::JoinBy::StreamKey;
+      bool badBy = false; std::string badMsg;
+      try { by = joinByFor(v, "Aggregate", defaultStreamKey); }
+      catch (const std::exception& e) { badBy = true; badMsg = e.what(); }
 
       // `defaultStreamKey` is the request's own top-level `streamKey` (or the
       // group's symbol inside a GroupSplit, which is the same question asked
@@ -1098,6 +1101,7 @@ void registerBuiltinNodeTypes() {
       // CompositeRoot comment.
       roots.push_back(agg);
 
+      if (badBy) throw std::runtime_error(badMsg);
       unwind.disarm();
       return std::make_shared<CompositeRoot>(std::move(roots),
                                              std::move(clockTargets));
