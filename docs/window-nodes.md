@@ -58,10 +58,30 @@ the upstream scalar's `streamKey` and whose `value` holds the variant
 alternative `std::vector<double>` containing the scalars accumulated
 during the closed window, in arrival order.
 
+Since ENC-1280 the emit also carries **`StreamValue::bucketStartMs`** — the
+epoch-ms start of the window it just closed, i.e.
+`BucketTime::bucketStartMsFor(target, period)` where `target` is the same
+aligned boundary the node waits on. Before that change the boundary was a
+loop-body local consumed only as a `cv.wait_until` deadline, so nothing
+downstream could say *which* bar a value belonged to; a time axis had to be
+fitted from arrival times. `BucketTime` stamps its clock pulse the same way.
+
+`bucketStartMs` is propagated unchanged by every value-transforming node
+(`VectorReducer`, `Worker`, `Expr`, `Field`, `Pack`, `Aggregate`,
+`AtomicAccessor`) and by the pass-through nodes (`Filter`, `Switch`, `Tee`,
+`GroupSplit`), so it survives the whole pipeline to `ClientSession`, which
+writes it on the `update` frame as an exact JSON integer. A value produced by
+anything other than an aligned timer node carries `0` — "no bucket identity" —
+and the wire key is then **omitted**, not sent as zero. See
+`docs/ARCHITECTURE.md` §"Server replies" and
+`specs/2026-09-20-timestamps-on-the-wire/SPEC.md` D9/D10.
+
 ### Empty-bucket semantics
 
 If no upstream values arrived during a period, no emit fires for that
-boundary. Consumers that need a frame per boundary even on quiet markets
+boundary. This is why `bucketStartMs` exists rather than a delivery counter:
+a quiet bucket is a **gap** in the bar sequence, and a consumer counting frames
+would silently shift every later bar one period early. Consumers that need a frame per boundary even on quiet markets
 (e.g. a chart that should draw a "no-trade" gap rather than freeze) are
 a future `EmitOnEmpty` config addition.
 

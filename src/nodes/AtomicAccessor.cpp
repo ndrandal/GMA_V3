@@ -13,7 +13,7 @@ AtomicAccessor::AtomicAccessor(std::string symbol,
   , downstream_(std::move(downstream))
 {}
 
-void AtomicAccessor::onValue(const StreamValue&) {
+void AtomicAccessor::onValue(const StreamValue& sv) {
   // Early-out on stopping_ is an optimization; correctness is guaranteed by
   // the mutex: if shutdown() races, the lock ensures we see downstream_==nullptr.
   if (stopping_.load(std::memory_order_acquire)) return;
@@ -38,7 +38,10 @@ void AtomicAccessor::onValue(const StreamValue&) {
     ds = downstream_;
   }
   if (ds) {
-    ds->onValue(StreamValue{ symbol_, opt.value() });
+    // ENC-1280: an AtomicAccessor is clocked by its upstream, which for the
+    // ENC-101 canonical pattern may be a BucketTime pulse. Sampling happens
+    // in the bucket that pulse closed, so inherit its identity (SPEC D9).
+    ds->onValue(StreamValue{ symbol_, opt.value(), sv.bucketStartMs });
   }
 }
 

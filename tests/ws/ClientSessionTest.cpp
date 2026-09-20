@@ -21,6 +21,7 @@
 #include <rapidjson/document.h>
 
 #include <atomic>
+#include <cstdint>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -539,6 +540,138 @@ TEST(ClientSessionTest, CancelByIdsRemovesStringKeyedSub) {
 
   EXPECT_FALSE(sawPostCancelUpdate)
     << "received update frame for id='foo' after cancel by ids";
+
+  beast::error_code ec;
+  stream.close(ws::close_code::normal, ec);
+}
+
+// ---------------------------------------------------------------------------
+// ENC-1280 — the bucket basis on the LIVE serialiser.
+//
+// SPEC specs/2026-09-20-timestamps-on-the-wire/SPEC.md D9, and its §5
+// correction: `src/ws/WSResponder.cpp` is dead code (WsBridge is constructed
+// nowhere outside tests/ws/WsBridgeTest.cpp), so a stamp plumbed through it
+// would have had no runtime effect — the ENC-813 failure class. The live
+// producer is the `sendFn` lambda inside ClientSession::handleSubscribe,
+// reached from main.cpp -> WebSocketServer -> ClientSession.
+//
+// This test refuses to assume that. It boots a REAL WebSocketServer (the same
+// class main.cpp constructs), connects a REAL Beast WebSocket client, and
+// reads the bytes off the socket. Nothing below touches a node directly.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::int64_t nowEpochMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+} // namespace
+
+// A bucketed pipeline (TumblingWindow -> VectorReducer -> Responder) must put
+// an exact, grid-aligned integer `bucketStartMs` on the wire. The
+// VectorReducer hop is deliberate: it constructs a new StreamValue, so this
+// also proves the stamp survives a value-transforming node on the real path.
+TEST(ClientSessionTest, BucketedPipelineStampsBucketStartMsOnTheWire) {
+  gma::registerBuiltinFunctions();
+  gma::registerBuiltinNodeTypes();
+
+  constexpr std::int64_t kPeriodMs = 100;
+
+  ServerHarness srv;
+  asio::io_context clientIoc;
+  auto stream = connect(clientIoc, srv.port());
+
+  const std::string req =
+    R"({"type":"subscribe","requests":[{"id":"r-bucket","streamKey":"TWLIVE","field":"px",)"
+    R"("pipeline":[{"type":"TumblingWindow","periodMs":100},)"
+    R"({"type":"VectorReducer","fn":"max"}]}]})";
+  stream.write(asio::buffer(req));
+
+  std::string ackPayload = readUntilType(stream, "subscribed", std::chrono::seconds(2));
+  ASSERT_FALSE(ackPayload.empty()) << "no 'subscribed' ack received";
+
+  const std::int64_t t0 = nowEpochMs();
+
+  auto ev = std::make_shared<rapidjson::Document>();
+  ev->SetObject();
+  ev->AddMember("px", 7.5, ev->GetAllocator());
+  gma::Event tick;
+  tick.type   = "tick";
+  tick.symbol = "TWLIVE";
+  tick.payload = std::move(ev);
+  srv.dispatcher->onTick(tick);
+
+  std::string updatePayload = readUntilType(stream, "update", std::chrono::seconds(3));
+  const std::int64_t t1 = nowEpochMs();
+  ASSERT_FALSE(updatePayload.empty()) << "no 'update' frame received";
+
+  rapidjson::Document upd;
+  upd.Parse(updatePayload.c_str());
+  ASSERT_FALSE(upd.HasParseError()) << updatePayload;
+
+  ASSERT_TRUE(upd.HasMember("bucketStartMs"))
+      << "the live update frame carries no bucket basis: " << updatePayload;
+  // Must be a JSON integer, not a double — a current ms epoch needs 41 bits
+  // and the float32 lane D4 rejects would quantise it to ~2-minute steps.
+  ASSERT_TRUE(upd["bucketStartMs"].IsInt64())
+      << "bucketStartMs must be an exact integer: " << updatePayload;
+
+  const std::int64_t stamp = upd["bucketStartMs"].GetInt64();
+  EXPECT_NE(stamp, 0) << "boundary discarded before the wire: " << updatePayload;
+  EXPECT_EQ(stamp % kPeriodMs, 0)
+      << "stamp is off the wall-clock grid TumblingWindow aligns to: " << updatePayload;
+  // The bar must be one that closed while this test was running.
+  EXPECT_GE(stamp, (t0 / kPeriodMs) * kPeriodMs - kPeriodMs) << updatePayload;
+  EXPECT_LE(stamp, (t1 / kPeriodMs) * kPeriodMs) << updatePayload;
+
+  // The rest of the frame is unchanged.
+  EXPECT_STREQ(upd["type"].GetString(), "update");
+  EXPECT_TRUE(upd.HasMember("streamKey"));
+  EXPECT_TRUE(upd.HasMember("value"));
+  EXPECT_TRUE(upd.HasMember("requestId"));
+
+  beast::error_code ec;
+  stream.close(ws::close_code::normal, ec);
+}
+
+// The complement, and the compatibility guarantee: a subscription with no
+// bucketing declares no basis, so the key is ABSENT — not `0`, which would
+// read as a 1970 epoch. Un-bucketed update frames keep the exact four-key
+// shape they had before ENC-1280.
+TEST(ClientSessionTest, UnbucketedSubscriptionEmitsNoBucketStartMs) {
+  gma::registerBuiltinFunctions();
+  gma::registerBuiltinNodeTypes();
+
+  ServerHarness srv;
+  asio::io_context clientIoc;
+  auto stream = connect(clientIoc, srv.port());
+
+  const std::string req =
+    R"({"type":"subscribe","requests":[{"id":"r-raw","streamKey":"RAWLIVE","field":"px"}]})";
+  stream.write(asio::buffer(req));
+
+  ASSERT_FALSE(readUntilType(stream, "subscribed", std::chrono::seconds(2)).empty());
+
+  auto ev = std::make_shared<rapidjson::Document>();
+  ev->SetObject();
+  ev->AddMember("px", 3.25, ev->GetAllocator());
+  gma::Event tick;
+  tick.type   = "tick";
+  tick.symbol = "RAWLIVE";
+  tick.payload = std::move(ev);
+  srv.dispatcher->onTick(tick);
+
+  std::string updatePayload = readUntilType(stream, "update", std::chrono::seconds(2));
+  ASSERT_FALSE(updatePayload.empty()) << "no 'update' frame received";
+
+  rapidjson::Document upd;
+  upd.Parse(updatePayload.c_str());
+  ASSERT_FALSE(upd.HasParseError()) << updatePayload;
+  EXPECT_FALSE(upd.HasMember("bucketStartMs"))
+      << "an un-bucketed stream must declare no basis at all: " << updatePayload;
 
   beast::error_code ec;
   stream.close(ws::close_code::normal, ec);

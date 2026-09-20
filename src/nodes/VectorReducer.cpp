@@ -40,7 +40,10 @@ void VectorReducer::onValue(const StreamValue& sv) {
     ds = downstream_;
   }
   if (ds) {
-    ds->onValue(StreamValue{ sv.symbol, ArgType{out} });
+    // ENC-1280: this is the node that normally sits between TumblingWindow
+    // and the Responder, so dropping the bucket identity here would lose it
+    // for the canonical bar pipeline (SPEC D9).
+    ds->onValue(StreamValue{ sv.symbol, ArgType{out}, sv.bucketStartMs });
   }
 }
 

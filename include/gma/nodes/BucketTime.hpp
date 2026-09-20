@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <cstdint>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -62,6 +63,27 @@ public:
   // testing — no state, pure function of the inputs.
   static std::chrono::system_clock::time_point nextAlignedAfter(
       std::chrono::system_clock::time_point from,
+      std::chrono::milliseconds period);
+
+  // ENC-1280 / SPEC specs/2026-09-20-timestamps-on-the-wire D9.
+  //
+  // Epoch-ms START of the bucket that CLOSES at `boundary`, where `boundary`
+  // is a value returned by nextAlignedAfter(). That is the bucket whose
+  // contents a timer node emits when it wakes at `boundary`, so this is the
+  // bar identity that belongs on the emitted StreamValue.
+  //
+  // Derived from `boundary` by subtracting exactly one period rather than by
+  // independently floor-aligning a clock reading, so it is *identical by
+  // construction* to `nextAlignedAfter(...) - period` — including the
+  // truncating-division behaviour that would otherwise make the two disagree
+  // for pre-epoch instants. D10 forbids a wall-clock basis; this is
+  // bucket-derived and therefore bucket-stable.
+  //
+  // Returns 0 ("no bucket identity", see StreamValue::bucketStartMs) for a
+  // non-positive period — the same defensive case nextAlignedAfter handles by
+  // returning `from` unaligned.
+  static std::int64_t bucketStartMsFor(
+      std::chrono::system_clock::time_point boundary,
       std::chrono::milliseconds period);
 
 private:

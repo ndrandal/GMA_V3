@@ -21,7 +21,9 @@ void Field::onValue(const StreamValue& sv) {
   const ArgType* f = recordFind(*rec, name_);
   if (!f) return;                            // field absent -> drop
 
-  ds->onValue(StreamValue{sv.symbol, *f});
+  // ENC-1280: carry the bar identity through unchanged — a projection does
+  // not change which bucket the value belongs to (SPEC D9).
+  ds->onValue(StreamValue{sv.symbol, *f, sv.bucketStartMs});
 }
 
 void Field::shutdown() noexcept {
