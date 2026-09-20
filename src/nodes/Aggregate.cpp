@@ -80,7 +80,7 @@ void Aggregate::onPortValue(std::size_t portIndex, const StreamValue& sv) {
   // Buffering and emitting under one key is deliberate: it makes it impossible
   // for the two to drift apart, which is the bug a separate `outSymbol` local
   // would eventually grow.
-  const std::string& joinKey = outKey_;
+  const std::string& joinKey = sv.symbol;
 
   std::vector<ArgType> batch;
   std::shared_ptr<INode> p;
