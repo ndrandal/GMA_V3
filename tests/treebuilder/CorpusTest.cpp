@@ -1038,7 +1038,7 @@ TEST(CorpusValueAssertions, Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself)
       << "\n\n    Cause: `Aggregate::onPortValue` keys the buffer on `sv.symbol`, so "
          "AAPL and\n"
          "    MSFT occupy two independent buffers and each completes alone. "
-         "src/nodes/Pack.cpp:32\n"
+         "`Pack::onPortValue`\n"
          "    keys the same way — no cross-streamKey join exists in the engine at all "
          "(SPEC\n"
          "    §1.1 defect 3; 23 of the 52 corpus Aggregate requests ask for one).\n"
