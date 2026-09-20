@@ -74,6 +74,194 @@ inline bool has(const rapidjson::Value& v, const char* k) {
 } // namespace
 
 //
+// ---------- ENC-1293: Record-valued terminal rejection ----------
+//
+// SPEC specs/2026-09-20-gma-join-correctness D7.
+//
+// **THIS RESTRICTION IS DELIBERATELY TEMPORARY. ENC-1295 (embassy) lifts it.**
+// Delete this whole block, its call site in `buildForRequest`, and
+// `tests/treebuilder/RecordTerminalTest.cpp` once embassy consumes a
+// Record-valued update instead of dropping it.
+//
+// WHY IT EXISTS. `Pack` emits a `gma::Record`; `util::writeArgTypeJson`
+// (include/gma/util/JsonUtil.hpp) serializes a Record as a JSON **object** onto
+// the live update frame (`src/server/ClientSession.cpp`'s `sendFn`). embassy's
+// inbound path is scalar-only: `asFloat32` (embassy/internal/gma/types.go)
+// decodes `number | string | boolean` and returns false for an object, and its
+// caller in `internal/gma/client.go` does `if !ok { return }` — **no log, no
+// metric, no error**, and the whole downstream contract is
+// `ValueHandler func(value float32)`. So a `Pack`-terminated pipeline renders
+// an empty chart with no diagnostic anywhere **in two repos**. Rejecting at
+// build time converts that silent cross-repo failure into a loud single-repo
+// one, on a frame the client already understands.
+//
+// WHAT IT IS, PRECISELY. A conservative static shape analysis of the request
+// JSON, run BEFORE a single node is constructed (Listener/Interval/BucketTime
+// all spawn threads in their builders, so rejecting afterwards would leak
+// work). It answers one question: *is the value arriving at the terminal
+// statically certain to be a Record?* Certain — never "probably". A false
+// positive would refuse a request that works today; a false negative only
+// leaves the pre-existing silent drop in place, which is the strictly safer
+// direction while the restriction is temporary.
+//
+// Measured against the checked-in corpus at the commit that introduced this:
+// **0 of 272 `tests/treebuilder/corpus_requests.json` entries are refused** —
+// the corpus uses only Worker / AtomicAccessor / Listener / Aggregate /
+// Interval / SymbolSplit, and constructs no Record at all.
+//
+// KNOWN CONSERVATIVE GAPS, recorded rather than hidden. Each of these emits a
+// Record the analysis calls `Opaque`, so the silent drop survives there:
+//   * `Field` projecting a nested Record out of a `Pack{a: Pack{...}}`.
+//   * `Worker` / `Expr` / `AtomicAccessor` / `Listener`, whose runtime value
+//     is a feed- or function-supplied `ArgType` this analysis cannot see.
+// None is reachable from anything the corpus or forum authors today, and all
+// of them stop mattering when ENC-1295 lands.
+//
+namespace {
+
+// What a node emits into its `downstream`.
+//   Record — statically certain to be a `gma::Record`.
+//   Opaque — everything else (scalar, vector, or not knowable here).
+enum class ValueShape { Opaque, Record };
+
+// Build-time `Let` scope, so a `Ref` in terminal position resolves to the
+// producer that will actually feed the terminal.
+struct ShapeScope {
+  const rapidjson::Value* bindings { nullptr };
+  const ShapeScope*       parent   { nullptr };
+};
+
+// Mirrors JsonValidator::MAX_TREE_DEPTH's role: a guard, not a semantic limit.
+// Exceeding it yields Opaque — buildOne still runs and reports the real error.
+constexpr int kMaxShapeDepth = 64;
+
+ValueShape shapeInto(const rapidjson::Value& spec,
+                     ValueShape              upstream,
+                     const ShapeScope*       scope,
+                     int                     depth,
+                     std::string*            culprit) {
+  if (depth > kMaxShapeDepth) return ValueShape::Opaque;
+  if (!spec.IsObject() || !spec.HasMember("type") || !spec["type"].IsString())
+    return ValueShape::Opaque;            // malformed — buildOne throws its own error
+
+  const std::string type = spec["type"].GetString();
+
+  auto record = [&](const char* t) {
+    if (culprit && culprit->empty()) *culprit = t;
+    return ValueShape::Record;
+  };
+
+  // The only node that CONSTRUCTS a Record (src/nodes/Pack.cpp).
+  if (type == "Pack") return record("Pack");
+
+  // Pass-through: forwards the value it received, unchanged
+  // (src/nodes/Filter.cpp `ds->onValue(sv)`).
+  if (type == "Filter") return upstream;
+
+  // Aggregate re-emits its buffered INPUT values one at a time
+  // (src/nodes/Aggregate.cpp), so its shape is its inputs' shape. Its inputs
+  // are built terminating in the Aggregate, whose own upstream is this node's.
+  if (type == "Aggregate") {
+    ValueShape out = ValueShape::Opaque;
+    if (spec.HasMember("inputs") && spec["inputs"].IsArray())
+      for (const auto& in : spec["inputs"].GetArray())
+        if (shapeInto(in, upstream, scope, depth + 1, culprit) == ValueShape::Record)
+          out = ValueShape::Record;
+    return out;
+  }
+
+  // Chain threads its stages upstream -> downstream; the last one feeds
+  // `downstream`, so thread the shape through in the same order.
+  if (type == "Chain") {
+    ValueShape cur = upstream;
+    if (spec.HasMember("stages") && spec["stages"].IsArray())
+      for (const auto& st : spec["stages"].GetArray())
+        cur = shapeInto(st, cur, scope, depth + 1, culprit);
+    return cur;
+  }
+
+  // Tee and Switch build EVERY branch terminating in the shared `downstream`,
+  // so one Record-valued branch is enough to poison the terminal.
+  if (type == "Tee" || type == "Switch") {
+    const char* key = (type == "Tee") ? "outputs" : "cases";
+    ValueShape out = ValueShape::Opaque;
+    if (spec.HasMember(key) && spec[key].IsArray())
+      for (const auto& b : spec[key].GetArray())
+        if (shapeInto(b, upstream, scope, depth + 1, culprit) == ValueShape::Record)
+          out = ValueShape::Record;
+    if (type == "Switch" && spec.HasMember("default") &&
+        shapeInto(spec["default"], upstream, scope, depth + 1, culprit)
+          == ValueShape::Record)
+      out = ValueShape::Record;
+    return out;
+  }
+
+  // GroupSplit builds its child per group, terminating in `downstream`.
+  if (type == "GroupSplit" || type == "SymbolSplit")
+    return spec.HasMember("child")
+             ? shapeInto(spec["child"], upstream, scope, depth + 1, culprit)
+             : ValueShape::Opaque;
+
+  // Both timers tick `StreamValue{"", 0.0}` into their child
+  // (src/nodes/Interval.cpp `timerLoop`), so the child's upstream is a scalar
+  // regardless of what reached the timer.
+  if (type == "Interval" || type == "BucketTime")
+    return spec.HasMember("child")
+             ? shapeInto(spec["child"], ValueShape::Opaque, scope, depth + 1, culprit)
+             : ValueShape::Opaque;
+
+  // Let builds its body with `downstream`; a Ref sitting in terminal position
+  // is fed by its binding's producer, so resolve through the scope chain.
+  if (type == "Let") {
+    ShapeScope s;
+    s.bindings = (spec.HasMember("bindings") && spec["bindings"].IsObject())
+                   ? &spec["bindings"] : nullptr;
+    s.parent   = scope;
+    return spec.HasMember("body")
+             ? shapeInto(spec["body"], upstream, &s, depth + 1, culprit)
+             : ValueShape::Opaque;
+  }
+
+  if (type == "Ref") {
+    const std::string name = strOr(spec, "name", "");
+    if (name.empty()) return ValueShape::Opaque;
+    for (const ShapeScope* s = scope; s; s = s->parent) {
+      if (!s->bindings || !s->bindings->HasMember(name.c_str())) continue;
+      // Producers see the OUTER scope only (see the "Let" builder's comment),
+      // so resolve the producer against `s->parent`, not `s`.
+      return shapeInto((*s->bindings)[name.c_str()], ValueShape::Opaque,
+                       s->parent, depth + 1, culprit);
+    }
+    return ValueShape::Opaque;
+  }
+
+  // Everything else emits a scalar or a vector:
+  //   Listener / AtomicAccessor  — a pushed or stored feed value
+  //   Worker / Expr / VectorReducer — a computed number
+  //   TumblingWindow             — vector<double>
+  //   Field                      — one field PROJECTED OUT of a Record, which
+  //                                is exactly the reduction this rejection
+  //                                tells the author to apply
+  return ValueShape::Opaque;
+}
+
+std::string recordTerminalMessage(const std::string& culprit) {
+  return "buildForRequest: this request's terminal would receive a Record value"
+         " (produced by node type '" + (culprit.empty() ? std::string("Pack") : culprit) +
+         "'), which GMA serializes as a JSON object. That is rejected at build time"
+         " because embassy's inbound path is scalar-only — asFloat32 decodes"
+         " number|string|boolean and its caller drops anything else with no log, no"
+         " metric and no error — so this request would render an EMPTY CHART with no"
+         " diagnostic in either repo. Reduce the Record to a scalar before the"
+         " terminal: the canonical shapes are Pack -> Expr -> Responder and"
+         " Pack -> Field -> Responder. This restriction is TEMPORARY (ENC-1293) and"
+         " is lifted by ENC-1295 once embassy consumes a Record; see"
+         " specs/2026-09-20-gma-join-correctness/SPEC.md D7.";
+}
+
+} // namespace
+
+//
 // ---------- CompositeRoot: fan-out root for many inputs ----------
 //
 namespace {
