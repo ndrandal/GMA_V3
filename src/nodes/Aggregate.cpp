@@ -128,7 +128,7 @@ void Aggregate::onPortValue(std::size_t portIndex, const StreamValue& sv) {
       // identical to `sv.symbol` under the default, and the request's own
       // streamKey under `by:"none"`, where `sv.symbol` is whichever side
       // happened to arrive second and is therefore a race.
-      p->onValue(StreamValue{ joinKey, std::move(v), sv.bucketStartMs });
+      p->onValue(StreamValue{ outKey_, std::move(v), sv.bucketStartMs });
     }
   }
 }
