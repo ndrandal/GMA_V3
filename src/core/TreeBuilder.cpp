@@ -456,6 +456,39 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   if (!terminal)
     throw std::runtime_error("buildForRequest: terminal node cannot be null");
 
+  // ENC-1293 / SPEC specs/2026-09-20-gma-join-correctness D7 — TEMPORARY, and
+  // lifted by ENC-1295 (embassy). See the long comment on `shapeInto` above for
+  // why a Record reaching the terminal is a SILENT failure in two repos.
+  //
+  // This runs before anything is constructed: the Listener / Interval /
+  // BucketTime builders spawn threads and call start(), so a reject after the
+  // fact would leak live work for a request that is never going to be served.
+  //
+  // Both `node` and the `pipeline`/`stages` array are examined, because today
+  // a request carrying both leaves BOTH chains wired into the terminal (SPEC
+  // §1.1 defect 1 — `midHead` is overwritten at the loop below but the `node`
+  // subtree stays live). Whoever lands ENC-1290/D5 and composes them into one
+  // chain should narrow this to the composed tail.
+  {
+    std::string culprit;
+    ValueShape intoTerminal = ValueShape::Opaque;
+
+    if (rq.HasMember("node") && rq["node"].IsObject())
+      intoTerminal = shapeInto(rq["node"], ValueShape::Opaque, nullptr, 0, &culprit);
+
+    for (const char* k : {"pipeline", "stages"}) {
+      if (!rq.HasMember(k) || !rq[k].IsArray()) continue;
+      ValueShape cur = ValueShape::Opaque;
+      for (const auto& stage : rq[k].GetArray())
+        cur = shapeInto(stage, cur, nullptr, 0, &culprit);
+      if (cur == ValueShape::Record) intoTerminal = ValueShape::Record;
+      break;                                // mirrors the build loop: first key wins
+    }
+
+    if (intoTerminal == ValueShape::Record)
+      throw std::runtime_error(recordTerminalMessage(culprit));
+  }
+
   // Collect every node so callers can keep them alive (all use weak_ptr downstream).
   std::vector<std::shared_ptr<gma::INode>> keepAlive;
   keepAlive.push_back(terminal);
