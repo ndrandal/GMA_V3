@@ -753,6 +753,60 @@ TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents) {
          "    Expected green after ENC-1005 (per-request strand, SPEC D3/D4).";
 }
 
+// ═══ 2c. ENC-1290 — the CONTROL on corpus 87's observation point ═══════════
+//
+// PASSES today, and must keep passing. NOT registered WILL_FAIL.
+//
+// Gate 3 below carries a `>= 900.0` filter and an assertion that the filter
+// dropped nothing. That assertion cannot gate anything from where it sits:
+// gate 3 is registered `WILL_FAIL TRUE`, so it is *required* to fail and ctest
+// reads a second failure inside it as the expected one. Injecting the exact
+// regression it guards against (stop stripping the pipeline, so the terminal
+// sees `Worker{fn:"diff"}` output and the filter keeps 0 of 12 arrivals) leaves
+// `gma_enc1289_xfail_no_cross_symbol_join` reporting **Passed**.
+//
+// Corpus 86 already has such a control (2a, and it is what caught D5 hollowing
+// out gate 2). Corpus 87 had none. This is it: the same drive as gate 3, with
+// only the soundness of the observation point asserted and no claim about the
+// join's correctness — so it is green now, stays green through ENC-1291 and
+// ENC-1292, and goes red the moment gate 3 starts measuring the wrong stream.
+TEST(CorpusValueAssertions, Corpus87_ObservationPointIsSound_Control) {
+  using namespace corpus_values;
+
+  const rapidjson::Value* req = corpusRequest(87);
+  ASSERT_NE(req, nullptr) << "corpus_id 87 not found in corpus_requests.json";
+  rapidjson::Document join = nodeWithoutPipeline(*req);
+
+  constexpr double kAaplBase = 1000.0, kMsftBase = 5000.0;
+  constexpr std::size_t kTicksPerSide = 6;
+
+  Drive d = driveCorpus(join, /*threads=*/1, [](gma::Dispatcher& disp) {
+    for (std::size_t n = 0; n < kTicksPerSide; ++n) {
+      tick(disp, "AAPL", {{"lastPrice", kAaplBase + double(n)}});
+      tick(disp, "MSFT", {{"lastPrice", kMsftBase + double(n)}});
+    }
+  });
+
+  std::size_t raw = 0;
+  for (const auto& [tid, vals] : d.byThread) {
+    (void)tid;
+    for (double v : vals) if (v >= 900.0) ++raw;
+  }
+
+  EXPECT_EQ(d.nonNumeric, 0u) << "terminal received a non-numeric value";
+  EXPECT_EQ(raw, d.arrivals)
+      << "CONTROL FAILED. " << (d.arrivals - raw) << " of " << d.arrivals
+      << " arrivals are not raw AAPL/MSFT prices.\n"
+         "    Corpus 87's `node` is driven WITHOUT its pipeline (see the "
+         "ENC-1290 note above the driver),\n"
+         "    so every value reaching the terminal is a join member and the "
+         "`>= 900.0` filter in gate 3\n"
+         "    must drop nothing. If computed values are arriving, gate 3 is "
+         "measuring the wrong stream\n"
+         "    and will pass VACUOUSLY — which its own WILL_FAIL registration "
+         "cannot tell you.";
+}
+
 // ═══ 3. Defect 3 — the correlation key is `symbol`, so no cross-symbol join ═
 //
 // DETERMINISTIC, at threads=1, red today.
