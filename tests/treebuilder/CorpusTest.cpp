@@ -824,6 +824,18 @@ TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents) {
 // only the soundness of the observation point asserted and no claim about the
 // join's correctness — so it is green now, stays green through ENC-1291 and
 // ENC-1292, and goes red the moment gate 3 starts measuring the wrong stream.
+//
+// ENC-1291 (2026-09-20): IT IS GREEN FOR A REASON IT WAS NOT WRITTEN FOR, AND
+// SAYS SO NOW. Since SPEC D2's port-indexed fan-in, a cross-streamKey join
+// completes nothing, so `d.arrivals` is 0 and `raw == d.arrivals` holds as
+// `0 == 0` — the filter cannot drop anything because there is nothing to drop.
+// The control's own claim is therefore vacuous today. Deleting it would lose
+// the check the moment ENC-1292 makes it live again, and asserting `arrivals >
+// 0` here would redden the MAIN `gma_tests` target (this test is deliberately
+// NOT inverted — SPEC Corrections C4.5 is what that costs). So instead the
+// zero is PINNED below: the control fails the moment corpus 87 starts emitting
+// anything, which is exactly when ENC-1292 lands and exactly when its real
+// assertion becomes checkable again.
 TEST(CorpusValueAssertions, Corpus87_ObservationPointIsSound_Control) {
   using namespace corpus_values;
 
@@ -848,6 +860,19 @@ TEST(CorpusValueAssertions, Corpus87_ObservationPointIsSound_Control) {
   }
 
   EXPECT_EQ(d.nonNumeric, 0u) << "terminal received a non-numeric value";
+
+  // ENC-1291: the pinned zero. See the block above this test.
+  EXPECT_EQ(d.arrivals, 0u)
+      << "corpus 87's cross-streamKey join emitted " << d.arrivals
+      << " value(s), where SPEC D1's locked default `by:\"streamKey\"` emits 0.\n"
+         "    If ENC-1292 (declared `by`) just landed, this is the expected "
+         "moment: re-arm this control\n"
+         "    (the `raw == d.arrivals` check below is vacuous while arrivals is "
+         "0) and strengthen gate 3\n"
+         "    to assert 6 MIXED tuples. If ENC-1292 has NOT landed, something "
+         "else started feeding this\n"
+         "    terminal and gate 3 is measuring the wrong stream.";
+
   EXPECT_EQ(raw, d.arrivals)
       << "CONTROL FAILED. " << (d.arrivals - raw) << " of " << d.arrivals
       << " arrivals are not raw AAPL/MSFT prices.\n"
