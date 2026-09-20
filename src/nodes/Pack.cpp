@@ -41,14 +41,15 @@ void Pack::onPortValue(std::size_t idx, const StreamValue& sv) {
   {
     std::lock_guard<std::mutex> lk(mx_);
 
-    auto it = state_.find(joinKey);
+    const std::string& bufKey = sv.symbol;
+    auto it = state_.find(bufKey);
     if (it == state_.end()) {
       if (state_.size() >= MAX_SYMBOLS) {
         gma::util::logger().log(gma::util::LogLevel::Warn,
           "Pack: max symbols reached, dropping", {{"symbol", sv.symbol}});
         return;
       }
-      it = state_.emplace(joinKey, SymState{}).first;
+      it = state_.emplace(bufKey, SymState{}).first;
       it->second.latest.resize(names_.size());
     }
 
@@ -69,7 +70,7 @@ void Pack::onPortValue(std::size_t idx, const StreamValue& sv) {
   // record belongs to that field's bucket. Slots filled in earlier buckets
   // are last-value-wins already — this does not make them older than they
   // are, it dates the record by its completion.
-  if (ds) ds->onValue(StreamValue{sv.symbol, ArgType{std::move(rec)}, sv.bucketStartMs});
+  if (ds) ds->onValue(StreamValue{joinKey, ArgType{std::move(rec)}, sv.bucketStartMs});
 }
 
 void Pack::shutdown() noexcept {
