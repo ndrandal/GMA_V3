@@ -397,6 +397,42 @@ bool declaredInputIsSelfClocked(const rapidjson::Value& spec, int depth = 0) {
   return false;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SUB-BUILD UNWIND (ENC-1291)
+//
+// `buildForRequest`'s `Unwind` guard (section 1.5, ENC-1290) only ever receives
+// the node `buildOne` RETURNS. Anything constructed INSIDE a sub-build that
+// then throws is invisible to it — and a fan-in builder is exactly that: it
+// loops over its declared `inputs`/`fields`/`bindings` calling `buildOne`, so a
+// throw on input N strands every `Listener` inputs 0..N-1 already registered
+// with the Dispatcher. Those are the unbounded, client-reachable, never-
+// unregistered subscriptions section 1.5 is about: still walked on every
+// `onTick`, delivering to a downstream port that died with the rejected fan-in,
+// so nothing observes them and nothing can stop them.
+//
+// This was live before ENC-1291 (a bad node type inside `inputs` reaches it),
+// and ENC-1291 ADDED a throw site in that loop — the arity check fires for a
+// NESTED fan-in too — so it is fixed here rather than left. Found by an
+// adversarial pass that measured 25 stranded subscriptions from 25 refused
+// builds of a nested `Aggregate`, on the committed tree.
+//
+// Used by all three fan-in builders, because the shape and the hole are the
+// same in each. Gated by `NestedFanInThrowLeavesNothingSubscribed`.
+struct SubBuildUnwind {
+  std::vector<std::shared_ptr<gma::INode>> built;
+  bool                                     armed{true};
+
+  void keep(const std::shared_ptr<gma::INode>& n) { if (n) built.push_back(n); }
+  void disarm() noexcept { armed = false; }
+
+  ~SubBuildUnwind() {
+    if (!armed) return;
+    // Reverse order: tear down upstream before the downstream it feeds.
+    for (auto it = built.rbegin(); it != built.rend(); ++it)
+      if (*it) (*it)->shutdown();
+  }
+};
+
 // RefStub: the no-op head a `Ref` returns (ENC-647). A Ref has no local
 // upstream — its binding's producer feeds the Ref's downstream directly (via a
 // Tee) — so this stub never receives values. It exists only to satisfy the
@@ -972,6 +1008,11 @@ void registerBuiltinNodeTypes() {
 
       auto agg = std::make_shared<Aggregate>(arity, downstream);
 
+      // ENC-1291: a throw on input N must not strand inputs 0..N-1. See
+      // SubBuildUnwind above.
+      SubBuildUnwind unwind;
+      unwind.keep(agg);
+
       std::vector<std::shared_ptr<INode>> roots;
       std::vector<std::weak_ptr<INode>>   clockTargets;   // ENC-1290 (D5/Q1)
       roots.reserve(inputCount + 1);
@@ -990,6 +1031,7 @@ void registerBuiltinNodeTypes() {
         // An input that carries a Listener is already Dispatcher-driven and
         // must NOT be driven a second time.
         if (!declaredInputIsSelfClocked(it)) clockTargets.emplace_back(inHead);
+        unwind.keep(inHead);
         roots.push_back(std::move(inHead));
       }
 
@@ -1001,6 +1043,7 @@ void registerBuiltinNodeTypes() {
       // CompositeRoot comment.
       roots.push_back(agg);
 
+      unwind.disarm();
       return std::make_shared<CompositeRoot>(std::move(roots),
                                              std::move(clockTargets));
     });
@@ -1098,6 +1141,9 @@ void registerBuiltinNodeTypes() {
 
       auto pack = std::make_shared<Pack>(names, downstream);
 
+      SubBuildUnwind unwind;          // ENC-1291, same hole as Aggregate's
+      unwind.keep(pack);
+
       std::vector<std::shared_ptr<INode>> roots;
       std::vector<std::weak_ptr<INode>>   clockTargets;   // ENC-1290 (D5/Q1)
       roots.reserve(fobj.MemberCount() + 1);
@@ -1107,6 +1153,7 @@ void registerBuiltinNodeTypes() {
         pack->addPort(port);
         auto inHead = tree::buildOne(it->value, defaultStreamKey, deps, port);
         if (!declaredInputIsSelfClocked(it->value)) clockTargets.emplace_back(inHead);
+        unwind.keep(inHead);
         roots.push_back(std::move(inHead));
       }
       roots.push_back(pack);   // lifecycle, NOT a clock target (ENC-1290)
