@@ -1,12 +1,18 @@
 // File: include/gma/rt/Strand.hpp
 #pragma once
 
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 
 #include "gma/rt/ThreadPool.hpp"
+
+// ENC-1338. Named only as the friend of `Strand::Attribution` below — `rt` does
+// not include, call or otherwise depend on anything in `server`. See the
+// Attribution comment for why the coupling is deliberate and one-directional.
+namespace gma { namespace server { class SubscriptionStrandMint; } }
 
 namespace gma::rt {
 
