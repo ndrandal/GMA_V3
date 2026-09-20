@@ -770,43 +770,6 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
     depsWithStrand.strand = std::make_shared<gma::rt::Strand>(depsWithStrand.pool);
   const Deps& deps = depsWithStrand;   // everything below builds against this
 
-  // ENC-1336 / SPEC §5 Q7, D5 as amended — A FAN-IN IS NOT A PIPELINE STAGE
-  // when anything is built upstream of it. See the long comment on
-  // `isFanInType` above for why this is a refusal rather than a documented
-  // behaviour, and for the one placement that stays legal.
-  //
-  // Like D7's check below, this is STRUCTURAL and reads only the request JSON,
-  // and it runs BEFORE a single node is constructed — the Listener / Interval /
-  // BucketTime builders spawn threads and call start(), so a late reject leaks
-  // live work for a request that is never served (SPEC §1.5).
-  //
-  // It runs BEFORE D7's Record check deliberately: a misplaced `Pack` trips
-  // both, and WHERE the stage sits is the more specific diagnosis — moving it
-  // is the fix, and D7 will still speak up afterwards if the terminal really
-  // would receive a Record. It is also the permanent rule of the two; D7's
-  // block is scheduled for deletion by ENC-1295 and nothing here moves with it.
-  {
-    const bool hasNode = rq.HasMember("node") && rq["node"].IsObject();
-    for (const char* k : {"pipeline", "stages"}) {
-      if (!rq.HasMember(k) || !rq[k].IsArray()) continue;
-      const auto arr = rq[k].GetArray();
-      for (rapidjson::SizeType i = 0; i < arr.Size(); ++i) {
-        const auto& stage = arr[i];
-        if (!stage.IsObject() || !stage.HasMember("type") ||
-            !stage["type"].IsString())
-          continue;                    // malformed — buildOne throws its own error
-        const std::string type = stage["type"].GetString();
-        if (!isFanInType(type)) continue;
-        // THE ACCEPTED CASE, and it is §5 Q1 rather than an exception: with no
-        // `node`, `midHead` starts at `terminal`, so the head Listener is this
-        // stage's only upstream — the same wiring the fan-in gets under `node`.
-        if (!hasNode && i == 0) continue;
-        throw std::runtime_error(
-          fanInPipelineStageMessage(type, k, static_cast<std::size_t>(i), hasNode));
-      }
-      break;                           // mirrors the build loop: first key wins
-    }
-  }
   // ENC-1293 / SPEC specs/2026-09-20-gma-join-correctness D7 — TEMPORARY, and
   // lifted by ENC-1295 (embassy). See the long comment on `shapeInto` above for
   // why a Record reaching the terminal is a SILENT failure in two repos.
@@ -848,6 +811,44 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
 
     if (intoTerminal == ValueShape::Record)
       throw std::runtime_error(recordTerminalMessage(culprit));
+  }
+
+  // ENC-1336 / SPEC §5 Q7, D5 as amended — A FAN-IN IS NOT A PIPELINE STAGE
+  // when anything is built upstream of it. See the long comment on
+  // `isFanInType` above for why this is a refusal rather than a documented
+  // behaviour, and for the one placement that stays legal.
+  //
+  // Like D7's check below, this is STRUCTURAL and reads only the request JSON,
+  // and it runs BEFORE a single node is constructed — the Listener / Interval /
+  // BucketTime builders spawn threads and call start(), so a late reject leaks
+  // live work for a request that is never served (SPEC §1.5).
+  //
+  // It runs BEFORE D7's Record check deliberately: a misplaced `Pack` trips
+  // both, and WHERE the stage sits is the more specific diagnosis — moving it
+  // is the fix, and D7 will still speak up afterwards if the terminal really
+  // would receive a Record. It is also the permanent rule of the two; D7's
+  // block is scheduled for deletion by ENC-1295 and nothing here moves with it.
+  {
+    const bool hasNode = rq.HasMember("node") && rq["node"].IsObject();
+    for (const char* k : {"pipeline", "stages"}) {
+      if (!rq.HasMember(k) || !rq[k].IsArray()) continue;
+      const auto arr = rq[k].GetArray();
+      for (rapidjson::SizeType i = 0; i < arr.Size(); ++i) {
+        const auto& stage = arr[i];
+        if (!stage.IsObject() || !stage.HasMember("type") ||
+            !stage["type"].IsString())
+          continue;                    // malformed — buildOne throws its own error
+        const std::string type = stage["type"].GetString();
+        if (!isFanInType(type)) continue;
+        // THE ACCEPTED CASE, and it is §5 Q1 rather than an exception: with no
+        // `node`, `midHead` starts at `terminal`, so the head Listener is this
+        // stage's only upstream — the same wiring the fan-in gets under `node`.
+        if (!hasNode && i == 0) continue;
+        throw std::runtime_error(
+          fanInPipelineStageMessage(type, k, static_cast<std::size_t>(i), hasNode));
+      }
+      break;                           // mirrors the build loop: first key wins
+    }
   }
 
   // Collect every node so callers can keep them alive (all use weak_ptr downstream).
