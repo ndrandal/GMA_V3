@@ -816,19 +816,30 @@ void registerBuiltinNodeTypes() {
 
       const auto& inputArr = v["inputs"];
       std::vector<std::shared_ptr<INode>> roots;
+      std::vector<std::weak_ptr<INode>>   clockTargets;   // ENC-1290 (D5/Q1)
       roots.reserve(inputArr.Size() + 1);
-      for (auto& it : inputArr.GetArray())
-        roots.push_back(tree::buildOne(it, defaultStreamKey, deps, agg));
+      for (auto& it : inputArr.GetArray()) {
+        auto inHead = tree::buildOne(it, defaultStreamKey, deps, agg);
+        // A declared input with no Listener anywhere in it (AtomicAccessor and
+        // friends) has no clock of its own; the request's head Listener is it.
+        // An input that carries a Listener is already Dispatcher-driven and
+        // must NOT be driven a second time.
+        if (!declaredInputIsSelfClocked(it)) clockTargets.emplace_back(inHead);
+        roots.push_back(std::move(inHead));
+      }
       if (roots.empty())
         throw std::runtime_error("Aggregate: empty 'inputs' array");
 
       // Keep Aggregate alive alongside input heads — Listeners hold only a
       // weak_ptr to their downstream, so without this the Aggregate would be
       // destroyed when the local shared_ptr goes out of scope.
+      // NOTE (ENC-1290): this makes `roots` a LIFECYCLE list, not a list of
+      // input heads. It is deliberately not the clock's fan-out set — see the
+      // CompositeRoot comment.
       roots.push_back(agg);
 
-      if (roots.size() == 1) return roots.front();
-      return std::make_shared<CompositeRoot>(std::move(roots));
+      return std::make_shared<CompositeRoot>(std::move(roots),
+                                             std::move(clockTargets));
     });
 
   // Canonical name "GroupSplit"; "SymbolSplit" registered as a legacy alias
@@ -925,16 +936,20 @@ void registerBuiltinNodeTypes() {
       auto pack = std::make_shared<Pack>(names, downstream);
 
       std::vector<std::shared_ptr<INode>> roots;
+      std::vector<std::weak_ptr<INode>>   clockTargets;   // ENC-1290 (D5/Q1)
       roots.reserve(fobj.MemberCount() + 1);
       std::size_t idx = 0;
       for (auto it = fobj.MemberBegin(); it != fobj.MemberEnd(); ++it, ++idx) {
         auto port = std::make_shared<PackPort>(std::weak_ptr<Pack>(pack), idx);
         pack->addPort(port);
-        roots.push_back(tree::buildOne(it->value, defaultStreamKey, deps, port));
+        auto inHead = tree::buildOne(it->value, defaultStreamKey, deps, port);
+        if (!declaredInputIsSelfClocked(it->value)) clockTargets.emplace_back(inHead);
+        roots.push_back(std::move(inHead));
       }
-      roots.push_back(pack);
+      roots.push_back(pack);   // lifecycle, NOT a clock target (ENC-1290)
 
-      return std::make_shared<CompositeRoot>(std::move(roots));
+      return std::make_shared<CompositeRoot>(std::move(roots),
+                                             std::move(clockTargets));
     });
 
   // Field extracts one named field from a Record flowing through. Pipeline
@@ -1062,6 +1077,7 @@ void registerBuiltinNodeTypes() {
 
       // Pass 2: build each referenced binding's producer once -> Tee/consumer.
       std::vector<std::shared_ptr<INode>> roots;
+      std::vector<std::weak_ptr<INode>>   clockTargets;   // ENC-1290 (D5/Q1)
       for (auto& [name, consumers] : scope.consumers) {
         if (consumers.empty()) continue;
 
@@ -1071,16 +1087,23 @@ void registerBuiltinNodeTypes() {
         } else {
           auto tee = std::make_shared<Tee>(consumers);
           roots.push_back(tee);  // own the Tee (a Listener producer holds it weakly)
-          sink = tee;
+          sink = tee;            // lifecycle, NOT a clock target (ENC-1290)
         }
 
         auto prodHead =
           tree::buildOne(bindings[name.c_str()], defaultStreamKey, deps, sink);
+        if (!declaredInputIsSelfClocked(bindings[name.c_str()]))
+          clockTargets.emplace_back(prodHead);
         roots.push_back(prodHead);
       }
 
+      // The body is a declared input head too — it is the branch that reaches
+      // `downstream`, so a body with no Listener of its own is exactly what the
+      // head Listener is there to drive.
+      if (!declaredInputIsSelfClocked(v["body"])) clockTargets.emplace_back(bodyHead);
       roots.push_back(bodyHead);
-      return std::make_shared<CompositeRoot>(std::move(roots));
+      return std::make_shared<CompositeRoot>(std::move(roots),
+                                             std::move(clockTargets));
     });
 }
 
