@@ -9,6 +9,7 @@
 #include <memory>
 #include "gma/nodes/INode.hpp"
 #include "gma/nodes/InputPort.hpp"
+#include "gma/nodes/JoinBy.hpp"
 #include "gma/Span.hpp"
 
 namespace gma {
@@ -67,16 +68,30 @@ namespace gma {
 // `Worker`'s never-resetting accumulator (`src/nodes/Worker.cpp:26-32`, cleared
 // only in `shutdown()`) is the other half of Q5 and is untouched here.
 //
-// CORRELATION KEY. Still `sv.symbol`, i.e. D1's locked default `by:"streamKey"`
-// — two ports fed from two different streamKeys land in two different buffers
-// and NEITHER completes, so a cross-streamKey join emits nothing rather than
-// pairing one side with itself. That is SPEC section 1.1 defect 3 and it is
-// ENC-1292's (D1 `by:"none"`), not this node's.
+// CORRELATION KEY — DECLARED, as of ENC-1292 (SPEC D1, section 1.1 defect 3).
+// `by:"streamKey"` (the default) keys the pending tuple on `sv.symbol`, which
+// is what this node always did: two ports fed from two different streamKeys
+// land in two different buffers and NEITHER completes, so a cross-streamKey
+// join emits nothing rather than pairing one side with itself. `by:"none"`
+// keys the pending tuple on NOTHING — every port shares one tuple — so AAPL on
+// port 0 and MSFT on port 1 complete each other. Under `by:"none"` the emitted
+// value carries the REQUEST'S OWN top-level `streamKey` rather than the symbol
+// of whichever side released the tuple, because that symbol is a race (SPEC
+// section 5 Q6). include/gma/nodes/JoinBy.hpp carries the full reasoning,
+// including why the substitution must NOT apply to `by:"streamKey"`.
 //
 // Thread-safe: ports may call `onPortValue` concurrently.
 class Aggregate final : public INode, public IFanIn {
 public:
-  Aggregate(std::size_t arity, std::shared_ptr<INode> parent);
+  // `by` defaults to D1's locked default, so an omitted argument reproduces
+  // pre-ENC-1292 behaviour exactly. `outStreamKey` is the request's top-level
+  // `streamKey` and is REQUIRED (and enforced) when `by == JoinBy::None`: it is
+  // the output identity of the joined stream. It is ignored under
+  // `by == JoinBy::StreamKey`, where each symbol keeps its own identity.
+  Aggregate(std::size_t arity,
+            std::shared_ptr<INode> parent,
+            JoinBy by = JoinBy::StreamKey,
+            std::string outStreamKey = {});
 
   // NOT a join member. A fan-in's data comes from its own declared `inputs`,
   // through the ports; a value arriving on the plain edge is an upstream
@@ -98,6 +113,7 @@ public:
   void addPort(std::shared_ptr<INode> port);
 
   std::size_t arity() const noexcept { return arity_; }
+  JoinBy      by()    const noexcept { return by_; }
 
   // ─────────────────────────────────────────────────────────────────────────
   // HOW MANY VALUES HAVE EVER REACHED A FAN-IN ON THE PIPELINE EDGE, PROCESS
@@ -134,6 +150,11 @@ private:
   static constexpr std::size_t MAX_SYMBOLS = 10000;
 
   const std::size_t arity_;
+  const JoinBy      by_;
+  // Output identity for a `by:"none"` join, and ALSO its single buffer key —
+  // deliberately the same string, so the tuple is buffered under the name it
+  // will be emitted under. Empty and unused under `by:"streamKey"`.
+  const std::string outKey_;
   std::shared_ptr<INode> parent_;
   std::vector<std::shared_ptr<INode>> ports_;
 
