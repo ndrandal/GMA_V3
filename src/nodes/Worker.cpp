@@ -43,7 +43,9 @@ void Worker::onValue(const StreamValue& sv) {
   }
 
   if (ds) {
-    ds->onValue(StreamValue{ sv.symbol, out });
+    // ENC-1280: the emit is triggered by `sv`, so it belongs to `sv`'s
+    // bucket even though the accumulator spans several inputs.
+    ds->onValue(StreamValue{ sv.symbol, out, sv.bucketStartMs });
   }
 }
 

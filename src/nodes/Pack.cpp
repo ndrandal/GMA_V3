@@ -54,7 +54,11 @@ void Pack::onField(std::size_t idx, const StreamValue& sv) {
     ds = downstream_;
   }
 
-  if (ds) ds->onValue(StreamValue{sv.symbol, ArgType{std::move(rec)}});
+  // ENC-1280: a record is completed by the field that arrived last, so the
+  // record belongs to that field's bucket. Slots filled in earlier buckets
+  // are last-value-wins already — this does not make them older than they
+  // are, it dates the record by its completion.
+  if (ds) ds->onValue(StreamValue{sv.symbol, ArgType{std::move(rec)}, sv.bucketStartMs});
 }
 
 void Pack::shutdown() noexcept {

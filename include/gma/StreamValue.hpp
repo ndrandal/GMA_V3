@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 
 #include <string>
 #include <type_traits>
@@ -121,9 +122,28 @@ inline void recordSet(Record& r, const std::string& key, ArgType val) {
 
 // Core value for computation — carries a stream-key + computed value through the
 // node pipeline.
+//
+// `bucketStartMs` (ENC-1280, SPEC specs/2026-09-20-timestamps-on-the-wire D9/D10)
+// carries the *identity of the bar this value belongs to*: the epoch-ms start of
+// the wall-clock-aligned bucket that closed when the value was produced. It is
+// stamped by the two wall-clock-aligned timer nodes (`TumblingWindow` and
+// `BucketTime`) from the same `BucketTime::nextAlignedAfter` boundary they
+// already use as their `wait_until` deadline, and every value-transforming node
+// copies it through so it survives to the responder.
+//
+// **0 means "no bucket identity"** — the stream is not bucketed (the raw
+// `Listener`→`Responder` path, `Interval`, a `Dispatcher` push) and therefore
+// declares no time basis at all (D7's corollary). It is never a 1970 epoch, and
+// `ClientSession` omits the wire key entirely when it is 0 rather than sending a
+// meaningless zero.
+//
+// StreamValue stays an **aggregate** — a default member initializer does not
+// change that in C++20 — so every existing `StreamValue{sym, val}` braced-init
+// site compiles unchanged and value-initialises this member to 0.
 struct StreamValue {
   std::string symbol;
   ArgType value;
+  std::int64_t bucketStartMs{0};
 };
 
 } // namespace gma

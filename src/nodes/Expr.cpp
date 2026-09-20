@@ -33,7 +33,8 @@ void ExprNode::onValue(const StreamValue& sv) {
     return;
   }
 
-  ds->onValue(StreamValue{sv.symbol, out});
+  // ENC-1280: an expression rewrites the value, not the bucket it came from.
+  ds->onValue(StreamValue{sv.symbol, out, sv.bucketStartMs});
 }
 
 void ExprNode::shutdown() noexcept {

@@ -1,6 +1,8 @@
 #include "gma/nodes/BucketTime.hpp"
 #include "gma/util/Logger.hpp"
 
+#include <cstdint>
+
 namespace gma {
 
 BucketTime::BucketTime(std::chrono::milliseconds period,
@@ -44,6 +46,22 @@ BucketTime::nextAlignedAfter(
   return system_clock::time_point{milliseconds{next_ms}};
 }
 
+std::int64_t
+BucketTime::bucketStartMsFor(
+    std::chrono::system_clock::time_point boundary,
+    std::chrono::milliseconds period) {
+  using namespace std::chrono;
+  const auto period_ms = period.count();
+  if (period_ms <= 0) {
+    // No period => no bucket grid => no bucket identity (StreamValue's 0
+    // sentinel), matching nextAlignedAfter's defensive branch.
+    return 0;
+  }
+  const auto boundary_ms =
+      duration_cast<milliseconds>(boundary.time_since_epoch()).count();
+  return static_cast<std::int64_t>(boundary_ms - period_ms);
+}
+
 void BucketTime::timerLoop(const std::shared_ptr<State>& st) {
   while (true) {
     if (st->stopping.load(std::memory_order_acquire))
@@ -51,6 +69,10 @@ void BucketTime::timerLoop(const std::shared_ptr<State>& st) {
 
     const auto now = std::chrono::system_clock::now();
     const auto target = nextAlignedAfter(now, st->period);
+    // ENC-1280: the boundary used to die here as a loop-body local. Keep the
+    // identity of the bucket that closes at `target` so the pulse carries the
+    // bar it belongs to all the way to the responder (SPEC D9).
+    const std::int64_t bucketStartMs = bucketStartMsFor(target, st->period);
     {
       std::unique_lock<std::mutex> lk(st->mx);
       // wait_until lets shutdown wake us early without re-arming.
@@ -67,9 +89,11 @@ void BucketTime::timerLoop(const std::shared_ptr<State>& st) {
     try {
       if (st->pool) {
         auto c = st->child;
-        st->pool->post([c] { c->onValue(StreamValue{"", 0.0}); });
+        st->pool->post([c, bucketStartMs] {
+          c->onValue(StreamValue{"", 0.0, bucketStartMs});
+        });
       } else {
-        st->child->onValue(StreamValue{"", 0.0});
+        st->child->onValue(StreamValue{"", 0.0, bucketStartMs});
       }
     } catch (const std::exception& ex) {
       gma::util::logger().log(gma::util::LogLevel::Error,

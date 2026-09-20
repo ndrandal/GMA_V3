@@ -626,6 +626,23 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
         gma::server::writeRequestKeyJSON(w, reqKey);
         w.Key("streamKey"); w.String(sv.symbol.c_str());
         w.Key("value");  gma::util::writeArgTypeJson(w, sv.value);
+        // ENC-1280 / SPEC specs/2026-09-20-timestamps-on-the-wire D9: the
+        // epoch-ms start of the wall-clock-aligned bucket this value belongs
+        // to, stamped by TumblingWindow / BucketTime from the same boundary
+        // they already align on. embassy derives baseMs (first bucket seen on
+        // the stream) and the D7 bar ordinal from it.
+        //
+        // Emitted as a JSON integer, NOT through writeArgTypeJson's double
+        // path: a current ms epoch needs 41 bits and would be mangled by the
+        // float32 lane D4 rejects. rapidjson's Int64 writer is exact.
+        //
+        // Omitted entirely when 0 — 0 is the "not bucketed" sentinel, not a
+        // 1970 epoch, and a stream with no bucket grid declares no basis at
+        // all (D7's corollary). Un-bucketed update frames therefore keep the
+        // exact four-key shape they have today.
+        if (sv.bucketStartMs != 0) {
+          w.Key("bucketStartMs"); w.Int64(sv.bucketStartMs);
+        }
         w.EndObject();
 
         GMA_METRIC_HIT("ws.msg_out");
