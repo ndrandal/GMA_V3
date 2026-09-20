@@ -31,6 +31,7 @@
 #include "gma/StreamValue.hpp"
 #include "gma/nodes/INode.hpp"
 #include <gtest/gtest.h>
+#include <stdexcept>
 #include <atomic>
 #include <memory>
 #include <mutex>
