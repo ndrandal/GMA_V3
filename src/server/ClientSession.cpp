@@ -64,12 +64,14 @@ const char* SubscriptionStrandMint::origin() noexcept {
 // M10 removes. Both are gated by `tests/ws/SubscriptionStrandMintTest.cpp`.
 std::shared_ptr<gma::rt::Strand>
 SubscriptionStrandMint::mint(gma::rt::ThreadPool* pool) {
-  if (!pool) return nullptr;          // <-- the guard M10 deletes
+  if (!pool) return nullptr;
+  // MUT-F (corrected): cache one strand and reuse it across subscriptions.
   static std::weak_ptr<gma::rt::Strand> cached;
-  if (auto c = cached.lock()) { fprintf(stderr, "MUTF: reusing cached strand\n"); return c; }
+  if (auto c = cached.lock()) return c;
   auto made = std::make_shared<gma::rt::Strand>(
       pool, gma::rt::Strand::Attribution(kSubscriptionStrandOrigin));
-  cached = made; fprintf(stderr, "MUTF: minted fresh\n"); return made;
+  cached = made;
+  return made;
 }
 
 } // namespace server
