@@ -179,10 +179,17 @@ TEST_F(FanInArity, ArityBelowInputCountIsRefusedNamingBothCounts) {
   }
 
   EXPECT_NE(msg.find("Aggregate"), std::string::npos) << msg;
-  EXPECT_NE(msg.find("2"), std::string::npos)
-      << "the message must name the declared arity. Got: " << msg;
-  EXPECT_NE(msg.find("5"), std::string::npos)
-      << "the message must name the actual input count, otherwise the author "
+
+  // ASSERT ON THE PHRASE, NOT ON THE DIGIT. `msg.find("2")` — what this test
+  // did first — is satisfied by the `2026-09-20` in the message's own SPEC
+  // path, so replacing `std::to_string(arity)` with a literal left this green
+  // with the declared arity gone entirely (measured, ENC-1291 adversarial
+  // pass). A substring that an unrelated part of the same string can satisfy
+  // is not an assertion about the number.
+  EXPECT_NE(msg.find("'arity' is 2"), std::string::npos)
+      << "the message must name the DECLARED arity. Got: " << msg;
+  EXPECT_NE(msg.find("'inputs' declares 5 input(s)"), std::string::npos)
+      << "the message must name the ACTUAL input count, otherwise the author "
          "cannot see which of the two numbers they meant. Got: " << msg;
 }
 
@@ -207,8 +214,12 @@ TEST_F(FanInArity, ArityAboveInputCountIsRefusedNamingBothCounts) {
   } catch (const std::exception& ex) {
     msg = ex.what();
   }
-  EXPECT_NE(msg.find("5"), std::string::npos) << msg;
-  EXPECT_NE(msg.find("2"), std::string::npos) << msg;
+  // The mirror of the direction above: here the declared arity is 5 and the
+  // actual count is 2, so a literal substituted for either number reddens
+  // exactly one of the two tests. Neither digit can be satisfied by the SPEC
+  // path in the message.
+  EXPECT_NE(msg.find("'arity' is 5"), std::string::npos) << msg;
+  EXPECT_NE(msg.find("'inputs' declares 2 input(s)"), std::string::npos) << msg;
 }
 
 // The mirror of the refusals: the matching form must still build AND emit.
@@ -252,6 +263,23 @@ TEST_F(FanInArity, MatchingArityBuildsAndJoinsByInput) {
 // `buildForRequest`'s RAII unwind guard covers a late throw, but the arity check
 // is deliberately placed before a single node is constructed, and this asserts
 // that placement rather than trusting it.
+//
+// THIS TEST'S FIRST DRAFT WAS FAKE, and the way it failed is the reason
+// `Dispatcher::subscriptionCount()` now exists.
+//
+// It asserted that no VALUE reached the terminal of a rejected build. That is
+// 0 whether the check runs before or after the input loop, because a `Listener`
+// holds its downstream through a `weak_ptr`: once the rejected `Aggregate` and
+// its ports are destroyed, a stranded Listener delivers to nobody. It is still
+// SUBSCRIBED, still walked on every `Dispatcher::onTick`, and still
+// unreachable by anything that could stop it — which IS the defect (SPEC
+// section 1.5: 1000 rejected builds took `onTick` x 50 from 0.02 ms to 932 ms,
+// with no bound). Moving the `arity != inputCount` throw to after the whole
+// input loop left the old assertion green (measured, ENC-1291 adversarial
+// pass).
+//
+// So it now counts SUBSCRIPTIONS, which is the thing section 1.5 is about, and
+// keeps the value check as a second, weaker statement.
 TEST_F(FanInArity, ArityMismatchIsRefusedBeforeAnythingSubscribes) {
   const char* kReq = R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
@@ -262,6 +290,8 @@ TEST_F(FanInArity, ArityMismatchIsRefusedBeforeAnythingSubscribes) {
   rapidjson::Document d;
   d.Parse(kReq);
   ASSERT_FALSE(d.HasParseError());
+
+  const std::size_t before = dispatcher_->subscriptionCount();
 
   auto stranded = std::make_shared<Sink>();
   constexpr int kRejects = 25;
@@ -276,6 +306,22 @@ TEST_F(FanInArity, ArityMismatchIsRefusedBeforeAnythingSubscribes) {
   ASSERT_EQ(rejected, kRejects)
       << "this request must be REFUSED for the test to mean anything";
 
+  EXPECT_EQ(dispatcher_->subscriptionCount(), before)
+      << (dispatcher_->subscriptionCount() - before) << " subscription(s) "
+         "survived " << kRejects << " builds that were all REFUSED.\n"
+         "    The arity check must run BEFORE any node is constructed: the "
+         "`Listener` builder registers\n"
+         "    with the Dispatcher as it is constructed, and the only thing that "
+         "unregisters is\n"
+         "    `Listener::shutdown()`. A stranded subscription is walked on "
+         "every onTick forever, with\n"
+         "    nothing left holding a handle that could stop it, and it is "
+         "reachable from client JSON in a\n"
+         "    loop (SPEC section 1.5). It delivers NOTHING observable — its "
+         "downstream is a weak_ptr to a\n"
+         "    destroyed port — which is why this counts subscriptions rather "
+         "than values.";
+
   for (int n = 0; n < 4; ++n) tick("AAPL", {{"ask", 1.0 + n}, {"bid", 2.0 + n}});
   pool_->drain();
 
@@ -283,6 +329,114 @@ TEST_F(FanInArity, ArityMismatchIsRefusedBeforeAnythingSubscribes) {
       << stranded->values().size() << " value(s) reached a terminal belonging "
          "to a build REFUSED " << kRejects << " times: "
       << render(stranded->values());
+}
+
+// The non-integer case. `sizeOr` gates on `IsUint()`, so `{"arity": 2.0}` and
+// `{"arity": "2"}` fall through to the default and used to be reported as
+// "positive 'arity' required" — true but misleading, because the author DID
+// supply a positive arity and the real complaint is its JSON type. Nothing
+// covered it (ENC-1291 adversarial pass).
+TEST_F(FanInArity, NonIntegerArityIsRefusedForTheRightReason) {
+  for (const char* body : {
+         R"("arity":2.0)",
+         R"("arity":"2")",
+         R"("arity":-1)" }) {
+    const std::string req =
+      std::string(R"({"key":1,"streamKey":"AAPL","field":"lastPrice",)") +
+      R"("node":{"type":"Aggregate",)" + body + R"(,"inputs":[)" +
+      R"({"type":"Listener","streamKey":"AAPL","field":"ask"},)" +
+      R"({"type":"Listener","streamKey":"AAPL","field":"bid"}]}})";
+    rapidjson::Document d;
+    d.Parse(req.c_str());
+    ASSERT_FALSE(d.HasParseError()) << req;
+
+    auto sink = std::make_shared<Sink>();
+    std::string msg;
+    try {
+      tree::buildForRequest(d, deps_, sink);
+      FAIL() << "accepted " << req;
+    } catch (const std::exception& ex) { msg = ex.what(); }
+
+    EXPECT_NE(msg.find("'arity' must be a non-negative whole number"),
+              std::string::npos)
+        << "for " << body << " the engine must say the arity's TYPE is wrong, "
+           "not that it is missing. Got: " << msg;
+  }
+}
+
+// ═══ 2b. A THROW INSIDE A FAN-IN'S INPUT LOOP STRANDS NOTHING ════════════════
+//
+// SPEC section 1.5's leak, in the one place `buildForRequest`'s `Unwind` guard
+// does not reach. That guard only ever receives the node `buildOne` RETURNS, so
+// anything built inside a sub-build that then throws is invisible to it — and a
+// fan-in builder is exactly that shape.
+//
+// MEASURED BEFORE THE FIX (ENC-1291 adversarial pass, on the committed tree):
+// 25 refused builds of the nested request below left **25 live
+// `Dispatcher` subscriptions**. They deliver nothing anyone can observe — their
+// downstream is a port that died with the rejected inner `Aggregate` — so no
+// value-watching test can see them, which is why this counts subscriptions.
+//
+// The path predates ENC-1291 (a bad node type inside `inputs` reaches it), but
+// ENC-1291 ADDED a throw site in that loop: the arity check fires for a NESTED
+// fan-in too. `SubBuildUnwind` in src/core/TreeBuilder.cpp is the fix, and it
+// covers `Aggregate`, `Pack` and `Let` because the hole is identical in each.
+TEST_F(FanInArity, NestedFanInThrowLeavesNothingSubscribed) {
+  // Each of these builds a real Listener for input 0, then throws on input 1.
+  const char* kReqs[] = {
+    // inner fan-in with a mismatching arity — the throw site ENC-1291 ADDED
+    R"({"key":1,"streamKey":"AAPL","field":"lastPrice",
+        "node":{"type":"Aggregate","arity":2,"inputs":[
+          {"type":"Listener","streamKey":"AAPL","field":"ask"},
+          {"type":"Aggregate","arity":3,"inputs":[
+            {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]}})",
+    // a bad node type in input position — pre-existing, same hole
+    R"({"key":1,"streamKey":"AAPL","field":"lastPrice",
+        "node":{"type":"Aggregate","arity":2,"inputs":[
+          {"type":"Listener","streamKey":"AAPL","field":"ask"},
+          {"type":"NoSuchNodeType"}]}})",
+    // and the same through a Pack, whose builder has the identical shape
+    R"({"key":1,"streamKey":"AAPL","field":"lastPrice",
+        "node":{"type":"Pack","fields":{
+          "a":{"type":"Listener","streamKey":"AAPL","field":"ask"},
+          "b":{"type":"NoSuchNodeType"}}},
+        "pipeline":[{"type":"Field","name":"a"}]})",
+  };
+
+  for (const char* req : kReqs) {
+    rapidjson::Document d;
+    d.Parse(req);
+    ASSERT_FALSE(d.HasParseError()) << req;
+
+    const std::size_t before = dispatcher_->subscriptionCount();
+
+    auto sink = std::make_shared<Sink>();
+    constexpr int kRejects = 25;
+    int rejected = 0;
+    for (int i = 0; i < kRejects; ++i) {
+      try {
+        auto chain = tree::buildForRequest(d, deps_, sink);
+        for (auto& n : chain.keepAlive) if (n) n->shutdown();
+        if (chain.head) chain.head->shutdown();
+      } catch (const std::exception&) { ++rejected; }
+    }
+    ASSERT_EQ(rejected, kRejects)
+        << "this request must be REFUSED for the test to mean anything: " << req;
+
+    EXPECT_EQ(dispatcher_->subscriptionCount(), before)
+        << (dispatcher_->subscriptionCount() - before) << " subscription(s) "
+           "survived " << kRejects << " REFUSED builds of:\n    " << req
+        << "\n\n    A fan-in builder loops over its declared inputs calling "
+           "`buildOne`. A throw on input N\n"
+           "    must tear down inputs 0..N-1, because each already-built "
+           "`Listener` registered with the\n"
+           "    Dispatcher as it was constructed and only "
+           "`Listener::shutdown()` ever unregisters.\n"
+           "    `buildForRequest`'s own `Unwind` guard cannot see them: it "
+           "receives only the node\n"
+           "    `buildOne` RETURNS, and `buildOne` threw. See `SubBuildUnwind` "
+           "in src/core/TreeBuilder.cpp.";
+  }
 }
 
 // ═══ 3. What the check costs the checked-in corpus ═══════════════════════════

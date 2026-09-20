@@ -83,7 +83,7 @@ public:
   // pipeline value, and feeding it into the buffer is precisely how the
   // builder would manufacture defect 2 (see the `CompositeRoot` comment in
   // src/core/TreeBuilder.cpp). It is dropped — loudly, once per node, rather
-  // than silently.
+  // than silently, AND counted (see `pipelineEdgeValues()` below).
   void onValue(const StreamValue& sv) override;
 
   // The real ingress. `portIndex` is the value's position in the declared
@@ -98,6 +98,31 @@ public:
   void addPort(std::shared_ptr<INode> port);
 
   std::size_t arity() const noexcept { return arity_; }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // HOW MANY VALUES HAVE EVER REACHED A FAN-IN ON THE PIPELINE EDGE, PROCESS
+  // WIDE. Zero in a correct build. ENC-1291.
+  //
+  // WHY THIS EXISTS, AND WHY IT IS STATIC. `ClockIsNeverAJoinMember`
+  // (tests/treebuilder/ComposedChainTest.cpp) is the ONLY gate on SPEC D5 /
+  // section 5 Q1's clock rule: the outer `Listener` is the chain's clock and
+  // must never become a join member. ENC-1290 built it to redden under the
+  // rule's RETRACTED first wording — "forward the clock to the roots that are
+  // not Dispatcher-subscribed", where `roots_` hands you the `Aggregate`
+  // itself — by watching the clock's value corrupt the join's output.
+  //
+  // ENC-1291 DISARMED THAT GATE WITHOUT MEANING TO. Making `onValue` a
+  // warn-and-drop means the clock can no longer reach `buf_` by any route, so
+  // that mutation now produces bit-identical output and the test cannot fail.
+  // A green suite that no longer enforces D5 is worse than the defect it
+  // replaced, so the invariant is re-armed here rather than left to be
+  // rediscovered: the test asserts this counter does not move.
+  //
+  // It is static because the node under test is constructed by
+  // `tree::buildForRequest` behind a `CompositeRoot` the test cannot reach —
+  // there is no handle to ask. gtest runs cases sequentially in one process,
+  // so a before/after delta is well defined. Nothing in src/ reads it.
+  static std::size_t pipelineEdgeValues() noexcept;
 
 private:
   struct SymBuf {
@@ -114,6 +139,7 @@ private:
 
   std::atomic<bool> stopping_{false};
   std::atomic<bool> warnedOnPipelineValue_{false};
+  static std::atomic<std::size_t> pipelineEdgeValues_;
   mutable std::mutex mx_;
   std::unordered_map<std::string, SymBuf> buf_;
 };

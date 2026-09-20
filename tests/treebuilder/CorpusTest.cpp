@@ -156,7 +156,7 @@ TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
 // two are *ordering* defects, and they need opposite test strategies:
 //
 //   defect 2 — `Aggregate` counts VALUES, not distinct inputs
-//              (src/nodes/Aggregate.cpp:30-32: `buf_[sv.symbol].vals` grows and
+//              (`Aggregate::onValue` pre-ENC-1291: `buf_[sv.symbol].vals` grew and
 //              fires at `>= arity_`), so a two-input node completes a "tuple"
 //              from two values of ONE input.
 //   defect 3 — the correlation key is `sv.symbol`, so no cross-streamKey join
@@ -333,7 +333,8 @@ namespace corpus_values {
 // ─── Recording terminal ────────────────────────────────────────────────────
 // `Aggregate::onValue` takes the completed batch under its mutex and then
 // forwards its members one at a time, OUTSIDE the lock, from a single thread
-// in a tight loop (src/nodes/Aggregate.cpp:39-46). So the terminal's
+// in a tight loop (`Aggregate::onPortValue`'s forwarding loop, outside the
+// lock). So the terminal's
 // per-thread arrival sequence is exactly a concatenation of arity-sized
 // batches: two batches forwarded concurrently are on two threads and cannot
 // interleave. Stamping each arrival with the forwarding thread is what makes
@@ -1034,10 +1035,10 @@ TEST(CorpusValueAssertions, Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself)
          "    streamKeys. " << kTicksPerSide << " ticks were driven into each side. "
       << (joined.size() / 2) << " tuple(s) were emitted and\n"
          "    " << sameSide << " of them pair one symbol with ITSELF:" << examples.str()
-      << "\n\n    Cause: src/nodes/Aggregate.cpp:30 keys the buffer on `sv.symbol`, so "
+      << "\n\n    Cause: `Aggregate::onPortValue` keys the buffer on `sv.symbol`, so "
          "AAPL and\n"
          "    MSFT occupy two independent buffers and each completes alone. "
-         "src/nodes/Pack.cpp:32\n"
+         "`Pack::onPortValue`\n"
          "    keys the same way — no cross-streamKey join exists in the engine at all "
          "(SPEC\n"
          "    §1.1 defect 3; 23 of the 52 corpus Aggregate requests ask for one).\n"

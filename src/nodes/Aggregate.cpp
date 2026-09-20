@@ -16,9 +16,18 @@ void Aggregate::addPort(std::shared_ptr<INode> port) {
   ports_.push_back(std::move(port));
 }
 
+std::atomic<std::size_t> Aggregate::pipelineEdgeValues_{0};
+
+std::size_t Aggregate::pipelineEdgeValues() noexcept {
+  return pipelineEdgeValues_.load(std::memory_order_relaxed);
+}
+
 // A value on the plain INode edge is NOT a join member — see the header. It is
-// dropped, and said out loud once per node so the drop is never silent.
+// dropped, counted, and said out loud once per node so the drop is never
+// silent. The count is what `ClockIsNeverAJoinMember` asserts against; without
+// it that gate cannot fail, because a dropped value leaves no other trace.
 void Aggregate::onValue(const StreamValue& sv) {
+  pipelineEdgeValues_.fetch_add(1, std::memory_order_relaxed);
   if (!warnedOnPipelineValue_.exchange(true, std::memory_order_acq_rel)) {
     gma::util::logger().log(gma::util::LogLevel::Warn,
       "Aggregate: value arrived on the pipeline edge, not on a declared input "

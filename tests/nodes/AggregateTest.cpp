@@ -258,26 +258,62 @@ TEST(AggregateTest, ShutdownPreventsFurtherCallbacks) {
     EXPECT_EQ(j.parent->count.load(), 0);
 }
 
-TEST(AggregateTest, ConcurrentPortValuesAreSafe) {
+// READ THIS BEFORE TRUSTING THIS TEST: IT IS NOT THE GATE ON THE MUTEX.
+//
+// Deleting `Aggregate::onPortValue`'s `std::lock_guard` outright — leaving an
+// `unordered_map` insertion and a `vector<optional>` mutation racing between
+// two threads — leaves the FULL SUITE green (measured, ENC-1291 adversarial
+// pass: 641/640/1, bit-identical to baseline; the test alone failed 5 of 30
+// runs in isolation, and when it did fail it was the anti-vacuity floor that
+// fired, never the tuple-integrity assertion). A data race is undefined
+// behaviour: it is not reliably observable by assertion, and a test that
+// catches it 17% of the time is a coin flip, not a gate.
+//
+// **THE GATE IS THE SANITIZER RUN.** TSan reports the missing lock
+// deterministically, and ENC-1291 verified that specifically rather than only
+// checking TSan was clean on the fixed code: the same deletion, built
+// `-DGMA_SANITIZE=thread`, produced **11 `WARNING: ThreadSanitizer: data race`
+// reports naming `gma::Aggregate::onPortValue` in the first frame**, and the
+// binary exited 66. So the invariant IS gated — by `mage`-equivalent
+// `cmake -DGMA_SANITIZE=thread` + this suite, not by the assertions below. This test is a smoke test plus a structural
+// check that what escapes is always a WHOLE tuple, in port order — it is kept
+// because the structural half is worth having, and it says so out loud rather
+// than implying a guarantee it cannot make.
+TEST(AggregateTest, ConcurrentPortValuesAreWholeTuplesInPortOrder) {
     Join j = makeJoin(2);
 
+    // Disjoint value ranges per port, so every emitted value announces which
+    // declared input it came from. Under the barrier the parent must see a
+    // strict alternation: an input-0 value, then an input-1 value, forever.
+    constexpr double kPort0Base = 0.0;
+    constexpr double kPort1Base = 1000.0;
     const int perThread = 500;
+
     std::vector<std::thread> threads;
     for (int port = 0; port < 2; ++port) {
         threads.emplace_back([&j, port, perThread] {
+            const double base = port == 0 ? kPort0Base : kPort1Base;
             for (int i = 0; i < perThread; ++i)
-                feed(j, std::size_t(port), "SYM", double(i));
+                feed(j, std::size_t(port), "SYM", base + double(i));
         });
     }
     for (auto& th : threads) th.join();
 
-    // Every emission is a complete 2-tuple, so the count is even and bounded by
-    // the slower input. Under last-value-wins some values are superseded, so
-    // this is <= 2*perThread rather than == it.
     const int n = j.parent->count.load();
     EXPECT_EQ(n % 2, 0) << "a partial tuple escaped: " << n;
     EXPECT_GT(n, 0);
     EXPECT_LE(n, 2 * perThread);
+
+    for (std::size_t i = 0; i + 1 < j.parent->received.size(); i += 2) {
+        const double a = extractDouble(j.parent->received[i].value);
+        const double b = extractDouble(j.parent->received[i + 1].value);
+        ASSERT_LT(a, kPort1Base)
+            << "tuple " << (i / 2) << " starts with an input-1 value (" << a
+            << "): emission is not in declared port order";
+        ASSERT_GE(b, kPort1Base)
+            << "tuple " << (i / 2) << " ends with an input-0 value (" << b
+            << "): a tuple was completed from one input twice";
+    }
 }
 
 // ═══ 3. Ownership: fan-in owns ports, ports observe weakly ═══════════════════
@@ -372,6 +408,27 @@ TEST(AggregateTest, AValueOnThePipelineEdgeIsNotAJoinMember) {
         feed(j1, 0, "SYM", 1.0);
         EXPECT_EQ(j1.parent->count.load(), 1)
             << "control: the declared input must still work";
+    }
+
+    // Arity 3 with ALL BUT ONE port already filled: a pipeline value routed to
+    // ANY index — 0, 1 or 2 — completes the tuple on the spot. The arity-1 case
+    // above already covers `onPortValue(0)` and `onPortValue(arity_-1)`, which
+    // coincide there; this covers every index in between as well, so no choice
+    // of victim port survives.
+    {
+        Join j3 = makeJoin(3);
+        feed(j3, 0, "SYM", 1.0);
+        feed(j3, 1, "SYM", 2.0);
+        for (int n = 0; n < 8; ++n)
+            j3.agg->onValue(StreamValue{"SYM", 500.0 + n});
+        EXPECT_EQ(j3.parent->count.load(), 0)
+            << "a pipeline-edge value completed a three-input tuple whose "
+               "input 2 never reported";
+        feed(j3, 2, "SYM", 3.0);
+        ASSERT_EQ(j3.parent->count.load(), 3);
+        EXPECT_DOUBLE_EQ(extractDouble(j3.parent->received[0].value), 1.0);
+        EXPECT_DOUBLE_EQ(extractDouble(j3.parent->received[1].value), 2.0);
+        EXPECT_DOUBLE_EQ(extractDouble(j3.parent->received[2].value), 3.0);
     }
 
     Join j = makeJoin(2);

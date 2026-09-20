@@ -275,7 +275,8 @@ TEST(OrderedDelivery, OneDagDeliversEveryValueOnceInProductionOrder) {
 // The shape is corpus 86's, written out here rather than read from the corpus
 // so this test states its own premise: `Aggregate(2)` over `ask` and `bid` of
 // one symbol forwards a completed batch member by member
-// (`src/nodes/Aggregate.cpp:39-45`), so the terminal must see exactly
+// (`Aggregate::onPortValue` forwards a completed tuple member by member), so
+// the terminal must see exactly
 //     ask(0), bid(0), ask(1), bid(1), …
 // with no pair swapped and no pair straddling two ticks.
 TEST(OrderedDelivery, BothSidesOfOneTickReachTheJoinInDispatcherOrder) {
