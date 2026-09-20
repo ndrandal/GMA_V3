@@ -21,7 +21,12 @@ Aggregate::Aggregate(std::size_t arity,
   // `buildForRequest` already refuses to leave empty; this is the node's own
   // guard for every other construction path. Emitting under the empty symbol
   // would be a silent wrong answer on the wire.
-  ;
+  if (by_ == JoinBy::None && outKey_.empty())
+    throw std::invalid_argument(
+      "Aggregate: by:\"none\" requires a non-empty output streamKey — a join "
+      "that ignores the symbol has no identity of its own and must be given "
+      "the request's top-level 'streamKey' (SPEC "
+      "specs/2026-09-20-gma-join-correctness section 5 Q6)");
 }
 
 void Aggregate::addPort(std::shared_ptr<INode> port) {

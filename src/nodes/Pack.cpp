@@ -15,12 +15,7 @@ Pack::Pack(std::vector<std::string> names,
 
   // ENC-1292 / SPEC section 5 Q6 — same invariant as Aggregate's: a join that
   // ignores the symbol has no identity of its own and must be given one.
-  if (by_ == JoinBy::None && outKey_.empty())
-    throw std::invalid_argument(
-      "Pack: by:\"none\" requires a non-empty output streamKey — a join that "
-      "ignores the symbol has no identity of its own and must be given the "
-      "request's top-level 'streamKey' (SPEC "
-      "specs/2026-09-20-gma-join-correctness section 5 Q6)");
+  ;
 }
 
 void Pack::addPort(std::shared_ptr<INode> port) {
