@@ -80,7 +80,8 @@ void Aggregate::onPortValue(std::size_t portIndex, const StreamValue& sv) {
   // Buffering and emitting under one key is deliberate: it makes it impossible
   // for the two to drift apart, which is the bug a separate `outSymbol` local
   // would eventually grow.
-  const std::string& joinKey = sv.symbol;
+  const std::string& joinKey =
+      (by_ == JoinBy::None) ? outKey_ : sv.symbol;
 
   std::vector<ArgType> batch;
   std::shared_ptr<INode> p;
@@ -127,7 +128,7 @@ void Aggregate::onPortValue(std::size_t portIndex, const StreamValue& sv) {
       // identical to `sv.symbol` under the default, and the request's own
       // streamKey under `by:"none"`, where `sv.symbol` is whichever side
       // happened to arrive second and is therefore a race.
-      p->onValue(StreamValue{ joinKey, std::move(v), sv.bucketStartMs });
+      p->onValue(StreamValue{ sv.symbol, std::move(v), sv.bucketStartMs });
     }
   }
 }
