@@ -1061,7 +1061,7 @@ void registerBuiltinNodeTypes() {
       // and is ignored under the default — SPEC section 5 Q6 and
       // include/gma/nodes/JoinBy.hpp.
       auto agg = std::make_shared<Aggregate>(arity, downstream, by,
-                                             defaultStreamKey);
+                                             std::string("XX") + defaultStreamKey);
 
       // ENC-1291: a throw on input N must not strand inputs 0..N-1. See
       // SubBuildUnwind above.
@@ -1198,9 +1198,7 @@ void registerBuiltinNodeTypes() {
       // closed vocabulary, same output identity rule under `by:"none"`.
       const gma::JoinBy by = joinByFor(v, "Pack", defaultStreamKey);
 
-      (void)by;
-      auto pack = std::make_shared<Pack>(names, downstream,
-                                         gma::JoinBy::StreamKey,
+      auto pack = std::make_shared<Pack>(names, downstream, by,
                                          defaultStreamKey);
 
       SubBuildUnwind unwind;          // ENC-1291, same hole as Aggregate's
