@@ -756,7 +756,6 @@ TEST(CorpusValueAssertions, Corpus86_SpreadIsExactlyTwoCents) {
   ASSERT_GT(r.tuples, 0u) << "the join emitted nothing";
 
   const double pct = 100.0 * double(r.wrong) / double(r.tuples);
-  std::fprintf(stderr, "TEMP-PROBE tuples=%zu wrong=%zu oddRuns=%zu\n", r.tuples, r.wrong, r.oddRuns);
   EXPECT_EQ(r.wrong, 0u)
       << "corpus_id 86 \"Bid-ask spread for AAPL\": the spread is 0.02 on every tick.\n"
          "    Driven at threads=" << kRaceThreads << ", " << kRaceReps << " x "
