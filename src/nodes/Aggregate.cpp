@@ -89,7 +89,8 @@ void Aggregate::onPortValue(std::size_t portIndex, const StreamValue& sv) {
     std::lock_guard<std::mutex> lk(mx_);
     // Cap distinct symbol count to prevent unbounded map growth. Under
     // `by:"none"` there is exactly one entry and the cap can never trip.
-    auto it = buf_.find(joinKey);
+    const std::string& bufKey = sv.symbol;
+    auto it = buf_.find(bufKey);
     if (it == buf_.end()) {
       if (buf_.size() >= MAX_SYMBOLS) {
         gma::util::logger().log(gma::util::LogLevel::Warn,
@@ -97,7 +98,7 @@ void Aggregate::onPortValue(std::size_t portIndex, const StreamValue& sv) {
           {{"symbol", sv.symbol}});
         return;
       }
-      it = buf_.emplace(joinKey, SymBuf{}).first;
+      it = buf_.emplace(bufKey, SymBuf{}).first;
       it->second.slots.resize(arity_);
     }
 
