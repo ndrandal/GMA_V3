@@ -374,6 +374,27 @@ TEST(AggregateTest, AValueOnThePipelineEdgeIsNotAJoinMember) {
             << "control: the declared input must still work";
     }
 
+    // Arity 3 with ALL BUT ONE port already filled: a pipeline value routed to
+    // ANY index — 0, 1 or 2 — completes the tuple on the spot. The arity-1 case
+    // above already covers `onPortValue(0)` and `onPortValue(arity_-1)`, which
+    // coincide there; this covers every index in between as well, so no choice
+    // of victim port survives.
+    {
+        Join j3 = makeJoin(3);
+        feed(j3, 0, "SYM", 1.0);
+        feed(j3, 1, "SYM", 2.0);
+        for (int n = 0; n < 8; ++n)
+            j3.agg->onValue(StreamValue{"SYM", 500.0 + n});
+        EXPECT_EQ(j3.parent->count.load(), 0)
+            << "a pipeline-edge value completed a three-input tuple whose "
+               "input 2 never reported";
+        feed(j3, 2, "SYM", 3.0);
+        ASSERT_EQ(j3.parent->count.load(), 3);
+        EXPECT_DOUBLE_EQ(extractDouble(j3.parent->received[0].value), 1.0);
+        EXPECT_DOUBLE_EQ(extractDouble(j3.parent->received[1].value), 2.0);
+        EXPECT_DOUBLE_EQ(extractDouble(j3.parent->received[2].value), 3.0);
+    }
+
     Join j = makeJoin(2);
     feed(j, 1, "SYM", 99.0);        // input 1 has reported; only input 0 is open
 
