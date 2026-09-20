@@ -349,15 +349,34 @@ private:
 // property of the authored `streamKey`/`field` — which is why all 52 affected
 // corpus entries are RE-WIRED and none is re-authored.
 //
+// THREE THINGS SELF-CLOCK, and the list is exhaustive by construction — a node
+// is self-clocked iff something other than its upstream calls its `onValue`:
+//   * `Listener`      — the Dispatcher pushes to it.
+//   * `Interval` /
+//     `BucketTime`    — a timer thread drives their child directly
+//                       (`timerLoop`). Their own `onValue` is an explicit
+//                       no-op ("source node: no upstream input"), so before
+//                       ENC-1290 named them here the clock was forwarded to
+//                       them and was correct ONLY by accident, via that no-op.
+//                       Saying it out loud costs nothing and stops the next
+//                       edit to `Interval::onValue` from silently double-firing
+//                       every timer-headed join input.
+//
+// `Ref` IS NOT ONE OF THEM, and an earlier draft of this function wrongly said
+// it was. A `Ref`'s own head is a `RefStub` no-op, so clocking it is harmless —
+// but the test runs over the WHOLE declared subtree, so `Ref -> true` poisoned
+// every enclosing node: a `Let` whose bindings are pull-only and whose body
+// merely mentions a `Ref` (i.e. every non-degenerate `Let`) was declared
+// self-clocked, and its join stayed dead — the exact failure this rule exists
+// to end for the 7 pull-only corpus entries. Caught by adversarial review; the
+// `Let` cases in tests/treebuilder/ComposedChainTest.cpp are the gate, and no
+// test covered the clause before.
+//
 // CONSERVATIVE DIRECTION. Returning `true` (do not clock) reproduces the
 // pre-ENC-1290 behaviour exactly, so it is the safe answer when we cannot
-// tell. Returning a wrong `false` is the harmful direction — it injects the
-// clock where something else already drives it. Hence:
-//   * depth overflow -> `true`;
-//   * `Ref` -> `true`. A Ref's binding producer is built elsewhere and may
-//     hold a Listener that is not in this subtree's JSON; the Ref's own head
-//     is a RefStub whose onValue is a no-op, so clocking it could only ever be
-//     a wasted call anyway.
+// tell — hence depth overflow -> `true`. Returning a wrong `false` is the
+// harmful direction: it injects the clock where something else already drives
+// the input.
 bool declaredInputIsSelfClocked(const rapidjson::Value& spec, int depth = 0) {
   if (depth > kMaxShapeDepth) return true;
   if (spec.IsArray()) {
@@ -368,8 +387,9 @@ bool declaredInputIsSelfClocked(const rapidjson::Value& spec, int depth = 0) {
   if (!spec.IsObject()) return false;
   if (spec.HasMember("type") && spec["type"].IsString()) {
     const char* t = spec["type"].GetString();
-    if (std::strcmp(t, "Listener") == 0) return true;
-    if (std::strcmp(t, "Ref") == 0)      return true;
+    if (std::strcmp(t, "Listener")   == 0) return true;
+    if (std::strcmp(t, "Interval")   == 0) return true;
+    if (std::strcmp(t, "BucketTime") == 0) return true;
   }
   for (auto m = spec.MemberBegin(); m != spec.MemberEnd(); ++m)
     if (declaredInputIsSelfClocked(m->value, depth + 1)) return true;
@@ -606,6 +626,45 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   //
   // ORDER MATTERS AND IS NOW REVERSED: the pipeline is built first, from the
   // terminal backwards, so that the `node` subtree can be built INTO its head.
+  //
+  // A PARTIAL BUILD MUST NOT SURVIVE A THROW. `Dispatcher::_listeners` holds a
+  // `shared_ptr<INode>` per subscription and the ONLY thing that unregisters is
+  // `Listener::shutdown()` (`src/nodes/Listener.cpp`), so every Listener built
+  // before a later builder throws would stay subscribed for the life of the
+  // process, with nothing left holding a handle to shut it down. `Interval` and
+  // `BucketTime` likewise have a live thread by the time their builder returns.
+  //
+  // That leak is older than ENC-1290 — the previous order leaked on the mirror
+  // input (a good `node` followed by a bad pipeline stage) — but reversing the
+  // order moved the trigger onto the `node` subtree, which is the deeper and
+  // far more failure-prone one (`unknown node type`, `Aggregate: empty
+  // 'inputs'`, `Worker: unknown fn`, `Ref: unknown binding`, `Interval:
+  // positive 'ms' required`). It is reachable from untrusted client JSON:
+  // `ClientSession::handleSubscribe` catches the throw and replies
+  // `{"type":"error","where":"build"}`, so a client can drive it in a loop.
+  // Measured before this guard: 1000 rejected builds left 1000 subscriptions
+  // live and took `onTick` from 0.02 ms to 932 ms for 50 ticks, growing
+  // without bound.
+  //
+  // So everything constructed below is torn down on the way out unless the
+  // build reaches the end. This fixes BOTH orders, not just the new one.
+  struct Unwind {
+    std::vector<std::shared_ptr<gma::INode>>* built;
+    bool                                      armed{true};
+    ~Unwind() {
+      if (!armed || !built) return;
+      // Reverse order: tear down upstream before the downstream it feeds.
+      for (auto it = built->rbegin(); it != built->rend(); ++it)
+        if (*it) (*it)->shutdown();
+    }
+  };
+  // Deliberately NOT `keepAlive`, whose first element is the CALLER's terminal
+  // — that is never ours to shut down. `Listener::Create` is the last thing
+  // that can fail, and it reports failure instead of throwing, so the head
+  // never needs unwinding: on its error path it was never constructed.
+  std::vector<std::shared_ptr<gma::INode>> ours;
+  Unwind unwind{&ours};
+
   std::shared_ptr<gma::INode> midHead = terminal;
 
   // The pipeline, built tail-first. `midHead` stays `terminal` when absent.
@@ -620,6 +679,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
                            deps,
                            curDown);
         keepAlive.push_back(curDown);
+        ours.push_back(curDown);
       }
       midHead = curDown;
       break;
@@ -630,6 +690,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   if (rq.HasMember("node") && rq["node"].IsObject()) {
     midHead = buildOne(rq["node"], streamKey, deps, midHead);
     keepAlive.push_back(midHead);
+    ours.push_back(midHead);
   }
 
   if (!deps.dispatcher || !deps.pool)
@@ -655,6 +716,7 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   }
   auto head = std::move(headRes.value());
 
+  unwind.armed = false;      // the build succeeded; the caller owns it all
   BuiltChain out;
   out.head      = head;
   out.keepAlive = std::move(keepAlive);

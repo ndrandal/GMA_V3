@@ -67,6 +67,7 @@
 #include <rapidjson/writer.h>
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <functional>
 #include <initializer_list>
@@ -422,12 +423,23 @@ TEST_F(ComposedChain, Corpus111PullOnlyJoinFiresForTheFirstTime) {
 // must go completely silent. Under the old two-chain wiring the `node` subtree
 // bypassed the pipeline entirely, so it kept emitting straight past the filter.
 //
-// Two runs per entry, and BOTH assertions matter:
-//   A. verbatim              -> at least one arrival   (the driver really
-//                               exercises this entry; without this, B passes
-//                               vacuously for a chain that was simply dead)
-//   B. + always-false Filter -> exactly zero arrivals  (the only path to the
-//                               terminal runs through the pipeline)
+// Two runs per entry:
+//   A. verbatim              -> did this entry emit anything at all? Without
+//                               this, B passes vacuously for a chain that was
+//                               simply dead.
+//   B. + always-false Filter -> exactly zero arrivals, FOR ALL 52. This is the
+//                               D5 property, and it is true of any correct
+//                               engine, now or later.
+//
+// A's floor is deliberately **29, not 52**, and that is not slack. 29 of the 52
+// are same-`streamKey` joins; the other 23 are cross-`streamKey` and emit today
+// ONLY because `Aggregate::buf_` is keyed on `sv.symbol` and counts values
+// rather than ports — SPEC §1.1 defects 2 and 3, i.e. the very thing ENC-1291
+// removes. The moment per-port arity is enforced those 23 emit nothing until
+// ENC-1292's `by:"none"` exists, so `EXPECT_EQ(silentA, 0)` here would be a
+// landmine planted in the path of the next two tickets in this project. 29 can
+// only go up as the join is fixed. The actual count is printed either way, so
+// a real regression is still visible in the message.
 TEST_F(ComposedChain, EveryNodePlusPipelineEntryReachesTheTerminalOnlyViaThePipeline) {
   rapidjson::Document& doc = corpusDoc();
   ASSERT_FALSE(doc.IsNull()) << "corpus_requests.json not found next to the test binary";
@@ -533,7 +545,14 @@ TEST_F(ComposedChain, EveryNodePlusPipelineEntryReachesTheTerminalOnlyViaThePipe
          "§5 Q1's classification); found " << seen
       << ". If the corpus changed size, re-run the classification before "
          "trusting anything below.";
-  EXPECT_EQ(silentA, 0) << silentA << " entr(ies) emitted nothing at all:" << detail;
+  EXPECT_GE(seen - silentA, 29)
+      << "only " << (seen - silentA) << " of " << seen
+      << " entries emitted anything at all, so run B is vacuous for the rest.\n"
+         "    At least the 29 same-streamKey joins must emit under any engine "
+         "that has a working join;\n"
+         "    the 23 cross-streamKey ones legitimately go silent once ENC-1291 "
+         "enforces per-port arity.\n"
+         "    Currently silent:" << detail;
   EXPECT_EQ(leakedB, 0)
       << leakedB << " of " << seen << " entries reach the terminal WITHOUT "
          "passing through the pipeline.\n"
@@ -715,6 +734,233 @@ TEST_F(ComposedChain, NodePackWithNoPipelineIsStillRejected) {
     EXPECT_NE(std::string(ex.what()).find("would receive a Record"),
               std::string::npos) << ex.what();
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. A REJECTED BUILD MUST LEAVE NOTHING SUBSCRIBED
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// `Dispatcher::_listeners` holds a `shared_ptr<INode>` per subscription and the
+// only thing that unregisters is `Listener::shutdown()`. A builder that throws
+// part-way therefore used to strand every Listener it had already registered,
+// permanently and with no handle left to stop it — and `ClientSession` turns
+// the throw into an error frame, so a client can drive it in a loop.
+//
+// ENC-1290 reversed the build order (pipeline first, `node` second), which
+// moved the trigger onto the deeper and much more failure-prone subtree. The
+// leak is older than that, so the unwind guard in `buildForRequest` covers
+// BOTH orders and both are asserted here.
+TEST_F(ComposedChain, ARejectedBuildLeavesNothingSubscribed) {
+  // Shape 1: a good pipeline (built FIRST, so its Listener subscribes) then a
+  // `node` that cannot build. This is the one the order reversal exposed.
+  const char* kBadNode = R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Aggregate","arity":2,"inputs":[]},
+    "pipeline":[{"type":"Listener","streamKey":"AAPL","field":"ask"}]
+  })";
+  // Shape 2: the mirror — a good `node` then a pipeline stage that cannot
+  // build. This is what the OLD order leaked on.
+  const char* kBadStage = R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]},
+    "pipeline":[{"type":"NoSuchNodeTypeExists"}]
+  })";
+
+  for (const char* json : {kBadNode, kBadStage}) {
+    rapidjson::Document d;
+    d.Parse(json);
+    ASSERT_FALSE(d.HasParseError()) << json;
+
+    constexpr int kRejects = 200;
+    int rejected = 0;
+    for (int i = 0; i < kRejects; ++i) {
+      auto sink = std::make_shared<Sink>();
+      try {
+        auto chain = tree::buildForRequest(d, deps_, sink);
+        for (auto& n : chain.keepAlive) if (n) n->shutdown();
+        if (chain.head) chain.head->shutdown();
+      } catch (const std::exception&) { ++rejected; }
+    }
+    ASSERT_EQ(rejected, kRejects)
+        << "this request must be REFUSED for the test to mean anything: " << json;
+
+    // Nothing is subscribed, so a tick must reach nobody. A stranded Listener
+    // would be driven here — and with 200 of them the cost is unmissable.
+    auto probe = std::make_shared<Sink>();
+    rapidjson::Document live;
+    live.Parse(R"({"key":1,"streamKey":"AAPL","field":"ask",
+                   "pipeline":[{"type":"Worker","fn":"last"}]})");
+    auto chain = tree::buildForRequest(live, deps_, probe);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int n = 0; n < 50; ++n) tick("AAPL", {{"ask", 1.0 + n}, {"bid", 2.0}});
+    pool_->drain();
+    const auto ms = std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - t0).count();
+
+    EXPECT_EQ(probe->values().size(), 50u)
+        << "the live subscription itself must still work";
+    EXPECT_LT(ms, 300.0)
+        << "50 ticks took " << ms << " ms after " << kRejects
+        << " REJECTED builds of:\n      " << json
+        << "\n    Every Listener a failed build already registered is still in "
+           "Dispatcher::_listeners,\n    and only Listener::shutdown() "
+           "unregisters — so nothing will ever remove them. This is\n    "
+           "reachable from client JSON through ClientSession's build-error "
+           "path.";
+
+    for (auto& n : chain.keepAlive) if (n) n->shutdown();
+    if (chain.head) chain.head->shutdown();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 8. THE CLOCK PREDICATE, at the two edges no corpus entry reaches
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// `Let` + `Ref`. An earlier draft of `declaredInputIsSelfClocked` answered
+// `true` for `Ref`, which poisoned every ENCLOSING node: a `Let` with pull-only
+// bindings whose body merely mentions a `Ref` — that is, every non-degenerate
+// `Let` — was declared self-clocked and its join stayed dead. Nothing in the
+// suite covered it; deleting the clause left the whole suite green. This is the
+// gate. (`Ref` itself is harmless to clock — its head is a `RefStub` no-op.)
+TEST_F(ComposedChain, LetBoundPullOnlyJoinIsClocked) {
+  const char* kRequest = R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Aggregate","arity":2,"inputs":[
+      {"type":"Let",
+       "bindings":{"u":{"type":"AtomicAccessor","streamKey":"AAPL","field":"bollinger_upper"}},
+       "body":{"type":"Worker","fn":"last","stages":[]}},
+      {"type":"AtomicAccessor","streamKey":"AAPL","field":"bollinger_lower"}]},
+    "pipeline":[{"type":"Worker","fn":"last"}]
+  })";
+  store_.set("AAPL", "bollinger_upper", 110.0);
+  store_.set("AAPL", "bollinger_lower", 90.0);
+
+  rapidjson::Document d;
+  d.Parse(kRequest);
+  ASSERT_FALSE(d.HasParseError());
+
+  auto sink = std::make_shared<Sink>();
+  tree::BuiltChain chain;
+  ASSERT_NO_THROW(chain = tree::buildForRequest(d, deps_, sink));
+
+  tick("AAPL", {{"lastPrice", 1.0}});
+  tick("AAPL", {{"lastPrice", 2.0}});
+  pool_->drain();
+
+  EXPECT_FALSE(sink->values().empty())
+      << "a fan-in whose declared inputs are a pull-only `Let` and an "
+         "`AtomicAccessor` emitted NOTHING.\n"
+         "    Neither input has a clock of its own, so both must be in "
+         "`clockTargets`. If `declaredInputIsSelfClocked`\n"
+         "    answers `true` for anything merely CONTAINING a `Ref`, this "
+         "branch is never revived and the join stays dead —\n"
+         "    which is the failure the clock rule exists to end.";
+
+  for (auto& n : chain.keepAlive) if (n) n->shutdown();
+  if (chain.head) chain.head->shutdown();
+}
+
+// A timer-headed input IS self-clocked: `Interval`'s own thread drives its
+// child directly. `Interval::onValue` being an explicit no-op means forwarding
+// the clock to it is inert, so this was previously correct BY ACCIDENT — one
+// edit to `Interval::onValue` away from double-firing every such input. The
+// predicate now names the timers, and this pins it: the accessor branch is
+// clocked, the timer branch is not driven by the clock, and with a period long
+// enough never to fire in this test the join completes from neither.
+TEST_F(ComposedChain, TimerHeadedInputIsNotDrivenByTheClock) {
+  const char* kRequest = R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Aggregate","arity":2,"inputs":[
+      {"type":"Interval","ms":3600000,
+       "child":{"type":"AtomicAccessor","streamKey":"AAPL","field":"aa"}},
+      {"type":"Listener","streamKey":"AAPL","field":"ask"}]},
+    "pipeline":[{"type":"Worker","fn":"last"}]
+  })";
+  store_.set("AAPL", "aa", 5.0);
+
+  rapidjson::Document d;
+  d.Parse(kRequest);
+  ASSERT_FALSE(d.HasParseError());
+
+  auto sink = std::make_shared<Sink>();
+  tree::BuiltChain chain;
+  ASSERT_NO_THROW(chain = tree::buildForRequest(d, deps_, sink));
+
+  for (int n = 0; n < 4; ++n) tick("AAPL", {{"ask", 10.0 + n}, {"lastPrice", 99.0}});
+  pool_->drain();
+
+  // Four `ask` values, arity 2, one symbol -> two batches of two `ask`s
+  // (SPEC §1.1 defect 2, unchanged by this ticket). The point is what is NOT
+  // there: no 5.0 from the timer's accessor, because the clock did not drive
+  // it, and no 99.0 from the clock itself.
+  for (double v : sink->values()) {
+    EXPECT_NE(v, 5.0) << "the clock drove a timer-headed input, which the timer "
+                         "already drives — a double-fire";
+    EXPECT_NE(v, 99.0) << "the clock's own value entered the join";
+  }
+
+  for (auto& n : chain.keepAlive) if (n) n->shutdown();
+  if (chain.head) chain.head->shutdown();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 9. A FAN-IN IN PIPELINE POSITION CLOCKS, IT DOES NOT PASS THROUGH
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// **THIS PINS A LIMITATION, NOT A GUARANTEE, AND IT IS A QUESTION FOR THE SPEC.**
+//
+// D5's sentence is "`node` subtree -> pipeline stages -> terminal". When a
+// pipeline STAGE is itself a fan-in, that sentence does not hold: the `node` is
+// built into the stage's `CompositeRoot`, whose `onValue` forwards to
+// `clockTargets` and to nothing else. So the node's output CLOCKS the stage's
+// declared inputs, and where those inputs are all `Listener`s the forwarding
+// set is empty and the node's output is discarded in silence.
+//
+// That is the coherent extension of the Q1 ruling — an upstream value arriving
+// at a fan-in is a clock, never a join member, which is exactly what the ruling
+// decided for the outer Listener — but it means a hand-authored request of this
+// shape now drops data with no diagnostic. **0 of the 272 corpus entries have a
+// fan-in pipeline stage**, so nothing goes red on the day it starts mattering,
+// which is the same argument D7 used for writing ENC-1293's narrowing into this
+// ticket rather than leaving it to a comment.
+//
+// Recorded here as MEASURED BEHAVIOUR so the next reader inherits a fact rather
+// than a surprise. Whether such a request should instead be REFUSED at build
+// time (the D7 treatment) is a design call this ticket does not own.
+TEST_F(ComposedChain, FanInInPipelinePositionClocksRatherThanPassesThrough) {
+  const char* kRequest = R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Worker","fn":"last"},
+    "pipeline":[{"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]
+  })";
+  rapidjson::Document d;
+  d.Parse(kRequest);
+  ASSERT_FALSE(d.HasParseError());
+
+  auto sink = std::make_shared<Sink>();
+  tree::BuiltChain chain;
+  ASSERT_NO_THROW(chain = tree::buildForRequest(d, deps_, sink));
+
+  for (int n = 0; n < 2; ++n)
+    tick("AAPL", {{"ask", 1000.02 + n}, {"bid", 1000.00 + n},
+                  {"lastPrice", 7777.0}});
+  pool_->drain();
+
+  const auto vals = sink->values();
+  for (double v : vals)
+    EXPECT_NE(v, 7777.0)
+        << "the `node`'s output became a JOIN MEMBER of a fan-in pipeline "
+           "stage. An upstream value arriving\n    at a fan-in is a clock, "
+           "never a member — that is the Q1 ruling, and it holds wherever the "
+           "fan-in sits.";
+  EXPECT_EQ(vals.size(), 4u)
+      << "expected only the join's own four members; got " << render(vals);
 }
 
 } // namespace
