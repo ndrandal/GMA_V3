@@ -833,7 +833,9 @@ TEST_F(FanInJoinKey, ARepeatedByIsRefusedInEitherOrder) {
 // which `ClientSession` serialises as `"streamKey":" "`. JoinBy.hpp's own
 // argument against the empty symbol applies verbatim.
 TEST_F(FanInJoinKey, ByNoneRefusesAWhitespaceOnlyOutputIdentity) {
-  for (const char* sk : {" ", "   ", "\t"}) {
+  // A raw tab is not legal inside a JSON string, so it is written as the JSON
+  // escape `\t` and decodes to one tab character.
+  for (const char* sk : {" ", "   ", "\\t"}) {
     std::string json = std::string(R"({"key":1,"streamKey":")") + sk +
         R"(","field":"lastPrice",
         "node":{"type":"Aggregate","arity":2,"by":"none","inputs":[
