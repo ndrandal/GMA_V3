@@ -1122,19 +1122,26 @@ TEST_F(ComposedChain, FanInAsAPipelineStageUnderANodeIsRefused_AllThreeTypes) {
   })", deps_);
   expectFanInRefusal(agg, "node + pipeline:[Aggregate]", "Aggregate", "pipeline[0]");
 
+  // NOTE — this case deliberately has NO trailing `Field`, so the terminal
+  // WOULD receive a Record and D7's check would fire on it too. That is what
+  // makes the `Record` assertion below load-bearing: it fails if the two checks
+  // are reordered. With a `Field` appended (as this test first had it) D7 never
+  // fires at all, the assertion is inert, and moving the ENC-1336 block after
+  // D7's killed no test — measured, mutation M8.
   const std::string pack = buildAndReportJson(R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
     "node":{"type":"Worker","fn":"last"},
     "pipeline":[{"type":"Pack","fields":{
         "ask":{"type":"Listener","streamKey":"AAPL","field":"ask"},
-        "bid":{"type":"Listener","streamKey":"AAPL","field":"bid"}}},
-      {"type":"Field","name":"bid"}]
+        "bid":{"type":"Listener","streamKey":"AAPL","field":"bid"}}}]
   })", deps_);
-  expectFanInRefusal(pack, "node + pipeline:[Pack, Field]", "Pack", "pipeline[0]");
+  expectFanInRefusal(pack, "node + pipeline:[Pack]", "Pack", "pipeline[0]");
   EXPECT_EQ(pack.find("Record"), std::string::npos)
-      << "a MISPLACED Pack must be diagnosed as a placement problem, not as "
-         "D7's Record-terminal problem — the fan-in check runs first on "
-         "purpose, because moving the stage is the fix: " << pack;
+      << "a MISPLACED Pack trips BOTH this rule and D7's Record-terminal rule. "
+         "It must be diagnosed as a placement problem: the fan-in check runs "
+         "first on purpose, because moving the stage is the fix and D7 will "
+         "still speak up afterwards if the terminal really would get a Record: "
+      << pack;
 
   const std::string let = buildAndReportJson(R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
