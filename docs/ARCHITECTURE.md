@@ -305,7 +305,32 @@ Server replies (the id field mirrors the input — `key` for int subs,
 ```json
 {"type": "subscribed", "key": 1}
 {"type": "update",     "key": 1, "streamKey": "AAPL", "value": 187.34}
+{"type": "update",     "key": 2, "streamKey": "AAPL", "value": 187.34, "bucketStartMs": 1789879372000}
 ```
+
+**`bucketStartMs` — the bar this value belongs to (ENC-1280).** Present only
+when the subscription's pipeline is clocked by a wall-clock-aligned timer node
+(`TumblingWindow` or `BucketTime`). It is the **epoch-ms start of the bucket
+that closed when the value was produced**, taken from the very boundary those
+nodes already align their `wait_until` deadline to — so it carries exactly the
+alignment they guarantee and nothing else. Properties a consumer may rely on:
+
+- always a JSON **integer** (rapidjson `Int64`), never a double — a current ms
+  epoch needs 41 bits and would not survive a `float32` lane;
+- always a whole multiple of the node's `periodMs`, so two subscriptions of the
+  same period agree on bar identity regardless of when either connected;
+- **bucket-derived, never a dispatch-time `time.Now()`** — re-dispatching an
+  unchanged pipeline reproduces the same value for the same bar;
+- **absent, not `0`**, when the stream is not bucketed. `0` is the internal
+  "no bucket identity" sentinel (`StreamValue::bucketStartMs`) and would read as
+  a 1970 epoch on the wire, so the key is omitted instead. An un-bucketed
+  `update` frame therefore has exactly the four keys it always had.
+
+Delivery is lossy (see flow control below) and quiet buckets emit nothing, so a
+consumer must key off `bucketStartMs` rather than counting frames: bars arrive
+in increasing order but not necessarily consecutively. See
+`specs/2026-09-20-timestamps-on-the-wire/SPEC.md` D7/D9/D10 for the downstream
+contract this feeds.
 
 The wire key is `streamKey` everywhere; the engine is stream-neutral and the
 internal `Event::symbol` field is just an opaque stream key (see §3). No
