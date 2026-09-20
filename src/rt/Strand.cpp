@@ -28,8 +28,8 @@ void Strand::post(std::function<void()> fn) {
 
   // `shared_from_this` keeps the strand alive for the whole drain, so the last
   // external owner may drop while work is still queued.
-  if (pool_->post([self = shared_from_this()] { self->drain(); }))
-    return;
+  pool_->post([self = shared_from_this()] { self->drain(); });  // MUTATION M9
+  return;
 
   // THE KICK WAS REFUSED — the pool is stopping and silently drops posts
   // (`ThreadPool::post` returns false). We hold the drainer token, and nothing
