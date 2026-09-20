@@ -766,14 +766,15 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     // synchronously on the WebSocket read thread. The two mint sites are now
     // symmetric; the asymmetry was found by the ENC-1005 adversarial review.
     //
-    // ENC-1338: the mint itself lives in `mintSubscriptionStrand` and stamps
-    // the strand with this site's origin tag, so that BOTH halves of this line
-    // are gated — deleting the call (ENC-1005's M7) makes the DAG's strand read
-    // `unattributed` because the backstop minted it, and dropping the guard
-    // (M10), in the helper or by inlining a mint here, is caught by the helper's
-    // own test or by the same origin assertion. Before ENC-1338 neither
-    // mutation reddened a single test. Do not inline this back.
-    deps.strand = gma::server::mintSubscriptionStrand(deps.pool);
+    // ENC-1338: the mint itself lives in `SubscriptionStrandMint::mint` and
+    // stamps the strand with this site's attribution, so BOTH halves of this
+    // line are gated. Deleting the call (ENC-1005's M7) makes the DAG's strand
+    // read `unattributed`, because the backstop minted it. Dropping the guard
+    // (M10) inside the mint reddens the mint's own test — and dropping it by
+    // INLINING a mint here does not compile, because `rt::Strand::Attribution`
+    // has a private constructor and `SubscriptionStrandMint` is its only
+    // friend. Before ENC-1338 neither mutation reddened a single test.
+    deps.strand = gma::server::SubscriptionStrandMint::mint(deps.pool);
 
     try {
       // Check subscription limit BEFORE building the pipeline to avoid

@@ -25,12 +25,29 @@
 // ENC-1005 concluded the line was "documentation rather than load-bearing code".
 //
 // So the observable had to be built. `rt::Strand` now carries the mint site that
-// created it (`origin()`), and the session's site is the only place in the
-// engine that can stamp `gma::server::subscriptionStrandOrigin()` — the literal
-// is file-local to `ClientSession.cpp`. Reading that tag off the head `Listener`
-// of a subscription driven through a REAL WebSocket session answers the exact
-// question M7 asks: is the strand this DAG is running on the one the session
-// minted, or the one the backstop substituted?
+// created it (`origin()`), stamped through `rt::Strand::Attribution` — a token
+// whose constructor is private and whose only friend is
+// `gma::server::SubscriptionStrandMint`. An attributed strand therefore cannot
+// be constructed anywhere else in the engine, so reading that tag off the
+// `Listener` of a subscription driven through a REAL WebSocket session answers
+// the exact question M7 asks: is the strand this DAG was given the one the
+// session minted, or the one the backstop substituted?
+//
+// THE FIRST DRAFT OF THAT WAS A PLAIN STRING AND IT DID NOT HOLD. The tag was a
+// `const char*` with the literal hidden in an anonymous namespace. An
+// adversarial review broke it two ways: the literal is public through
+// `SubscriptionStrandMint::origin()`, and an anonymous-namespace member is
+// visible through its enclosing namespace name for the rest of the translation
+// unit — so `handleSubscribe` itself could reach it. An unguarded mint inlined
+// at the call site that simply kept the tag passed all five tests. The
+// capability token is what makes that a compile error instead.
+//
+// WHAT THESE TESTS DO AND DO NOT CLAIM. Tests 1 and 2 assert the strand the DAG
+// was GIVEN and that the DAG's values were delivered THROUGH it (`tasksRun()`).
+// They do not assert that ordering holds — that is ENC-1005's
+// `tests/integration/OrderedDeliveryTest.cpp` and `Corpus86_SpreadIsExactlyTwoCents`,
+// and those are what redden if `Listener::onValue` stops using the strand it
+// holds. The two suites are complementary; neither subsumes the other.
 //
 // NOTHING IS STUBBED on the path under test. `SessionHarness` boots a real
 // `WebSocketServer` on 127.0.0.1:0, a real client connects over Beast, and the
@@ -40,11 +57,11 @@
 //
 // MUTATION RESULTS (ENC-1338; one mutation at a time, control re-run between):
 //
-//   M7  delete the mint at the call site        -> ProductionSubscribeMints... RED
-//   M7b make the helper return nullptr          -> ProductionSubscribeMints... RED
-//                                                  TheMintReturnsAWorkingStrand... RED
-//   M10 drop the guard inside the helper        -> TheMintReturnsNullForAPoolless... RED
-//   M10b unguarded mint inlined at the call site -> ProductionSubscribeMints... RED
+//   M7   delete the mint at the call site          -> tests 1, 2 RED
+//   M7b  make the mint return nullptr              -> tests 1, 2, 4 RED
+//   M10  drop the guard inside the mint            -> test 3 RED
+//   M10b unguarded mint inlined at the call site   -> tests 1, 2 RED (untagged)
+//                                                  -> DOES NOT COMPILE (tagged)
 //
 // RELATED, DELIBERATELY NOT TESTED HERE. Ordered delivery additionally requires
 // single-threaded ingress per symbol, which `Dispatcher::onTick`'s contract
@@ -183,8 +200,11 @@ std::string readUntilType(ws::stream<tcp::socket>& stream,
   return out;
 }
 
-// The head Listener the live session registered for (symbol, field), or null.
-std::shared_ptr<gma::nodes::Listener> headListener(gma::Dispatcher& d,
+// The FIRST Listener the live session registered on (symbol, field), or null.
+// For the single-field request these tests drive there is exactly one, so it is
+// the head; a request whose join inputs listened on the same (symbol, field)
+// would make "first" and "head" different things.
+std::shared_ptr<gma::nodes::Listener> listenerOn(gma::Dispatcher& d,
                                                    const std::string& symbol,
                                                    const std::string& field) {
   auto nodes = d.listenersFor(symbol, field);
@@ -221,7 +241,7 @@ TEST(SubscriptionStrandMint, ProductionSubscribeMintsItsOwnStrandAtTheSessionSit
   const auto ack = readUntilType(stream, "subscribed", std::chrono::seconds(3));
   ASSERT_FALSE(ack.empty()) << "no 'subscribed' ack — the DAG was never built";
 
-  auto listener = headListener(*srv.dispatcher, "AAPL", "lastPrice");
+  auto listener = listenerOn(*srv.dispatcher, "AAPL", "lastPrice");
   ASSERT_TRUE(listener) << "the live session registered no head Listener for "
                            "(AAPL, lastPrice)";
 
@@ -233,7 +253,7 @@ TEST(SubscriptionStrandMint, ProductionSubscribeMintsItsOwnStrandAtTheSessionSit
   // in the engine (file-local to ClientSession.cpp), so nothing else can
   // produce it: the backstop's strand reads `unattributed`, and so does a mint
   // inlined at the call site.
-  EXPECT_STREQ(strand->origin(), gma::server::subscriptionStrandOrigin())
+  EXPECT_STREQ(strand->origin(), gma::server::SubscriptionStrandMint::origin())
       << "the strand this subscription is running on was NOT minted by "
          "ClientSession::handleSubscribe. `"
       << gma::rt::Strand::kUnattributedOrigin
@@ -271,11 +291,11 @@ TEST(SubscriptionStrandMint, AReSubscribeGetsAFreshSessionMintedStrand) {
 
   stream.write(asio::buffer(std::string(kSubscribeAapl)));
   ASSERT_FALSE(readUntilType(stream, "subscribed", std::chrono::seconds(3)).empty());
-  auto first = headListener(*srv.dispatcher, "AAPL", "lastPrice");
+  auto first = listenerOn(*srv.dispatcher, "AAPL", "lastPrice");
   ASSERT_TRUE(first);
   const auto firstStrand = first->strand();
   ASSERT_TRUE(firstStrand);
-  EXPECT_STREQ(firstStrand->origin(), gma::server::subscriptionStrandOrigin());
+  EXPECT_STREQ(firstStrand->origin(), gma::server::SubscriptionStrandMint::origin());
 
   stream.write(asio::buffer(std::string(kSubscribeAapl)));
   ASSERT_FALSE(readUntilType(stream, "subscribed", std::chrono::seconds(3)).empty());
@@ -289,7 +309,7 @@ TEST(SubscriptionStrandMint, AReSubscribeGetsAFreshSessionMintedStrand) {
     ASSERT_TRUE(l->strand());
     EXPECT_NE(l->strand(), firstStrand)
         << "the re-subscribed DAG shares the shut-down DAG's strand";
-    EXPECT_STREQ(l->strand()->origin(), gma::server::subscriptionStrandOrigin())
+    EXPECT_STREQ(l->strand()->origin(), gma::server::SubscriptionStrandMint::origin())
         << "the re-subscribed DAG's strand did not come from the session site";
     sawFresh = true;
   }
@@ -313,7 +333,7 @@ TEST(SubscriptionStrandMint, AReSubscribeGetsAFreshSessionMintedStrand) {
 //    only in a comment.
 // ───────────────────────────────────────────────────────────────────────────
 TEST(SubscriptionStrandMint, TheMintReturnsNullForAPoollessExecutor) {
-  EXPECT_EQ(gma::server::mintSubscriptionStrand(nullptr), nullptr)
+  EXPECT_EQ(gma::server::SubscriptionStrandMint::mint(nullptr), nullptr)
       << "the production mint built a Strand over a null pool — ENC-1005's M10. "
          "A pool-less Strand runs inline on its caller AND makes the Listener "
          "claim its own executor, putting the entire DAG compute on the "
@@ -328,10 +348,10 @@ TEST(SubscriptionStrandMint, TheMintReturnsNullForAPoollessExecutor) {
 // ───────────────────────────────────────────────────────────────────────────
 TEST(SubscriptionStrandMint, TheMintReturnsAWorkingStrandTaggedWithItsSite) {
   gma::rt::ThreadPool pool(4);
-  auto strand = gma::server::mintSubscriptionStrand(&pool);
+  auto strand = gma::server::SubscriptionStrandMint::mint(&pool);
   ASSERT_TRUE(strand) << "the production mint produced NO strand for a real "
                          "pool — ENC-1005's M7 applied inside the helper";
-  EXPECT_STREQ(strand->origin(), gma::server::subscriptionStrandOrigin());
+  EXPECT_STREQ(strand->origin(), gma::server::SubscriptionStrandMint::origin());
 
   // It is a strand: FIFO, and never two tasks at once.
   constexpr int kTasks = 200;
