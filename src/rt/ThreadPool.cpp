@@ -21,13 +21,14 @@ ThreadPool::~ThreadPool() {
   for (auto& t : threads_) if (t.joinable()) t.join();
 }
 
-void ThreadPool::post(std::function<void()> fn) {
+bool ThreadPool::post(std::function<void()> fn) {
   {
     std::lock_guard<std::mutex> lk(mx_);
-    if (stopping_) return;
+    if (stopping_) return false;       // ENC-1005: report the drop, don't hide it
     q_.push(std::move(fn));
   }
   cv_.notify_one();
+  return true;
 }
 
 void ThreadPool::drain() {
