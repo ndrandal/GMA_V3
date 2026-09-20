@@ -64,7 +64,9 @@ const char* SubscriptionStrandMint::origin() noexcept {
 // M10 removes. Both are gated by `tests/ws/SubscriptionStrandMintTest.cpp`.
 std::shared_ptr<gma::rt::Strand>
 SubscriptionStrandMint::mint(gma::rt::ThreadPool* pool) {
-  (void)pool; return nullptr;   // M7b
+  // M10: guard deleted
+  return std::make_shared<gma::rt::Strand>(
+      pool, gma::rt::Strand::Attribution(kSubscriptionStrandOrigin));
 }
 
 } // namespace server
