@@ -346,10 +346,21 @@ public:
   void onValue(const gma::StreamValue& sv) override {
     const double* d = std::get_if<double>(&sv.value);
     std::lock_guard<std::mutex> lk(mx_);
+    // ENC-1292: the SYMBOL is recorded too. `ClientSession` serialises
+    // `sv.symbol` as the frame's `streamKey`, so a join's output identity is
+    // whatever the last node put there — and under `by:"none"` that is a
+    // design decision, not an accident (SPEC section 5 Q6). Nothing could ask
+    // this terminal what identity it saw before.
+    ++symbols_[sv.symbol];
     if (d) byThread_[std::this_thread::get_id()].push_back(*d);
     else   ++nonNumeric_;
   }
   void shutdown() noexcept override {}
+
+  std::map<std::string, std::size_t> symbols() const {
+    std::lock_guard<std::mutex> lk(mx_);
+    return symbols_;
+  }
 
   std::map<std::thread::id, std::vector<double>> take() {
     std::lock_guard<std::mutex> lk(mx_);
@@ -365,6 +376,7 @@ public:
 private:
   mutable std::mutex mx_;
   std::map<std::thread::id, std::vector<double>> byThread_;
+  std::map<std::string, std::size_t> symbols_;
   std::size_t nonNumeric_{0};
 };
 
@@ -449,11 +461,39 @@ rapidjson::Document nodeWithoutPipeline(const rapidjson::Value& request) {
   return d;
 }
 
+// ENC-1292 / SPEC D1 — the same `node`, with the join key it needs DECLARED.
+//
+// `tests/treebuilder/corpus_requests.json` is still NOT touched: `by` is added
+// to the COPY. That is deliberate and is the D6 boundary. The corpus is the
+// authored record of what clients ask for, and no authored request carries a
+// `by` — the member did not exist when the corpus was written, and forum does
+// not emit one. Editing the file would delete the very baseline the default
+// has to be measured against, which is why `Corpus87_ObservationPointIsSound_
+// Control` below drives the request BOTH ways from the one entry.
+rapidjson::Document nodeWithJoinByNone(const rapidjson::Value& request) {
+  rapidjson::Document d = nodeWithoutPipeline(request);
+  auto& al = d.GetAllocator();
+  EXPECT_TRUE(d.HasMember("node") && d["node"].IsObject())
+      << "this helper declares a join key on the request's `node`, and there "
+         "is none";
+  auto& node = d["node"];
+  node.RemoveMember("by");
+  node.AddMember("by", rapidjson::Value("none", al).Move(), al);
+  return d;
+}
+
 // ─── Driver ────────────────────────────────────────────────────────────────
 struct Drive {
   std::map<std::thread::id, std::vector<double>> byThread;
+  std::map<std::string, std::size_t> symbols;     // ENC-1292, SPEC Q6
   std::size_t arrivals{0};
   std::size_t nonNumeric{0};
+
+  std::string renderSymbols() const {
+    std::ostringstream os;
+    for (const auto& [sym, n] : symbols) os << " " << sym << "=" << n;
+    return os.str();
+  }
 };
 
 Drive driveCorpus(const rapidjson::Value& request,
@@ -480,6 +520,7 @@ Drive driveCorpus(const rapidjson::Value& request,
 
   Drive out;
   out.byThread   = terminal->take();
+  out.symbols    = terminal->symbols();
   out.nonNumeric = terminal->nonNumeric();
   for (auto& [tid, vals] : out.byThread) { (void)tid; out.arrivals += vals.size(); }
 
