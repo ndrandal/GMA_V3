@@ -11,10 +11,8 @@ void Strand::post(std::function<void()> fn) {
   {
     std::lock_guard<std::mutex> lk(mx_);
     q_.push_back(std::move(fn));
-    if (!running_) {
-      running_ = true;
-      kick     = true;
-    }
+    running_ = true;
+    kick = true;  // MUTATION M4
   }
   if (!kick) return;                 // an existing drainer will pick it up
 
