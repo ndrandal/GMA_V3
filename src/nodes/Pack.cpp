@@ -33,7 +33,8 @@ void Pack::onPortValue(std::size_t idx, const StreamValue& sv) {
 
   // ENC-1292 / SPEC D1, Q6 — the declared correlation key, and the identity
   // the assembled Record is emitted under. See Aggregate::onPortValue.
-  const std::string& joinKey = outKey_;
+  const std::string& joinKey =
+      (by_ == JoinBy::None) ? outKey_ : sv.symbol;
 
   Record rec;
   std::shared_ptr<INode> ds;
@@ -68,7 +69,7 @@ void Pack::onPortValue(std::size_t idx, const StreamValue& sv) {
   // record belongs to that field's bucket. Slots filled in earlier buckets
   // are last-value-wins already — this does not make them older than they
   // are, it dates the record by its completion.
-  if (ds) ds->onValue(StreamValue{joinKey, ArgType{std::move(rec)}, sv.bucketStartMs});
+  if (ds) ds->onValue(StreamValue{sv.symbol, ArgType{std::move(rec)}, sv.bucketStartMs});
 }
 
 void Pack::shutdown() noexcept {
