@@ -361,8 +361,11 @@ if (GMA_BUILD_TESTS)
       "$<TARGET_FILE_DIR:gma_tests>/corpus_requests.json"
     COMMENT "Copying corpus_requests.json next to gma_tests")
 
-  # ─── ENC-1289: three assertions that are EXPECTED TO FAIL until the join is
+  # ─── ENC-1289: assertions that are EXPECTED TO FAIL until the join is
   # fixed, registered so `ctest` stays green while they stay live.
+  # Three at ENC-1289; two after ENC-1005 cleared the race gate; ONE after
+  # ENC-1291 cleared the counting gate. The survivor is the cross-streamKey
+  # join, which needs SPEC D1's declared `by` — ENC-1292.
   #
   # `tests/treebuilder/CorpusTest.cpp` gained real value assertions against
   # corpus entries 86 and 87 (SPEC specs/2026-09-20-gma-join-correctness D8).
@@ -378,7 +381,7 @@ if (GMA_BUILD_TESTS)
   # come here and delete its block. It unwinds itself; a DISABLED_ test would
   # have rotted silently instead.
   #
-  # WHOEVER LANDS ENC-1291: delete the matching add_test block below
+  # WHOEVER LANDS ENC-1292: delete the matching add_test block below
   # AND its name from the gma_tests exclusion filter. All of this goes away
   # together, including gma_enc1289_expected_failures_really_failed.
   #
@@ -394,9 +397,17 @@ if (GMA_BUILD_TESTS)
   # not through this ctest entry.
   # ENC-1005 REMOVED "CorpusValueAssertions.Corpus86_SpreadIsExactlyTwoCents"
   # from this list on 2026-09-20: SPEC D3's per-request strand landed and the
-  # assertion passes. Two remain, both ENC-1291's.
+  # assertion passes.
+  # ENC-1291 REMOVED "CorpusValueAssertions.Corpus86_JoinMustNotCompleteFromOneInputAlone"
+  # on 2026-09-20: SPEC D2's port-indexed fan-in landed and a two-input join no
+  # longer completes a tuple from one input alone.
+  # ONE remains, and it is ENC-1292's (SPEC D1, declared `by`). ENC-1291 did
+  # NOT clear it: port-indexing puts AAPL and MSFT in two `buf_[sv.symbol]`
+  # entries that each stay half-filled, so the join emits NOTHING. The test's
+  # old body passed on that — vacuously, over an empty tuple list — so ENC-1291
+  # added the anti-vacuity ASSERT that keeps it honestly red. See the block
+  # above that test in tests/treebuilder/CorpusTest.cpp.
   set(GMA_ENC1289_EXPECTED_FAILURES
-    "CorpusValueAssertions.Corpus86_JoinMustNotCompleteFromOneInputAlone"
     "CorpusValueAssertions.Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself")
   string(JOIN ":" GMA_ENC1289_EXPECTED_FAILURES_FILTER
          ${GMA_ENC1289_EXPECTED_FAILURES})
@@ -405,17 +416,9 @@ if (GMA_BUILD_TESTS)
     COMMAND gma_tests "--gtest_filter=-${GMA_ENC1289_EXPECTED_FAILURES_FILTER}"
     WORKING_DIRECTORY "$<TARGET_FILE_DIR:gma_tests>")
 
-  # ENC-1291 (SPEC D2 — port-indexed fan-in + arity enforcement) makes this
-  # pass. When it does, DELETE THIS BLOCK.
-  add_test(NAME gma_enc1289_xfail_join_counts_values_not_inputs
-    COMMAND gma_tests
-            "--gtest_filter=CorpusValueAssertions.Corpus86_JoinMustNotCompleteFromOneInputAlone"
-    WORKING_DIRECTORY "$<TARGET_FILE_DIR:gma_tests>")
-  set_tests_properties(gma_enc1289_xfail_join_counts_values_not_inputs
-    PROPERTIES WILL_FAIL TRUE)
-
-  # ENC-1291 (SPEC D2) makes this pass; ENC-1292 (SPEC D1, declared `by`) should
-  # then strengthen the assertion itself. When it passes, DELETE THIS BLOCK.
+  # ENC-1292 (SPEC D1, declared `by`) makes this pass. ENC-1291 (D2) did not:
+  # it turned "six tuples pairing one symbol with itself" into "no tuples at
+  # all", which is inert rather than correct. When it passes, DELETE THIS BLOCK.
   add_test(NAME gma_enc1289_xfail_no_cross_symbol_join
     COMMAND gma_tests
             "--gtest_filter=CorpusValueAssertions.Corpus87_CrossSymbolJoinNeverPairsOneSideWithItself"
@@ -428,14 +431,19 @@ if (GMA_BUILD_TESTS)
   # gtest's own end-of-run summary, which a dying process never reaches. It also
   # pins the COUNT, so an expected failure that silently starts passing while
   # another starts failing cannot cancel out.
-  # The COUNT is 2 as of ENC-1005 (was 3). It must be edited down every time a
-  # gate is cleared, in the same commit that removes the gate — that coupling is
-  # the point of pinning a count rather than just asserting "some failed".
+  # The COUNT is 1 as of ENC-1291 (3 at ENC-1289, 2 after ENC-1005). It must be
+  # edited down every time a gate is cleared, in the same commit that removes
+  # the gate — that coupling is the point of pinning a count rather than just
+  # asserting "some failed".
+  # NOTE: gtest prints "1 FAILED TEST" (singular) for a single failure, not
+  # "1 FAILED TESTS". The regex below matches the singular form; when ENC-1292
+  # clears the last gate this whole case is deleted, so it never needs a plural
+  # again.
   add_test(NAME gma_enc1289_expected_failures_really_failed
     COMMAND gma_tests "--gtest_filter=${GMA_ENC1289_EXPECTED_FAILURES_FILTER}"
     WORKING_DIRECTORY "$<TARGET_FILE_DIR:gma_tests>")
   set_tests_properties(gma_enc1289_expected_failures_really_failed
-    PROPERTIES PASS_REGULAR_EXPRESSION "2 FAILED TESTS")
+    PROPERTIES PASS_REGULAR_EXPRESSION "1 FAILED TEST")
 
   # ENC-1006: an occupied wsPort/feedPort must produce a clean non-zero exit,
   # not std::terminate. This drives the real gma_server binary, so it lives as
