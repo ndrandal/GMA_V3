@@ -1071,8 +1071,10 @@ void expectFanInRefusal(const std::string& msg,
       << "): " << msg;
   EXPECT_NE(msg.find("FAN-IN"), std::string::npos)
       << what << " must say the problem is that the stage is a fan-in: " << msg;
-  EXPECT_NE(msg.find("DISCARDED IN SILENCE"), std::string::npos)
-      << what << " must say what happens without the refusal: " << msg;
+  EXPECT_NE(msg.find("delivered as a CLOCK"), std::string::npos)
+      << what << " must say what happens to the upstream's value: " << msg;
+  EXPECT_NE(msg.find("no log, no metric and no error"), std::string::npos)
+      << what << " must say why the failure it prevents is invisible: " << msg;
   EXPECT_NE(msg.find("move the fan-in to 'node' position"), std::string::npos)
       << what << " must name the fix: " << msg;
   EXPECT_NE(msg.find("ENC-1336"), std::string::npos)
@@ -1154,9 +1156,11 @@ TEST_F(ComposedChain, FanInAsANonFirstPipelineStageIsRefused) {
         {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]
   })", deps_);
   expectFanInRefusal(msg, "pipeline:[Worker, Aggregate]", "Aggregate", "pipeline[1]");
-  EXPECT_NE(msg.find("pipeline[0]"), std::string::npos)
+  EXPECT_NE(msg.find("pipeline[0] precedes it"), std::string::npos)
       << "the message must name the stage that WOULD be discarded, not only the "
-         "fan-in: " << msg;
+         "fan-in — and must say `precedes`, not `is built`, because a stage "
+         "this check deliberately did not inspect may not be buildable at all: "
+      << msg;
 }
 
 // `stages` is the legacy spelling of `pipeline` and the build loop treats them
@@ -1365,6 +1369,68 @@ TEST_F(ComposedChain, ForumsRsiOverboughtDemoShapeStillBuildsAndEmits) {
 
   if (chain.head) chain.head->shutdown();
   for (auto& n : chain.keepAlive) if (n) n->shutdown();
+}
+
+// ─── THE KNOWN GAP, PINNED RATHER THAN LEFT TO BE REDISCOVERED ──────────────
+
+// A fan-in WRAPPED in a `Chain` or a `Tee` is NOT refused, and the silent
+// discard survives there untouched. This is ENC-1336's declared non-recursive
+// scope, not an oversight — but SPEC §5 Q7's stated reason for that scope
+// ("today no builder reachable from a pipeline stage takes a sub-node that
+// could hold a fan-in except a fan-in's own `inputs`") is measurably FALSE, and
+// a premise nobody can check is how this class of defect survives. So the fact
+// is a test.
+//
+// `Chain`'s builder ends `return curDown;` — the inner builder's head, verbatim
+// — so the stage head IS the `CompositeRoot`. The request below is the exact
+// shape `FanInAsAPipelineStageUnderANodeIsRefused` refuses, with one keyword
+// wrapped around the stage.
+//
+// **This test asserts a DEFECT.** When a ruling extends Q7 to the nested case,
+// delete it and add the refusal to `FanInAsAPipelineStageUnderANodeIsRefused`.
+TEST_F(ComposedChain, FanInWrappedInAChainIsNotRefused_KnownGap) {
+  auto runOne = [this](const char* json) {
+    rapidjson::Document d;
+    d.Parse(json);
+    EXPECT_FALSE(d.HasParseError()) << "test JSON is malformed: " << json;
+    auto sink = std::make_shared<Sink>();
+    tree::BuiltChain chain;
+    EXPECT_NO_THROW(chain = tree::buildForRequest(d, deps_, sink))
+        << "the check is non-recursive, so this still BUILDS today";
+    for (int n = 0; n < 3; ++n)
+      tick("AAPL", {{"ask", 1000.02 + n}, {"bid", 1000.00 + n},
+                    {"lastPrice", 7777.0}});
+    pool_->drain();
+    auto vals = sink->values();
+    if (chain.head) chain.head->shutdown();
+    for (auto& x : chain.keepAlive) if (x) x->shutdown();
+    return vals;
+  };
+
+  const auto viaChain = runOne(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Worker","fn":"last"},
+    "pipeline":[{"type":"Chain","stages":[
+      {"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]}]
+  })");
+  const auto viaTee = runOne(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Worker","fn":"last"},
+    "pipeline":[{"type":"Tee","outputs":[
+      {"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]}]
+  })");
+
+  for (const auto* vals : {&viaChain, &viaTee}) {
+    EXPECT_FALSE(vals->empty()) << "the join itself still fires";
+    for (double v : *vals)
+      EXPECT_NE(v, 7777.0)
+          << "THE GAP: the `node`'s output is still discarded in silence when "
+             "the fan-in is one wrapper deep. Got " << render(*vals);
+  }
 }
 
 } // namespace
