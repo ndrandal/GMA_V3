@@ -38,7 +38,9 @@ void Aggregate::onValue(const StreamValue& sv) {
   // Forward outside the lock to avoid holding it during downstream calls
   if (p) {
     for (const auto& v : batch) {
-      p->onValue(StreamValue{ sv.symbol, v });
+      // ENC-1280: the batch is released by `sv`, so every value in it is
+      // forwarded under `sv`'s bucket identity.
+      p->onValue(StreamValue{ sv.symbol, v, sv.bucketStartMs });
     }
   }
 }
