@@ -214,7 +214,7 @@ TEST_F(RecordTerminal, TeeWithOneRecordBranchIsRejected) {
   const std::string msg = buildAndReport(R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
     "pipeline":[{"type":"Tee","outputs":[
-      {"type":"Worker","fn":"identity"},
+      {"type":"Worker","fn":"last"},
       {"type":"Pack","fields":{
         "ask":{"type":"Listener","streamKey":"AAPL","field":"ask"},
         "bid":{"type":"Listener","streamKey":"AAPL","field":"bid"}}}]}]
@@ -335,7 +335,7 @@ TEST_F(RecordTerminal, PackExprResponderBuildsAndEmitsTheExactValue) {
 TEST_F(RecordTerminal, OrdinaryScalarRequestIsUnaffected) {
   EXPECT_EQ(buildAndReport(R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
-    "pipeline":[{"type":"Worker","fn":"identity"}]
+    "pipeline":[{"type":"Worker","fn":"last"}]
   })"), "");
 }
 
