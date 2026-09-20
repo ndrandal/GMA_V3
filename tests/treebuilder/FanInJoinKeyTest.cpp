@@ -756,3 +756,166 @@ TEST_F(FanInJoinKey, EveryCrossStreamKeyCorpusRequestJoinsUnderByNone) {
          "`sv.symbol` and nothing else (SPEC section 1.1 defect 3)."
       << detail.str();
 }
+
+// ═══ 4. Holes an adversarial review found in the closed vocabulary ═══════════
+//
+// Every test in this block corresponds to a request that was ACCEPTED at
+// `GMA_V3@e2266e4` and produced a plausible wrong answer, or to a claim in
+// include/gma/nodes/JoinBy.hpp that nothing checked. None came from review;
+// all came from an agent told to assume the change was wrong.
+
+// `by` was meaningful only where `joinByFor` is called — the two fan-in
+// builders — so a `by` anywhere else was silently ignored. That is Q3's own
+// failure shape one node over, and it is the likelier author error of the two:
+// "join these across symbols" naturally gets written on the request or on a
+// pipeline stage rather than on the `Aggregate`.
+TEST_F(FanInJoinKey, ByOnANodeThatIsNotAFanInIsRefused) {
+  struct Case { const char* what; const char* json; };
+  const Case cases[] = {
+    {"on the request's head node (a Listener)", R"({
+       "key":1,"streamKey":"AAPL","field":"lastPrice",
+       "node":{"type":"Listener","streamKey":"AAPL","field":"lastPrice",
+               "by":"none"}})"},
+    {"on a pipeline stage", R"({
+       "key":1,"streamKey":"AAPL","field":"lastPrice",
+       "node":{"type":"Aggregate","arity":2,"by":"none","inputs":[
+         {"type":"Listener","streamKey":"AAPL","field":"lastPrice"},
+         {"type":"Listener","streamKey":"MSFT","field":"lastPrice"}]},
+       "pipeline":[{"type":"Worker","fn":"diff","by":"none"}]})"},
+    {"on a declared input of a fan-in", R"({
+       "key":1,"streamKey":"AAPL","field":"lastPrice",
+       "node":{"type":"Aggregate","arity":2,"inputs":[
+         {"type":"Listener","streamKey":"AAPL","field":"lastPrice","by":"typo"},
+         {"type":"Listener","streamKey":"MSFT","field":"lastPrice"}]}})"},
+  };
+
+  for (const auto& c : cases) {
+    rapidjson::Document req = parse(c.json);
+    const std::string msg = refusalFor(req);
+    ASSERT_FALSE(msg.empty())
+        << "a 'by' " << c.what << " was ACCEPTED and silently ignored. The "
+           "join then runs per-symbol while the author asked for something "
+           "else, with no diagnostic in either repo.";
+    EXPECT_NE(msg.find("does not take a 'by'"), std::string::npos)
+        << "for a 'by' " << c.what << ", got: " << msg;
+    EXPECT_NE(msg.find("FAN-IN"), std::string::npos)
+        << "the message must say where 'by' DOES belong. Got: " << msg;
+  }
+
+  // ...and the same request with the `by` in the right place still builds.
+  rapidjson::Document ok = parse(kCrossRequest("\"by\":\"none\","));
+  EXPECT_EQ(refusalFor(ok), "") << "the well-formed request must still build";
+}
+
+// RapidJSON keeps every member of a duplicated key and `v["by"]` returns the
+// FIRST, so the closed vocabulary was ORDER-DEPENDENT: `{"by":"none",
+// "by":"typo"}` was accepted and `{"by":"typo","by":"none"}` was refused.
+TEST_F(FanInJoinKey, ARepeatedByIsRefusedInEitherOrder) {
+  const char* orders[] = {
+    "\"by\":\"none\",\"by\":\"typo\",",
+    "\"by\":\"typo\",\"by\":\"none\",",
+    "\"by\":\"none\",\"by\":\"none\",",   // even two VALID copies
+  };
+  for (const char* clause : orders) {
+    rapidjson::Document req = parse(kCrossRequest(clause));
+    const std::string msg = refusalFor(req);
+    ASSERT_FALSE(msg.empty())
+        << "a repeated 'by' (" << clause << ") was ACCEPTED. Whichever copy "
+           "the parser happened to return would then decide the join's "
+           "correlation key, silently.";
+    EXPECT_NE(msg.find("declared more than once"), std::string::npos)
+        << "for " << clause << ", got: " << msg;
+  }
+}
+
+// `buildForRequest` rejects only an EMPTY top-level `streamKey`, so a
+// whitespace-only one satisfied Q6's guard and the join emitted under `" "` —
+// which `ClientSession` serialises as `"streamKey":" "`. JoinBy.hpp's own
+// argument against the empty symbol applies verbatim.
+TEST_F(FanInJoinKey, ByNoneRefusesAWhitespaceOnlyOutputIdentity) {
+  for (const char* sk : {" ", "   ", "\t"}) {
+    std::string json = std::string(R"({"key":1,"streamKey":")") + sk +
+        R"(","field":"lastPrice",
+        "node":{"type":"Aggregate","arity":2,"by":"none","inputs":[
+          {"type":"Listener","streamKey":"AAPL","field":"lastPrice"},
+          {"type":"Listener","streamKey":"MSFT","field":"lastPrice"}]}})";
+    rapidjson::Document req = parse(json.c_str());
+    const std::string msg = refusalFor(req);
+    ASSERT_FALSE(msg.empty())
+        << "a by:\"none\" join with a whitespace-only 'streamKey' was "
+           "ACCEPTED; it emits under that string, straight onto the wire.";
+    EXPECT_NE(msg.find("top-level 'streamKey'"), std::string::npos) << msg;
+  }
+
+  // The DEFAULT is untouched: a whitespace streamKey is a pre-existing
+  // weakness in `buildForRequest` and tightening it there would change what a
+  // stored graph means, which D6 forbids. Only `by:"none"` is stricter.
+  rapidjson::Document dflt = parse(R"({"key":1,"streamKey":" ",
+      "field":"lastPrice",
+      "node":{"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"lastPrice"},
+        {"type":"Listener","streamKey":"MSFT","field":"lastPrice"}]}})");
+  EXPECT_EQ(refusalFor(dflt), "")
+      << "the default must not inherit by:\"none\"'s stricter identity rule";
+}
+
+// `detail::quoteForDiagnostic`'s 48-char cap exists to bound untrusted client
+// JSON reaching a log line, and nothing covered it — every other vocabulary
+// case uses a short value.
+TEST_F(FanInJoinKey, AnAbsurdlyLongByValueIsTruncatedInTheDiagnostic) {
+  const std::string huge(400, 'x');
+  rapidjson::Document req =
+      parse(kCrossRequest(("\"by\":\"" + huge + "\",").c_str()));
+  const std::string msg = refusalFor(req);
+
+  ASSERT_FALSE(msg.empty()) << "a 400-character 'by' was ACCEPTED";
+  EXPECT_NE(msg.find("..."), std::string::npos)
+      << "the echoed value must be elided. Got: " << msg;
+  EXPECT_NE(msg.find("(400 chars)"), std::string::npos)
+      << "the message must say how long the value really was, so eliding it "
+         "does not hide the shape of the input. Got: " << msg;
+  EXPECT_EQ(msg.find(huge), std::string::npos)
+      << "the full 400-character value was echoed back verbatim";
+  EXPECT_LT(msg.size(), 900u)
+      << "the diagnostic grew with the input; it must not. Length: "
+      << msg.size();
+}
+
+// A CONSEQUENCE, pinned rather than left to be discovered. Because a
+// `by:"none"` join rewrites `sv.symbol`, a fan-in DOWNSTREAM of one — carrying
+// the DEFAULT — sees both branches under the request's key and completes a
+// tuple across what were two different streamKeys. That is the substitution
+// working (the upstream joins really are one stream now), but the outer node's
+// correlation behaviour is decided by its upstream's `by` rather than its own,
+// which JoinBy.hpp's "one logical stream" note does not say.
+TEST_F(FanInJoinKey, InnerByNoneMakesAnOuterDefaultFanInSeeOneStream) {
+  rapidjson::Document req = parse(R"({
+    "key":1,"streamKey":"PAIR","field":"lastPrice",
+    "node":{"type":"Aggregate","arity":2,"inputs":[
+      {"type":"Aggregate","arity":2,"by":"none","inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"lastPrice"},
+        {"type":"Listener","streamKey":"MSFT","field":"lastPrice"}]},
+      {"type":"Aggregate","arity":2,"by":"none","inputs":[
+        {"type":"Listener","streamKey":"GOOG","field":"lastPrice"},
+        {"type":"Listener","streamKey":"TSLA","field":"lastPrice"}]}]}})");
+
+  auto sink = run(req, [&] {
+    for (int n = 0; n < 3; ++n) {
+      tick("AAPL", {{"lastPrice", 1000.0 + n}});
+      tick("MSFT", {{"lastPrice", 5000.0 + n}});
+      tick("GOOG", {{"lastPrice", 2000.0 + n}});
+      tick("TSLA", {{"lastPrice", 3000.0 + n}});
+    }
+  });
+
+  EXPECT_GT(sink->arrivals(), 0u)
+      << "the OUTER Aggregate carries the default `by:\"streamKey\"`, and "
+         "would emit nothing if its two inputs still arrived under four "
+         "different symbols. It emits because each inner by:\"none\" join "
+         "rewrote `sv.symbol` to the request's key — a real consequence of the "
+         "SPEC Q6 substitution, and the outer node's behaviour is decided by "
+         "its UPSTREAM's `by`, not its own.";
+  const auto syms = sink->symbols();
+  ASSERT_EQ(syms.size(), 1u) << sink->renderSymbols();
+  EXPECT_EQ(syms.begin()->first, "PAIR") << sink->renderSymbols();
+}
