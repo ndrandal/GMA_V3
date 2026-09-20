@@ -284,7 +284,7 @@ either figure.
   what it supersedes, and is the maintained embassy number. PERF-CLAIMS B1
   rules it **STANDS** and calls it the house standard for a CPU claim.
 - `BenchmarkOrchestratorThroughput` routes into `noopBroadcaster`
-  (`embassy/bench/throughput_bench_test.go:35-42`), which discards every frame.
+  (`embassy/bench/throughput_bench_test.go:13-21`), which discards every frame.
   Its implied rate is an upper bound on **packing + routing in isolation**, and
   says nothing about the data plane: the shipped 8-connection path measures
   ≈0.44M ops/sec, ≈91× below the ≥40M figure this SPEC froze as a system
