@@ -70,11 +70,40 @@ public:
   //
   // DEFAULT IS DELIBERATELY NOT "buildForRequest". Anything that did not go
   // through a site that names itself reads `unattributed`, which today means
-  // the backstop or a test-constructed strand. A mint inlined at a call site —
-  // the shape M10 takes when it is applied to the call rather than to the
-  // helper — therefore also reads `unattributed` and is caught by the same
-  // assertion.
+  // the backstop or a test-constructed strand.
   static constexpr const char* kUnattributedOrigin = "unattributed";
+
+  // ENC-1338 — THE TAG IS A CAPABILITY, NOT A STRING, AND THAT IS THE POINT.
+  //
+  // An earlier draft of this took the origin as a plain `const char*` with the
+  // session's literal hidden in an anonymous namespace, on the theory that only
+  // the production mint could spell it. **That was measurably wrong, and an
+  // adversarial review of ENC-1338 broke it**: the literal was reachable both
+  // through the public `SubscriptionStrandMint::origin()` and — because an
+  // anonymous-namespace member is still visible through the enclosing namespace
+  // name for the rest of its translation unit — directly from `handleSubscribe`
+  // itself. So an UNGUARDED mint inlined at the call site that simply kept the
+  // tag passed every test. The gate turned on whether the person inlining it
+  // happened to drop a tag the comment right above told them identifies the
+  // site. That is a convention, not a gate.
+  //
+  // `Attribution` fixes it by construction: its constructor is private and its
+  // only friend is `gma::server::SubscriptionStrandMint`. No other code in the
+  // engine can produce one, so an attributed `Strand` cannot be built anywhere
+  // but inside the guarded mint — a forged tag is a COMPILE ERROR rather than a
+  // green test. `origin()` is therefore a statement about where the strand came
+  // from, not about what string somebody passed.
+  //
+  // `name` must have static storage duration (a string literal). `Strand` keeps
+  // the pointer rather than copying it; the one producer passes a file-local
+  // `constexpr const char*`.
+  class Attribution {
+  private:
+    explicit Attribution(const char* name) noexcept : name_(name) {}
+    const char* name_;
+    friend class gma::server::SubscriptionStrandMint;
+    friend class Strand;
+  };
 
   // MUST BE OWNED BY A `shared_ptr` — `std::make_shared<Strand>(pool)`.
   // `post()` calls `shared_from_this()`, so a stack-allocated Strand throws
@@ -84,10 +113,14 @@ public:
   //
   // `pool` must outlive every task posted to this strand. In production that is
   // ExecutionContext's pool, which outlives all sessions.
-  explicit Strand(ThreadPool* pool,
-                  const char* origin = kUnattributedOrigin)
+  explicit Strand(ThreadPool* pool)
+    : pool_(pool), origin_(kUnattributedOrigin) {}
+
+  // Attributed construction — reachable only from the one holder of the
+  // `Attribution` capability. See the comment on `Attribution`.
+  Strand(ThreadPool* pool, Attribution origin) noexcept
     : pool_(pool)
-    , origin_(origin ? origin : kUnattributedOrigin) {}
+    , origin_(origin.name_ ? origin.name_ : kUnattributedOrigin) {}
 
   Strand(const Strand&)            = delete;
   Strand& operator=(const Strand&) = delete;
@@ -120,11 +153,26 @@ public:
   // spelled out a second time.
   const char* origin() const noexcept { return origin_; }
 
+  // ENC-1338. Tasks this strand has finished running, monotonically. Diagnostic
+  // only — never a synchronisation point, and it counts completions, so a task
+  // in flight is not yet included.
+  //
+  // It is what lets a test say "this DAG's values were delivered THROUGH this
+  // strand" rather than only "this DAG was handed this strand". Those are
+  // different claims, and an adversarial review of ENC-1338 found the gate
+  // making the weaker one: `Listener` can hold a strand, answer `strand()` with
+  // it, and still deliver down the unordered pool path.
+  std::uint64_t tasksRun() const noexcept {
+    std::lock_guard<std::mutex> lk(mx_);
+    return tasksRun_;
+  }
+
 private:
   void drain();
 
   ThreadPool* pool_;
   const char* origin_;
+  std::uint64_t tasksRun_{0};
   mutable std::mutex                mx_;
   std::deque<std::function<void()>> q_;
   // True while a drain task is live on the pool. It is the token that makes
