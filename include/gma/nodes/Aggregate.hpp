@@ -1,35 +1,119 @@
 #pragma once
 #include <atomic>
+#include <cstddef>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 #include <memory>
 #include "gma/nodes/INode.hpp"
+#include "gma/nodes/InputPort.hpp"
 #include "gma/Span.hpp"
 
 namespace gma {
 
-// Fan-in node: collects N values per symbol before forwarding the batch
-// to parent. Thread-safe — multiple upstream nodes may call onValue()
-// concurrently.
-class Aggregate final : public INode {
+// Fan-in node: joins N DECLARED INPUTS into one tuple and forwards it
+// downstream.
+//
+// ENC-1291 / SPEC specs/2026-09-20-gma-join-correctness D2, D6, section 1.1
+// defect 2.
+//
+// WHAT CHANGED, AND WHY IT IS A FIX RATHER THAN A BREAK (D6). Until ENC-1291
+// this node buffered a flat `std::vector<ArgType>` per `sv.symbol` and fired on
+// `vals.size() >= arity_` — it counted VALUES, not INPUTS. An `Aggregate(2)`
+// therefore completed a "tuple" from TWO TICKS OF ONE INPUT while the other
+// input had never fired once: measured, corpus_id 86 "Bid-ask spread for AAPL"
+// reported a spread of +-1.00 where the truth is 0.02. `Aggregate` keeps its
+// wire name (D6: forum emits it as the only join shape it can produce, and its
+// stored graphs are unmigratable from GMA_V3), so the semantics are corrected
+// in place. Turning a wrong answer into a right one under a stored graph is a
+// fix, not a compatibility break.
+//
+// HOW AN INPUT IS IDENTIFIED. Structurally, by build-time port index — never by
+// anything on the value. `TreeBuilder` builds each element of the request's
+// `inputs` array terminating in its own `InputPort`, and the port calls
+// `onPortValue(index, sv)`. `StreamValue` is unchanged and
+// `INode::onValue(const StreamValue&)` is still the single edge contract (D2).
+//
+// JOIN SEMANTICS, stated because ENC-1289's open finding #3 left them open and
+// this node is where they get decided:
+//
+//   * A tuple is a BARRIER over the declared inputs. It completes when every
+//     one of the N ports has contributed at least one value; on completion all
+//     N slots are emptied and the next tuple starts clean. This is the
+//     "emits when all N inputs have reported for a tick cycle" of
+//     docs/ARCHITECTURE.md and the positional join of
+//     forum/internal/pipelinetranslate/translator.go.
+//   * Within an open tuple a port is LAST-VALUE-WINS: if input A fires twice
+//     before input B fires at all, A's second value replaces its first and the
+//     completed tuple is {A2, B1}. The alternative — queueing per port and
+//     zipping — was rejected because it is unbounded under a rate mismatch
+//     between inputs (one side outpacing the other grows a queue with no
+//     natural bound), whereas last-value-wins is bounded by construction at
+//     O(arity) per symbol and pairs the FRESHEST value from each side, which
+//     is what a bid/ask join wants.
+//   * Emission order is DECLARED PORT ORDER, not arrival order. `inputs[0]`'s
+//     value is forwarded first, always. Before ENC-1291 the order was whatever
+//     order the values happened to arrive in.
+//
+// WHAT THIS DELIBERATELY DOES NOT CHANGE (SPEC section 5 Q5, still open). A
+// completed tuple is still forwarded MEMBER BY MEMBER — one `onValue` per
+// value, under the symbol and bucket of the value that released the tuple —
+// not as a single unit. Making it a unit would change what every downstream
+// `Worker` in the corpus sees (47 stand alone in `node` position; the 52
+// `node`+`pipeline` requests carry 68 `Worker` pipeline stages between them),
+// which is a separate decision and not something D2 should smuggle in.
+// `Worker`'s never-resetting accumulator (`src/nodes/Worker.cpp:26-32`, cleared
+// only in `shutdown()`) is the other half of Q5 and is untouched here.
+//
+// CORRELATION KEY. Still `sv.symbol`, i.e. D1's locked default `by:"streamKey"`
+// — two ports fed from two different streamKeys land in two different buffers
+// and NEITHER completes, so a cross-streamKey join emits nothing rather than
+// pairing one side with itself. That is SPEC section 1.1 defect 3 and it is
+// ENC-1292's (D1 `by:"none"`), not this node's.
+//
+// Thread-safe: ports may call `onPortValue` concurrently.
+class Aggregate final : public INode, public IFanIn {
 public:
   Aggregate(std::size_t arity, std::shared_ptr<INode> parent);
 
+  // NOT a join member. A fan-in's data comes from its own declared `inputs`,
+  // through the ports; a value arriving on the plain edge is an upstream
+  // pipeline value, and feeding it into the buffer is precisely how the
+  // builder would manufacture defect 2 (see the `CompositeRoot` comment in
+  // src/core/TreeBuilder.cpp). It is dropped — loudly, once per node, rather
+  // than silently.
   void onValue(const StreamValue& sv) override;
+
+  // The real ingress. `portIndex` is the value's position in the declared
+  // `inputs` array, assigned at build time.
+  void onPortValue(std::size_t portIndex, const StreamValue& sv) override;
+
   void shutdown() noexcept override;
+
+  // Builder helper: take ownership of a constructed port so it outlives the
+  // upstream Listener's weak_ptr to it. See InputPort.hpp on why the fan-in
+  // owns the port and the port only weakly observes the fan-in.
+  void addPort(std::shared_ptr<INode> port);
+
+  std::size_t arity() const noexcept { return arity_; }
 
 private:
   struct SymBuf {
-    std::vector<ArgType> vals;
+    // Exactly `arity_` slots, one per declared input. Never grows.
+    std::vector<std::optional<ArgType>> slots;
+    std::size_t filled = 0;
   };
 
   static constexpr std::size_t MAX_SYMBOLS = 10000;
 
   const std::size_t arity_;
   std::shared_ptr<INode> parent_;
+  std::vector<std::shared_ptr<INode>> ports_;
 
   std::atomic<bool> stopping_{false};
+  std::atomic<bool> warnedOnPipelineValue_{false};
   mutable std::mutex mx_;
   std::unordered_map<std::string, SymBuf> buf_;
 };
