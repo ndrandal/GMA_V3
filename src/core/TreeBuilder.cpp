@@ -105,7 +105,14 @@ inline gma::JoinBy joinByFor(const rapidjson::Value& v,
 
   const gma::JoinBy by = gma::parseJoinBy(v["by"].GetString(), nodeType);
 
-  (void)outStreamKey;
+  if (by == gma::JoinBy::None && outStreamKey.empty())
+    throw std::runtime_error(
+      std::string(nodeType) + ": by:\"none\" ignores the symbol, so the joined "
+      "stream has no identity of its own and must inherit the request's "
+      "top-level 'streamKey' — but none is in scope here. Build this node "
+      "through buildForRequest (which requires a non-empty 'streamKey'), or "
+      "use the default by:\"streamKey\" (SPEC "
+      "specs/2026-09-20-gma-join-correctness section 5 Q6).");
 
   return by;
 }
@@ -1046,7 +1053,7 @@ void registerBuiltinNodeTypes() {
       // everything else, BEFORE anything is constructed (see the note at the
       // top of this builder): a refused `by` must not leave a subscribed
       // Listener behind.
-      const gma::JoinBy by = joinByFor(v, "Aggregate", defaultStreamKey);
+      gma::JoinBy by = gma::JoinBy::StreamKey;
 
       // `defaultStreamKey` is the request's own top-level `streamKey` (or the
       // group's symbol inside a GroupSplit, which is the same question asked
@@ -1073,6 +1080,7 @@ void registerBuiltinNodeTypes() {
         // documents why that direction is forced).
         auto port = std::make_shared<InputPort>(std::weak_ptr<IFanIn>(agg), idx++);
         agg->addPort(port);
+        by = joinByFor(v, "Aggregate", defaultStreamKey);
         auto inHead = tree::buildOne(it, defaultStreamKey, deps, port);
         // A declared input with no Listener anywhere in it (AtomicAccessor and
         // friends) has no clock of its own; the request's head Listener is it.
