@@ -3,6 +3,8 @@
 
 #include <functional>
 #include <algorithm>
+#include <atomic>
+#include <cstring>
 #include <numeric>
 #include <cmath>
 #include <limits>
@@ -264,20 +266,63 @@ std::string recordTerminalMessage(const std::string& culprit) {
 //
 // ---------- CompositeRoot: fan-out root for many inputs ----------
 //
+// ENC-1290 / SPEC specs/2026-09-20-gma-join-correctness D5, section 5 Q1
+// (ruled 2026-09-20 by ENC-1317, then corrected by that ticket's adversarial
+// review — Corrections C4.0).
+//
+// THE OUTER `Listener(streamKey, field)` IS A CLOCK, NOT A DATA SOURCE.
+// A request carrying `node` always builds a head Listener (`buildForRequest`
+// throws without `streamKey`/`field`), and for a FAN-IN node that Listener is
+// not one of the join's members — the members are the node's own declared
+// `inputs`. So the head Listener's value must never enter the join's buffer;
+// it exists to *clock* inputs that have no clock of their own.
+//
+// `clockTargets_` is that set, and `onValue` forwards to it AND TO NOTHING
+// ELSE. It is filled by each fan-in builder from its DECLARED INPUT HEADS
+// only, and only from those whose declared subtree contains no `Listener`
+// (see `declaredInputIsSelfClocked`).
+//
+// `roots_` IS NOT THAT SET, AND MUST NEVER BE USED AS ONE. It is a lifecycle
+// list: every fan-in builder appends the fan-in node ITSELF to it (`agg`,
+// `pack`, the `Tee`s and the body head below), because Listeners hold only a
+// weak_ptr to their downstream. Forwarding the clock to `roots_` — or to "the
+// roots that are not Dispatcher-subscribed", which was the rule's first and
+// retracted wording — pushes the clock's value straight into
+// `Aggregate::onValue` -> `buf_[sv.symbol]` AS A JOIN MEMBER, manufacturing
+// SPEC section 1.1 defect 2 inside the builder. `ClockIsNeverAJoinMember` in
+// tests/treebuilder/ComposedChainTest.cpp is the gate on that.
+//
+// SCOPE. Only the three fan-in builders construct a CompositeRoot. A
+// single-input transform node (Worker, AtomicAccessor, Interval, GroupSplit)
+// is returned as its own head and is wired to the head Listener directly, so
+// for it the outer Listener IS the data source — today and after D5. All 162
+// `node`-only corpus requests are in that second category and none of them
+// builds a CompositeRoot; nothing here touches them.
+//
 namespace {
 
 class CompositeRoot final : public gma::INode {
 public:
-  explicit CompositeRoot(std::vector<std::shared_ptr<gma::INode>> roots)
-    : roots_(std::move(roots)) {}
+  CompositeRoot(std::vector<std::shared_ptr<gma::INode>> roots,
+                std::vector<std::weak_ptr<gma::INode>>   clockTargets)
+    : roots_(std::move(roots)), clockTargets_(std::move(clockTargets)) {}
 
-  void onValue(const gma::StreamValue&) override {
-    // No-op. CompositeRoot is a lifecycle wrapper for multiple Listener
-    // source nodes. Listeners receive values from Dispatcher, not
-    // from upstream pipeline wiring.
+  void onValue(const gma::StreamValue& sv) override {
+    // The clock tick. Empty for every fan-in whose inputs are all Listeners
+    // (45 of the 52 `node`+`pipeline` corpus entries), which is exactly the
+    // pre-ENC-1290 no-op.
+    if (stopping_.load(std::memory_order_acquire)) return;
+    for (const auto& w : clockTargets_) {
+      // `clockTargets_` is immutable after construction, so no lock is needed
+      // here; the strong refs live in `roots_`, and locking the weak_ptr keeps
+      // the target alive for the duration of the call even if shutdown() is
+      // concurrently clearing `roots_`.
+      if (auto t = w.lock()) t->onValue(sv);
+    }
   }
 
   void shutdown() noexcept override {
+    stopping_.store(true, std::memory_order_release);
     for (auto& r : roots_) {
       if (r) r->shutdown();
     }
@@ -285,8 +330,51 @@ public:
   }
 
 private:
-  std::vector<std::shared_ptr<gma::INode>> roots_;
+  std::vector<std::shared_ptr<gma::INode>>       roots_;         // lifecycle only
+  const std::vector<std::weak_ptr<gma::INode>>   clockTargets_;  // the clock's fan-out
+  std::atomic<bool>                              stopping_{false};
 };
+
+// Does this DECLARED input subtree carry its own clock?
+//
+// A `Listener` anywhere inside it means the Dispatcher drives it, so the outer
+// Listener must not drive it a second time. Everything else — `AtomicAccessor`
+// above all — is a pull node with no subscription: without the clock its
+// branch of the join never fires at all, which is what makes the 7 pull-only
+// corpus entries (ids 111-115, 192, 200) a DEAD join today rather than the
+// "two live chains" SPEC section 1.1 defect 1 describes (corrected there by
+// C2.1).
+//
+// The test is structural and build-time, over the request JSON, and is never a
+// property of the authored `streamKey`/`field` — which is why all 52 affected
+// corpus entries are RE-WIRED and none is re-authored.
+//
+// CONSERVATIVE DIRECTION. Returning `true` (do not clock) reproduces the
+// pre-ENC-1290 behaviour exactly, so it is the safe answer when we cannot
+// tell. Returning a wrong `false` is the harmful direction — it injects the
+// clock where something else already drives it. Hence:
+//   * depth overflow -> `true`;
+//   * `Ref` -> `true`. A Ref's binding producer is built elsewhere and may
+//     hold a Listener that is not in this subtree's JSON; the Ref's own head
+//     is a RefStub whose onValue is a no-op, so clocking it could only ever be
+//     a wasted call anyway.
+bool declaredInputIsSelfClocked(const rapidjson::Value& spec, int depth = 0) {
+  if (depth > kMaxShapeDepth) return true;
+  if (spec.IsArray()) {
+    for (const auto& v : spec.GetArray())
+      if (declaredInputIsSelfClocked(v, depth + 1)) return true;
+    return false;
+  }
+  if (!spec.IsObject()) return false;
+  if (spec.HasMember("type") && spec["type"].IsString()) {
+    const char* t = spec["type"].GetString();
+    if (std::strcmp(t, "Listener") == 0) return true;
+    if (std::strcmp(t, "Ref") == 0)      return true;
+  }
+  for (auto m = spec.MemberBegin(); m != spec.MemberEnd(); ++m)
+    if (declaredInputIsSelfClocked(m->value, depth + 1)) return true;
+  return false;
+}
 
 // RefStub: the no-op head a `Ref` returns (ENC-647). A Ref has no local
 // upstream — its binding's producer feeds the Ref's downstream directly (via a
