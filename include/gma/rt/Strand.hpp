@@ -39,6 +39,12 @@ namespace gma::rt {
 // thread.
 class Strand : public std::enable_shared_from_this<Strand> {
 public:
+  // MUST BE OWNED BY A `shared_ptr` — `std::make_shared<Strand>(pool)`.
+  // `post()` calls `shared_from_this()`, so a stack-allocated Strand throws
+  // `std::bad_weak_ptr` on its first post. Same contract `nodes::Listener` has
+  // for `start()`, and for the same reason. Every construction site in the
+  // engine goes through `tree::Deps::strand`, which is a `shared_ptr` by type.
+  //
   // `pool` must outlive every task posted to this strand. In production that is
   // ExecutionContext's pool, which outlives all sessions.
   explicit Strand(ThreadPool* pool) : pool_(pool) {}

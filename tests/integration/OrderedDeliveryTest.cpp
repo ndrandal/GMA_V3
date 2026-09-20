@@ -419,3 +419,72 @@ TEST(OrderedDelivery, DistinctRequestsAreNotSerializedAgainstEachOther) {
   pool->shutdown();
   gThreadPool = prevPool;
 }
+
+// ═══ 5. A CALLER-SUPPLIED strand is used, not replaced ═════════════════════
+//
+// This is the property `ClientSession::handleSubscribe` depends on, and the
+// reason it is worth pinning is that the line there is otherwise invisible:
+// deleting `deps.strand = std::make_shared<rt::Strand>(...)` from
+// `handleSubscribe` reddens NOTHING, because `buildForRequest`'s backstop mints
+// an equivalent strand one call deeper. (Measured — mutation M7 on the ticket.)
+// What is NOT equivalent, and what this test gates, is `buildForRequest`
+// *honouring* what it was handed: if it ever overwrote `deps.strand`, the
+// production site's granularity choice would be silently discarded and nothing
+// would say so.
+//
+// Two DAGs are built against ONE caller-supplied strand and share one terminal.
+// If the strand is honoured they are one ordering: the terminal sees the exact
+// interleaving the ingress thread produced, and never two values at once. If it
+// is replaced they are two orderings and both assertions fail.
+//
+// Note this is the INVERSE of test 4 and they are both true at once — that is
+// the whole point of the granularity being a parameter rather than a policy.
+TEST(OrderedDelivery, ACallerSuppliedStrandIsUsedNotReplaced) {
+  constexpr std::size_t kTicks = 2000;
+
+  AtomicStore store;
+  auto pool = std::make_shared<rt::ThreadPool>(8);
+  auto prevPool = gThreadPool;
+  gThreadPool = pool;
+
+  Dispatcher dispatcher(pool.get(), &store);
+  auto shared = std::make_shared<rt::Strand>(pool.get());
+
+  auto terminal = std::make_shared<SequenceTerminal>();
+  std::vector<tree::BuiltChain> chains;
+  for (const char* sym : {"AAA", "BBB"}) {
+    tree::Deps deps;
+    deps.store      = &store;
+    deps.pool       = pool.get();
+    deps.dispatcher = &dispatcher;
+    deps.strand     = shared;              // ONE strand for BOTH requests
+    const std::string json =
+        std::string(R"({"streamKey":")") + sym + R"(","field":"px"})";
+    auto req = parse(json.c_str());
+    chains.push_back(tree::buildForRequest(req, deps, terminal));
+  }
+
+  for (std::size_t n = 0; n < kTicks; ++n) {
+    tick(dispatcher, "AAA", {{"px", double(2 * n)}});
+    tick(dispatcher, "BBB", {{"px", double(2 * n + 1)}});
+  }
+  pool->drain();
+
+  const auto seq = terminal->sequence();
+  EXPECT_EQ(terminal->maxInFlight(), 1)
+      << "two DAGs sharing ONE strand ran concurrently — buildForRequest did "
+         "not use the strand it was handed";
+  ASSERT_EQ(seq.size(), kTicks * 2);
+  for (std::size_t n = 0; n < kTicks * 2; ++n) {
+    ASSERT_DOUBLE_EQ(seq[n], double(n))
+        << "position " << n << ": two DAGs sharing one strand must deliver in "
+           "one combined production order";
+  }
+
+  for (auto& c : chains) {
+    for (auto& nptr : c.keepAlive) if (nptr) nptr->shutdown();
+    if (c.head) c.head->shutdown();
+  }
+  pool->shutdown();
+  gThreadPool = prevPool;
+}
