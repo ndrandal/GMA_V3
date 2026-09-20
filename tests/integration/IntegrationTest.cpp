@@ -2,6 +2,7 @@
 #include "gma/AtomicFunctions.hpp"
 #include "gma/Dispatcher.hpp"
 #include "gma/nodes/Aggregate.hpp"
+#include "gma/nodes/InputPort.hpp"
 #include "gma/nodes/Worker.hpp"
 #include "gma/nodes/Listener.hpp"
 #include "gma/nodes/AtomicAccessor.hpp"
@@ -64,6 +65,12 @@ Event makeTick(const std::string& symbol, const std::string& field, double value
 TEST(IntegrationTest, AggregateToWorkerPipeline) {
     // Wire: Aggregate(2) -> Worker(sum) -> Terminal
     // Worker accumulates: after value 1 sum=10, after value 2 sum=10+20=30
+    //
+    // ENC-1291 (SPEC D2): the two values must arrive on the two DECLARED
+    // INPUTS, through their own ports. This test used to push both into
+    // `agg.onValue` — no input identity at all — and so pinned SPEC section 1.1
+    // defect 2 alongside tests/nodes/AggregateTest.cpp. The pipeline's expected
+    // output is unchanged; only the way the join is fed is corrected.
     auto terminal = std::make_shared<PipelineTerminal>();
 
     Worker::Fn sumFn = [](Span<const ArgType> inputs) -> ArgType {
@@ -72,10 +79,20 @@ TEST(IntegrationTest, AggregateToWorkerPipeline) {
         return ArgType(s);
     };
     auto worker = std::make_shared<Worker>(sumFn, terminal);
-    Aggregate agg(2, worker);
+    auto agg    = std::make_shared<Aggregate>(2, worker);
 
-    agg.onValue(StreamValue{"SYM", 10.0});
-    agg.onValue(StreamValue{"SYM", 20.0});
+    std::vector<std::shared_ptr<INode>> ports;
+    for (std::size_t i = 0; i < 2; ++i) {
+        auto p = std::make_shared<InputPort>(std::weak_ptr<IFanIn>(agg), i);
+        agg->addPort(p);
+        ports.push_back(p);
+    }
+
+    ports[0]->onValue(StreamValue{"SYM", 10.0});
+    ASSERT_EQ(terminal->received.size(), 0u)
+        << "input 1 has not reported — a two-input join has nothing to emit";
+
+    ports[1]->onValue(StreamValue{"SYM", 20.0});
 
     ASSERT_EQ(terminal->received.size(), 2u);
     EXPECT_DOUBLE_EQ(std::get<double>(terminal->received[0].value), 10.0);
