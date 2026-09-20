@@ -89,15 +89,22 @@ void Aggregate::onPortValue(std::size_t portIndex, const StreamValue& sv) {
     std::lock_guard<std::mutex> lk(mx_);
     // Cap distinct symbol count to prevent unbounded map growth. Under
     // `by:"none"` there is exactly one entry and the cap can never trip.
-    auto it = buf_.find(joinKey);
-    if (it == buf_.end()) {
-      if (buf_.size() >= MAX_SYMBOLS) {
+    //
+    // ONE lookup, on ONE key. This was a `find` followed by an `emplace`, and
+    // the pair was an EQUIVALENT-MUTATION surface: `emplace` returns the
+    // existing element when the key is present, so keying the `find` on
+    // `sv.symbol` while the `emplace` still used `joinKey` produced
+    // bit-identical behaviour and no test could ever have caught it (measured,
+    // ENC-1292 mutation M18). `try_emplace` says the key once.
+    auto [it, inserted] = buf_.try_emplace(joinKey);
+    if (inserted) {
+      if (buf_.size() > MAX_SYMBOLS) {
+        buf_.erase(it);
         gma::util::logger().log(gma::util::LogLevel::Warn,
           "Aggregate: max symbols reached, dropping",
           {{"symbol", sv.symbol}});
         return;
       }
-      it = buf_.emplace(joinKey, SymBuf{}).first;
       it->second.slots.resize(arity_);
     }
 

@@ -522,6 +522,20 @@ TEST_F(FanInJoinKey, ByNoneWithNoRequestStreamKeyInScopeIsRefused) {
   } catch (const std::exception& ex) {
     msg = ex.what();
   }
+  // ASSERT ON THE BUILDER'S OWN PHRASE, NOT ON THE SHARED ONE (ENC-1292,
+  // mutation M7). This invariant is delivered by TWO independent mechanisms —
+  // the builder's check here and `Aggregate`'s constructor invariant — and
+  // both messages contain "top-level 'streamKey'". Asserting that substring
+  // therefore passed with the BUILDER's check deleted, because the
+  // constructor's throw satisfied it: a test that claims to gate the builder
+  // while any of two mechanisms can satisfy it is not gating the builder.
+  // "Build this node through buildForRequest" occurs only in the builder's
+  // message. The constructor's own half is gated separately, by
+  // `AggregateTest.ByNoneWithNoOutputStreamKeyIsRefused` (red under M8).
+  EXPECT_NE(msg.find("Build this node through buildForRequest"),
+            std::string::npos)
+      << "the BUILDER must refuse this, with its own diagnostic naming the "
+         "JSON-level remedy. Got: " << msg;
   EXPECT_NE(msg.find("top-level 'streamKey'"), std::string::npos)
       << "the message must name what is missing. Got: " << msg;
 
