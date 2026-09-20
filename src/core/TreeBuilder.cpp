@@ -778,7 +778,7 @@ void registerBuiltinNodeTypes() {
       // makes them arrive in the order the Dispatcher produced them.
       auto sp = std::make_shared<Listener>(streamKey, field, downstream,
                                            deps.pool, deps.dispatcher,
-                                           nullptr);  // MUTATION M2
+                                           std::make_shared<gma::rt::Strand>(deps.pool));  // MUTATION M3
       sp->start();
       return sp;
     });
