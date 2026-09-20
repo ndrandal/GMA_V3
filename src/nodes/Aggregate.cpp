@@ -80,8 +80,7 @@ void Aggregate::onPortValue(std::size_t portIndex, const StreamValue& sv) {
   // Buffering and emitting under one key is deliberate: it makes it impossible
   // for the two to drift apart, which is the bug a separate `outSymbol` local
   // would eventually grow.
-  const std::string& joinKey =
-      (by_ == JoinBy::None) ? outKey_ : sv.symbol;
+  const std::string& joinKey = outKey_;
 
   std::vector<ArgType> batch;
   std::shared_ptr<INode> p;
@@ -89,8 +88,7 @@ void Aggregate::onPortValue(std::size_t portIndex, const StreamValue& sv) {
     std::lock_guard<std::mutex> lk(mx_);
     // Cap distinct symbol count to prevent unbounded map growth. Under
     // `by:"none"` there is exactly one entry and the cap can never trip.
-    const std::string& bufKey = sv.symbol;
-    auto it = buf_.find(bufKey);
+    auto it = buf_.find(joinKey);
     if (it == buf_.end()) {
       if (buf_.size() >= MAX_SYMBOLS) {
         gma::util::logger().log(gma::util::LogLevel::Warn,
@@ -98,7 +96,7 @@ void Aggregate::onPortValue(std::size_t portIndex, const StreamValue& sv) {
           {{"symbol", sv.symbol}});
         return;
       }
-      it = buf_.emplace(bufKey, SymBuf{}).first;
+      it = buf_.emplace(joinKey, SymBuf{}).first;
       it->second.slots.resize(arity_);
     }
 
