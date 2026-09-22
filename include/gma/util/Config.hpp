@@ -30,10 +30,20 @@ public:
 
   // ENC-31: when no `ingress.*` entries were parsed, synthesize equivalent
   // ones from the legacy keys (feedPort default + feedUrl + feeds.N.*).
-  // Idempotent — once `ingress` is non-empty, this is a no-op. Called by
-  // the composition root and by loadFromFile so behavior is preserved
-  // whether the user has an INI or not.
-  void synthesizeIngressFromLegacy();
+  // Idempotent — once `ingress` is non-empty, this is a no-op.
+  //
+  // ENC-1331: called ONLY by the composition root, and only once the config is
+  // settled — loadFromFile() must not call it. The synthesized
+  // `market.feedserver` entry copies `feedPort` into its params, and those
+  // params are what the connector binds; synthesizing before the CLI overrides
+  // (argv[3]) were applied made `gma_server <ws> <conf> <feed>` bind the file's
+  // feedPort while logging the argument's. Anything that reads `ingress` after
+  // a loadFromFile() must therefore call this first.
+  //
+  // Returns true if it synthesized entries, false if it was a no-op because
+  // `ingress` was already populated (explicit `ingress.N.*` keys) — callers
+  // use that to tell the user their legacy feedPort override went nowhere.
+  bool synthesizeIngressFromLegacy();
 
   // --- Public fields (referenced elsewhere in your code) ---
   // TA params (now actually members so those C2039 errors go away)

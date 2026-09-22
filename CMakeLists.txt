@@ -407,8 +407,17 @@ if (GMA_BUILD_TESTS)
               "${CMAKE_SOURCE_DIR}/tests/scripts/port_conflict_test.py"
               "$<TARGET_FILE:gma_server>")
     set_tests_properties(gma_port_conflict PROPERTIES TIMEOUT 120)
+
+    # ENC-1331: `gma_server <ws> <conf> <feed>` must BIND <feed>. Asserted
+    # against the live acceptor rather than the boot log, because the log
+    # already printed the right number while the socket used the file's.
+    add_test(NAME gma_feed_port_override
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/scripts/feed_port_override_test.py"
+              "$<TARGET_FILE:gma_server>")
+    set_tests_properties(gma_feed_port_override PROPERTIES TIMEOUT 120)
   elseif (NOT Python3_Interpreter_FOUND)
-    message(STATUS "gma_port_conflict test skipped: no Python3 interpreter")
+    message(STATUS "gma_port_conflict / gma_feed_port_override tests skipped: no Python3 interpreter")
   endif()
 endif()
 

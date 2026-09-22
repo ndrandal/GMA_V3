@@ -43,8 +43,10 @@ def free_port():
 
 
 def run_server(server, ws_port, feed_port, workdir):
-    # Ports must go through the INI: Config::loadFromFile() synthesizes the
-    # ingress[] entry (and therefore the feed acceptor's port) while parsing.
+    # Both the INI and argv carry the ports, and since ENC-1331 they agree:
+    # ingress synthesis (which fixes the feed acceptor's port) happens in the
+    # composition root, after argv[3] has been applied. See
+    # feed_port_override_test.py for the case where they deliberately differ.
     conf = os.path.join(workdir, "port_conflict.conf")
     with open(conf, "w") as fh:
         fh.write("wsPort=%d\nfeedPort=%d\nthreadPoolSize=2\nmetricsEnabled=false\n"
