@@ -322,10 +322,21 @@ static int runServer(int argc, char* argv[]) {
     }
   });
 
+  // ENC-1331: report the port that was actually RESOLVED into the ingress entry
+  // the acceptor was opened from, not the intent in cfg.feedPort. A log that
+  // printed the intent is precisely what hid this bug: it showed argv[3] while
+  // the socket carried the config file's port, and only the bind was true.
+  std::string boundFeedPort = "none";
+  for (const auto& entry : cfg.ingress) {
+    if (entry.kind != "market.feedserver") continue;
+    auto it = entry.params.find("port");
+    if (it != entry.params.end()) boundFeedPort = it->second;
+    break;
+  }
   logger().log(
     LogLevel::Info,
     "listening",
-    {{"wsPort", std::to_string(wsPort)}, {"feedPort", std::to_string(feedPort)}}
+    {{"wsPort", std::to_string(wsPort)}, {"feedPort", boundFeedPort}}
   );
 
   // 9) Run
