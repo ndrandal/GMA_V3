@@ -197,7 +197,13 @@ bool Config::loadFromFile(const std::string& path) {
 
   // fileGuard closes f automatically via RAII.
 
-  synthesizeIngressFromLegacy();
+  // ENC-1331: ingress synthesis deliberately does NOT run here. It captures
+  // `feedPort` by value into the market.feedserver entry's params, and at this
+  // point the composition root has not yet applied its CLI overrides — so
+  // synthesizing during load() froze the FILE's port into the entry that
+  // actually binds the socket while `cfg.feedPort` (and therefore the boot log)
+  // went on to report the overridden one. The caller calls
+  // synthesizeIngressFromLegacy() once its config is settled; see src/main.cpp.
 
   // Basic sanity: slow >= fast for MACD; stdK positive.
   if (taMACD_slow < taMACD_fast) std::swap(taMACD_slow, taMACD_fast);
@@ -206,8 +212,8 @@ bool Config::loadFromFile(const std::string& path) {
   return true;
 }
 
-void Config::synthesizeIngressFromLegacy() {
-  if (!ingress.empty()) return;
+bool Config::synthesizeIngressFromLegacy() {
+  if (!ingress.empty()) return false;
 
   Ingress fsEntry;
   fsEntry.kind = "market.feedserver";
@@ -257,6 +263,7 @@ void Config::synthesizeIngressFromLegacy() {
          {"replacement", "ingress.N.kind = market.wsclient + ingress.N.url|adapter|symbols"},
          {"window", "one release"}});
   }
+  return true;
 }
 
 std::size_t Config::dispatchPendingKeys() {
