@@ -182,6 +182,22 @@ CLI override order: `argv[1]=wsPort`, `argv[2]=configFile`, `argv[3]=feedPort`.
 Values from argv win over the config file; the config file wins over the
 compiled defaults.
 
+> **`argv[3]` really does bind now (ENC-1331).** It used to be accepted, logged
+> and then ignored: `Config::loadFromFile()` ended with
+> `synthesizeIngressFromLegacy()`, which copied the *file's* `feedPort` into the
+> `market.feedserver` ingress `params` — and the connector binds those params,
+> not `cfg.feedPort`, which `main.cpp` overrode a hundred lines later. The boot
+> log printed `feedPort=<argv[3]>` while the acceptor sat on the file's port, so
+> the two lines disagreed and only the bind was true. Synthesis now has exactly
+> one caller, the composition root, after the argv overrides are applied.
+> Two consequences: **an explicit `ingress.N.port` still wins over `argv[3]`** —
+> it is the more specific key and is left alone, but the server now warns
+> (`config.feedport_arg_ignored`) instead of silently ignoring the argument —
+> and **the `listening` log line reports the port resolved into the ingress
+> entry**, not the intent, so it can no longer disagree with the socket.
+> Covered by `ctest`'s `gma_feed_port_override` (asserts the live acceptor) and
+> four `ConfigTest` cases (assert the resolved ingress params).
+
 ## Design records (the umbrella D13 pointers)
 
 Six design records at the **workspace root** decide things about this repo. They are *not* in
