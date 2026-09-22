@@ -84,6 +84,9 @@ static int runServer(int argc, char* argv[]) {
   if (argc > 3) feedPort = parsePort(argv[3], feedPort);
 
   // CLI args win over the config file — engine + connectors read these as-is.
+  // ENC-1331: this must stay AHEAD of cfg.synthesizeIngressFromLegacy() below,
+  // which copies cfg.feedPort into the market.feedserver ingress params that
+  // actually bind the socket.
   cfg.wsPort   = wsPort;
   cfg.feedPort = feedPort;
 
@@ -182,7 +185,23 @@ static int runServer(int argc, char* argv[]) {
 
   // ENC-31: ensure cfg.ingress[] is populated even when the user provided
   // no INI (loadFromFile not called). Idempotent.
-  cfg.synthesizeIngressFromLegacy();
+  //
+  // ENC-1331: this is the ONLY caller. It runs here, after the argv overrides
+  // above have settled cfg.feedPort, so the synthesized market.feedserver entry
+  // carries the port that was actually asked for. Config::loadFromFile() used
+  // to call it too, which froze the file's feedPort into the ingress params
+  // while the boot log above printed argv[3] — the two disagreed and only the
+  // bind was true.
+  const bool ingressSynthesized = cfg.synthesizeIngressFromLegacy();
+  if (argc > 3 && !ingressSynthesized) {
+    // The config file declared explicit `ingress.N.*` entries, which are more
+    // specific than the legacy feedPort key and are left alone. Say so, rather
+    // than silently binding a port the user did not pass.
+    logger().log(LogLevel::Warn, "config.feedport_arg_ignored",
+                 {{"feedPort", std::to_string(feedPort)},
+                  {"reason", "config file declares explicit ingress.N.* entries"},
+                  {"fix", "set ingress.N.port in the config file instead"}});
+  }
 
   // feed-sim-connector phase 2: when forumUrl is configured, replace
   // cfg.ingress with what forum's /api/connectors says. Connector
