@@ -1414,7 +1414,7 @@ TEST_F(ComposedChain, FanInWrappedInAChainIsRefused) {
   })", deps_);
   expectFanInRefusal(viaChain, "node + pipeline:[Chain{Aggregate}]",
                      "Aggregate", "pipeline[0].stages[0]");
-  EXPECT_NE(viaChain.find("not the stage itself"), std::string::npos)
+  EXPECT_NE(viaChain.find("NOT the stage itself"), std::string::npos)
       << "the message must say the fan-in is nested, or the reader looks for "
          "an Aggregate at pipeline[0] and finds a Chain: " << viaChain;
 
