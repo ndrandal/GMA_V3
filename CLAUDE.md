@@ -127,6 +127,30 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture including 
 - **Ingress sources are engine-owned (ENC-31).** Connectors register named factories on `reg.ingress` (e.g. `market.feedserver`, `market.wsclient`); the composition root reads `cfg.ingress[]` and instantiates them. Adding a new ingress kind is a factory registration + INI edit, not a `main.cpp` change. Legacy `feedPort` / `feedUrl` / `feeds.N.*` keys are auto-translated into `cfg.ingress[]` entries with a one-release deprecation warn.
 - **WS request keys — int vs string (`RequestKey`).** The subscribe / cancel / value-emit code paths in `ClientSession` and `Responder` use `gma::server::RequestKey = std::variant<int, std::string>` (header at `include/gma/server/RequestKey.hpp`). Inbound subscribe accepts `{key:<int>}`, `{id:<int>}` (legacy), or `{id:"<string>"}`; outbound frames render `"key":<int>` or `"requestId":"<string>"` to mirror. Engine internals (Dispatcher, AtomicStore, TreeBuilder, Listener) stay key-type-agnostic — they route on `(streamKey, field)`, not on the request id. See [`docs/atomic-keys.md`](docs/atomic-keys.md) §"Subscribe request key — int vs string".
 - **Atomic-key namespaces — bare vs `ob.*` (ENC-94, ENC-101).** Two distinct namespaces by source: bare (`bid`, `ask`, `lastPrice`, sma_N, ...) is written by `MarketTickComputer` only when the tick payload carries the field directly (pre-aggregated tick connectors). `ob.*` (`ob.best.bid.price`, `ob.spread`, ...) is computed from `OrderBookManager` state — used for L2/L3 sources (ITCH, FIX). **Listeners may bind only to bare keys; `ob.*` is pipeline-only** — `ob::Provider` never calls `Dispatcher::notifyListeners`, so a `Listener` bound to an `ob.*` field would silently never fire. The reject lives in `nodes::Listener::Create` (the static factory; the public constructor is kept for unit-test fixtures only) and surfaces as a `{"type":"error","where":"build","message":"listener: field '...' is pipeline-only — see docs/atomic-keys.md..."}` WS frame. Canonical pattern for surfacing `ob.*` into a chart: `Listener(<bare-key clock>) → AtomicAccessor(ob.*) → ...` — see [`docs/atomic-keys.md`](docs/atomic-keys.md) for the worked NEXO example.
+- **A timer node posts; it does not call. Drain the pool before you sample (ENC-1340).**
+  `BucketTime` and `Interval` hand each tick to the `ThreadPool` with `post()`. `shutdown()`
+  joins the timer thread, so after it returns no *new* tick can be posted — but a tick already
+  posted is sitting in the queue, unexecuted. A test that samples the child's counter straight
+  after `shutdown()` misses it, the pool's worker runs it a moment later, and the test goes red
+  with the shutdown having worked perfectly. It is load-sensitive because the only thing
+  deciding the outcome is whether the worker got scheduled first, which is why it reads as
+  "flaky" rather than "wrong": `BucketTimeTest.ShutdownStopsTicks` failed 8 times in 200 runs
+  (4.0%) with a single core oversubscribed, always `after == before + 1`, and 0 times in 200 on
+  a quiet box. **`pool.drain()` after `shutdown()`** is the fix and it is deterministic — it
+  waits for the queue to empty *and* for in-flight tasks to finish. A longer `sleep` is not a
+  fix, it is a wider window. Pair it with a bounded poll for the *first* tick instead of a fixed
+  leading sleep, so a slow box delays the test rather than making it assert `0 == 0`.
+- **`AtomicStore` readers stand down for a queued writer, and the bound is 1 yield (ENC-1340).**
+  `std::shared_mutex` is a reader-preferring `pthread_rwlock_t` on glibc, so overlapping readers
+  can starve a writer with no bound. `AtomicStore::set`/`setBatch` publish `_writersQueued`
+  before blocking and `get()` yields once while it is non-zero. This was worth 25% of runs of
+  `ConcurrencyContentionTest.MultiReaderMultiWriterNoTornReads` going bimodal — 30 of 40 runs at
+  ~1.2 s and 10 of 40 from 2.8 s to past a 25 s cap, with 71 s seen uncapped. **Do not raise the
+  yield bound to "make it faster".** Higher values look better on wall clock by making the
+  readers stop reading: at 64 yields the test finished in 14 ms having performed 2,335 reads
+  against 80,000 writes — a concurrency test silently converted into a no-op. The test now
+  records its reader throughput and asserts a floor for that reason; the measured sweep is the
+  table in `src/core/AtomicStore.cpp`.
 - **Derived-builtin key shape — `atomicKeyNamespaceByField` (ENC-1008).** `Dispatcher::computeAndStoreAtomics` stores FunctionMap builtins (`mean`, `sum`, `stddev`, … — 56 names) under the **bare** function name by default. That is a single per-symbol slot shared by every field, so two fields of one symbol both driving `mean` overwrite each other and one value is silently lost. Setting `atomicKeyNamespaceByField = true` stores them as `<field>.<fn>` (`lastPrice.mean`) so each source field keeps its own. **Default off**, because the key is a client-supplied wire string — `field` in a WS subscribe is read verbatim by `TreeBuilder` for both `Listener` and `AtomicAccessor` — with no version negotiation. Flipping it breaks an `AtomicAccessor` bound to a bare builtin name — loudly for the 53 names nothing else writes, and **silently for `mean`/`median`/`spread`**, which `MarketTickComputer` also writes over price history and which therefore keep resolving to a *different* value. Listener **push is unchanged** in both states, and outbound WS frames carry no key string at all. Both states are pinned by `tests/dispatch/AtomicKeyNamespaceTest.cpp`; the migration checklist is in [`docs/atomic-keys.md`](docs/atomic-keys.md).
 
 ## Configuration
