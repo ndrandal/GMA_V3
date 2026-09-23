@@ -55,7 +55,7 @@ namespace {
 // exhausted its yields still overtakes a queued writer. It converts an
 // unbounded starvation into a bounded delay, which is the property the data
 // path actually needs.
-constexpr int kReaderYieldsWhenWriterQueued = 4;
+constexpr int kReaderYieldsWhenWriterQueued = 16;
 
 // Publishes "a writer is queued" for exactly as long as the writer is blocked
 // on the unique lock. Released explicitly once the lock is held — readers that
