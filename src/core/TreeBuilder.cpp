@@ -508,27 +508,188 @@ namespace {
 // (see the 0-of-272 note above) — a fan-in registered without being listed here
 // goes back to discarding its upstream in silence, and nothing goes red. That
 // unclosable gap is why this paragraph is a warning rather than a cross-ref.
+//
+// ENC-1344 NOTE: this list is still hand-maintained, and that is unchanged and
+// still the weak point. What ENC-1344 removed is the OTHER hand-maintained
+// thing — the assumption that a stage's own `type` string is the fan-in's
+// name. `findFanInWithUpstream` below resolves the stage's head through every
+// builder that forwards the upstream value into a sub-node, so adding a
+// `Chain`-like or `Tee`-like WRAPPER no longer needs a change here. Adding a
+// FAN-IN still does.
 bool isFanInType(const std::string& type) {
   return type == "Aggregate" || type == "Pack" || type == "Let";
 }
 
-std::string fanInPipelineStageMessage(const std::string& type,
-                                      const char*        key,
-                                      std::size_t        index,
-                                      bool               hasNode) {
-  const std::string where =
-    std::string(key) + "[" + std::to_string(index) + "]";
-  // `index - 1` is only reached with index >= 1: the caller returns early for
-  // the one accepted placement (!hasNode && index == 0), so !hasNode implies
-  // index != 0. Guarded anyway rather than relying on that at a distance — a
-  // size_t underflow here would print `pipeline[18446744073709551615]`.
-  const std::string because =
-    (hasNode || index == 0)
-      ? "this request also carries a 'node', whose subtree is built directly "
-        "upstream of the first pipeline stage"
-      : "it is not the first stage — " + std::string(key) + "[" +
-        std::to_string(index - 1) + "] precedes it and would be built directly"
-        " upstream of it";
+// Where the recursion found a fan-in that has a value-producing node built
+// directly upstream of it. `path` is the JSON path from the request root, so a
+// nested culprit reports `pipeline[0].stages[0]` rather than `pipeline[0]` —
+// naming the stage and not the wrapper is half the diagnosis.
+struct FanInPlacement {
+  std::string type;     // "Aggregate" | "Pack" | "Let"
+  std::string path;     // "pipeline[1]", "node.stages[1]", "pipeline[0].outputs[0]"
+  std::string reason;   // what is built upstream of it, in words
+};
+
+// See the long comment above for the enumeration this implements and for what
+// `hasUpstream == false` means (a CLOCK, not a data source — §5 Q1).
+//
+// Returns true and fills `*out` on the FIRST culprit found; the traversal is
+// pre-order and left-to-right, so the reported path is the outermost/earliest
+// one, which is the one whose fix subsumes the others.
+bool findFanInWithUpstream(const rapidjson::Value& spec,
+                           bool                    hasUpstream,
+                           const std::string&      path,
+                           const std::string&      reason,
+                           int                     depth,
+                           FanInPlacement*         out) {
+  // CONSERVATIVE DIRECTION, and it is the opposite of
+  // `declaredInputIsSelfClocked`'s on purpose: there, "cannot tell" had to
+  // reproduce the pre-change behaviour; here, "cannot tell" must not
+  // manufacture a refusal for a request nothing has tried to build yet. A
+  // 64-deep request is rejected by the builders themselves.
+  if (depth > kMaxShapeDepth) return false;
+  if (!spec.IsObject() || !spec.HasMember("type") || !spec["type"].IsString())
+    return false;               // malformed — buildOne throws its own error
+  const std::string type = spec["type"].GetString();
+
+  const auto descend = [&](const rapidjson::Value& child, bool up,
+                           const std::string& p, const std::string& r) {
+    return findFanInWithUpstream(child, up, p, r, depth + 1, out);
+  };
+
+  if (isFanInType(type)) {
+    if (hasUpstream) {
+      out->type   = type;
+      out->path   = path;
+      out->reason = reason;
+      return true;
+    }
+    // The ACCEPTED placement (§5 Q1): the only thing upstream is a clock.
+    //
+    // Its declared sub-JSON is NOT on that clock's value path in the sense
+    // this rule polices — each entry is built terminating in its own
+    // `InputPort` (or, for `Let`, in a `Ref` consumer) and is a join member,
+    // which is legitimate. But each entry is itself a composed chain and can
+    // hold this same defect INTERNALLY, entered from the same clock-only
+    // disposition — so the recursion continues with `hasUpstream = false`.
+    if (type == "Aggregate") {
+      if (spec.HasMember("inputs") && spec["inputs"].IsArray()) {
+        const auto arr = spec["inputs"].GetArray();
+        for (rapidjson::SizeType i = 0; i < arr.Size(); ++i)
+          if (descend(arr[i], false,
+                      path + ".inputs[" + std::to_string(i) + "]", reason))
+            return true;
+      }
+    } else if (type == "Pack") {
+      if (spec.HasMember("fields") && spec["fields"].IsObject())
+        for (auto m = spec["fields"].MemberBegin();
+             m != spec["fields"].MemberEnd(); ++m)
+          if (descend(m->value, false,
+                      path + ".fields." + m->name.GetString(), reason))
+            return true;
+    } else {  // "Let"
+      if (spec.HasMember("bindings") && spec["bindings"].IsObject())
+        for (auto m = spec["bindings"].MemberBegin();
+             m != spec["bindings"].MemberEnd(); ++m)
+          if (descend(m->value, false,
+                      path + ".bindings." + m->name.GetString(), reason))
+            return true;
+      if (spec.HasMember("body") &&
+          descend(spec["body"], false, path + ".body", reason))
+        return true;
+    }
+    return false;
+  }
+
+  // `Chain` — the pass-through builder. Its head is stages[0]'s head verbatim,
+  // so stages[0] inherits the Chain's own disposition. Every LATER stage has
+  // stages[i-1] built directly upstream of it inside the Chain, which is this
+  // rule's defect regardless of where the Chain itself sits.
+  if (type == "Chain") {
+    if (!spec.HasMember("stages") || !spec["stages"].IsArray()) return false;
+    const auto arr = spec["stages"].GetArray();
+    for (rapidjson::SizeType i = 0; i < arr.Size(); ++i) {
+      const std::string p = path + ".stages[" + std::to_string(i) + "]";
+      if (i == 0) {
+        if (descend(arr[i], hasUpstream, p, reason)) return true;
+      } else {
+        const std::string r =
+          "it is stages[" + std::to_string(i) + "] of the 'Chain' at " + path +
+          ", and that Chain's stages[" + std::to_string(i - 1) + "] precedes it"
+          " and would be built directly upstream of it";
+        if (descend(arr[i], true, p, r)) return true;
+      }
+    }
+    return false;
+  }
+
+  // `Tee` and `Switch` fan the SAME incoming value into every branch head, so
+  // each branch inherits the wrapper's own disposition. Neither builds a
+  // `CompositeRoot`; both can hand the value into one.
+  if (type == "Tee") {
+    if (!spec.HasMember("outputs") || !spec["outputs"].IsArray()) return false;
+    const auto arr = spec["outputs"].GetArray();
+    for (rapidjson::SizeType i = 0; i < arr.Size(); ++i)
+      if (descend(arr[i], hasUpstream,
+                  path + ".outputs[" + std::to_string(i) + "]", reason))
+        return true;
+    return false;
+  }
+  if (type == "Switch") {
+    if (spec.HasMember("cases") && spec["cases"].IsArray()) {
+      const auto arr = spec["cases"].GetArray();
+      for (rapidjson::SizeType i = 0; i < arr.Size(); ++i)
+        if (descend(arr[i], hasUpstream,
+                    path + ".cases[" + std::to_string(i) + "]", reason))
+          return true;
+    }
+    if (spec.HasMember("default") &&
+        descend(spec["default"], hasUpstream, path + ".default", reason))
+      return true;
+    return false;
+  }
+
+  // `GroupSplit` / `SymbolSplit` route the incoming value to a per-key child
+  // built from this same JSON, so the child inherits the disposition too.
+  if (type == "GroupSplit" || type == "SymbolSplit") {
+    if (spec.HasMember("child") &&
+        descend(spec["child"], hasUpstream, path + ".child", reason))
+      return true;
+    return false;
+  }
+
+  // `Interval` / `BucketTime` are SOURCE nodes — `onValue` is a documented
+  // no-op, so nothing from upstream reaches the child. The child is driven by
+  // the TIMER, and a timer is a clock: enter it with `hasUpstream = false`,
+  // which is what makes `Interval{child:Aggregate}` the blessed shape it is.
+  if (type == "Interval" || type == "BucketTime") {
+    if (spec.HasMember("child") &&
+        descend(spec["child"], false, path + ".child", reason))
+      return true;
+    return false;
+  }
+
+  return false;   // every remaining registered type builds no sub-node
+}
+
+std::string fanInPipelineStageMessage(const FanInPlacement& f,
+                                      const std::string&    stagePath) {
+  const std::string& where   = f.path;
+  const std::string& because = f.reason;
+  const std::string  type    = f.type;
+
+  // Reached through a wrapper rather than being the stage itself. Say so, or
+  // the reader goes looking for an `Aggregate` at `pipeline[0]` and finds a
+  // `Chain`.
+  const std::string nested =
+    (f.path == stagePath)
+      ? std::string()
+      : " NOTE: the fan-in is NOT the stage itself — it sits inside it at the"
+        " path above. 'Chain' returns its FIRST stage's head verbatim, and"
+        " 'Tee', 'Switch' and 'GroupSplit' forward each incoming value into"
+        " every branch, so wrapping a fan-in in one of them does not put"
+        " anything between the upstream and the fan-in; it only hides it"
+        " (ENC-1344).";
 
   return "buildForRequest: node type '" + type + "' is a FAN-IN and it appears"
          " as " + where + " of this request, with something upstream of it in"
