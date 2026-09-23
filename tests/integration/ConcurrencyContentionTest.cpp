@@ -78,8 +78,9 @@ TEST(ConcurrencyContentionTest, MultiReaderMultiWriterNoTornReads) {
   // Seed so readers always find a value.
   store.set("RW", "v", 0);
 
-  std::atomic<bool> bad{false};
-  std::atomic<int>  writersLeft{kWriters};
+  std::atomic<bool>      bad{false};
+  std::atomic<int>       writersLeft{kWriters};
+  std::atomic<long long> reads{0};
 
   std::vector<std::thread> threads;
   for (int w = 0; w < kWriters; ++w) {
@@ -91,9 +92,11 @@ TEST(ConcurrencyContentionTest, MultiReaderMultiWriterNoTornReads) {
     });
   }
   for (int r = 0; r < kReaders; ++r) {
-    threads.emplace_back([&store, &bad, &writersLeft]() {
+    threads.emplace_back([&store, &bad, &writersLeft, &reads]() {
+      long long local = 0;
       while (writersLeft.load() > 0) {
         auto v = store.get("RW", "v");
+        ++local;
         if (!v) continue;
         try {
           int x = std::get<int>(*v);
@@ -102,6 +105,7 @@ TEST(ConcurrencyContentionTest, MultiReaderMultiWriterNoTornReads) {
           bad.store(true); // wrong variant alternative => torn write
         }
       }
+      reads.fetch_add(local, std::memory_order_relaxed);
     });
   }
   for (auto& th : threads) th.join();
@@ -109,6 +113,36 @@ TEST(ConcurrencyContentionTest, MultiReaderMultiWriterNoTornReads) {
   EXPECT_FALSE(bad.load())
       << "reader observed an out-of-domain or torn value — AtomicStore locking "
          "did not hold under multi-reader/multi-writer contention";
+
+  // ── ENC-1340: ANTI-VACUITY ────────────────────────────────────────────────
+  // "No torn read was observed" is only evidence if reads were observed at
+  // all. The readers exit on `writersLeft == 0`, so anything that stops them
+  // reading — a reader back-off in AtomicStore, an OS that never schedules
+  // them, a future refactor — silently converts this test into an assertion
+  // over an empty sample that passes and means nothing. ENC-1340 added
+  // AtomicStore's bounded reader stand-down for queued writers precisely in
+  // this code path, so the risk is not hypothetical: it is the change that was
+  // landed alongside this line.
+  //
+  // The floor is set far below the measured value so it catches "the readers
+  // stopped reading", not "the box was busy today". Measured with the
+  // stand-down in place on a 16-core box at loadavg ~4-5, 15 runs:
+  // 455,137 reads minimum, 492,617 mean, against 80,000 writes. The floor of
+  // 10,000 is ~45x below the worst run observed.
+  //
+  // It has already earned its keep: the first cut of AtomicStore's stand-down
+  // yielded up to 64 times, and this assertion is what reported that the
+  // readers had fallen to 2,335 reads and the test had become a no-op that
+  // "passed" in 14 ms. See the yield-bound table in src/core/AtomicStore.cpp.
+  const long long observed = reads.load();
+  RecordProperty("reads", std::to_string(observed));
+  RecordProperty("writes", std::to_string(static_cast<long long>(kWriters) * kIters));
+  EXPECT_GT(observed, 10000)
+      << "the readers barely ran (" << observed << " reads against "
+      << (static_cast<long long>(kWriters) * kIters)
+      << " writes) — this test asserts the absence of torn reads over a sample "
+         "that is effectively empty, so it proves nothing. Do not relax this "
+         "bound; find out why the readers are not overlapping the writers.";
 }
 
 // ---------------------------------------------------------------------------
