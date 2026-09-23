@@ -1158,17 +1158,24 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
         // behind a `Chain`'s second stage is refused even here, because there
         // the thing upstream of it is that Chain's first stage.
         const bool hasUpstream = hasNode || i != 0;
-        // `i - 1` is only reached with i >= 1: `hasUpstream` is false whenever
-        // !hasNode && i == 0, so the else-branch implies i != 0. Guarded anyway
-        // rather than relying on that at a distance — a SizeType underflow here
-        // would print `pipeline[18446744073709551615]`.
+        // `i - 1` is only reached with i >= 1, and the third branch is not
+        // reached at all: this text is only ever printed for a culprit found
+        // with `hasUpstream == true`, and at `!hasNode && i == 0` that can only
+        // come from inside a `Chain`, which writes its own reason. Spelled out
+        // rather than relying on either fact at a distance — the old two-way
+        // form would have printed "this request also carries a 'node'" for a
+        // request with no `node`, and a SizeType underflow would have printed
+        // `pipeline[18446744073709551615]`.
         const std::string reason =
-          (hasNode || i == 0)
+          hasNode
             ? "this request also carries a 'node', whose subtree is built "
               "directly upstream of the first pipeline stage"
-            : "it is not the first stage — " + std::string(pkey) + "[" +
+          : (i != 0)
+            ? "it is not the first stage — " + std::string(pkey) + "[" +
               std::to_string(i - 1) + "] precedes it and would be built"
-              " directly upstream of it";
+              " directly upstream of it"
+            : "it is nested inside " + stagePath + ", behind something that is"
+              " built directly upstream of it";
         if (findFanInWithUpstream(arr[i], hasUpstream, stagePath, reason, 0,
                                   &found)) {
           throw std::runtime_error(
