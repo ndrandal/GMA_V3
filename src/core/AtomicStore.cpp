@@ -35,16 +35,43 @@ namespace {
 // binary dozens of times per mutation sweep.
 //
 // THE MITIGATION. A writer publishes that it is queued BEFORE it blocks, and
-// an arriving reader yields up to kReaderYieldsWhenWriterQueued times while
-// that is true, giving the shared count a chance to drain to zero.
+// an arriving reader yields kReaderYieldsWhenWriterQueued times while that is
+// true, giving the shared count a chance to drain to zero.
+//
+// THE BOUND IS MEASURED, NOT PICKED. Sweeping it on the same box (15 runs per
+// row, 25 s cap, loadavg ~4-5; `reads` is the reader throughput the test now
+// records, against 80,000 writes):
+//
+//     yields   starved   slowest run   mean reads   min reads
+//        0      3 / 15      >25 s        47.4 M      18.5 M     <- the bug
+//        1      0 / 15       629 ms      492 K       455 K      <- chosen
+//        2      0 / 15       649 ms      380 K       358 K
+//        4      0 / 15       609 ms      454 K       322 K
+//        8      0 / 15       187 ms       93 K        64 K
+//       64      0 / 15        21 ms      2.3 K         -
+//
+// Read that table in both directions, because the second direction is the trap.
+// Downward, any non-zero value kills the starvation. Upward, the read counts
+// collapse: at 64 the readers manage 2,335 reads against 80,000 writes, i.e.
+// the test "passes" in 14 ms having barely overlapped the writers at all — a
+// concurrency test turned into a no-op by its own fix. That is not a
+// hypothesis; it is what the first attempt at this change did, and
+// MultiReaderMultiWriterNoTornReads's reader-throughput assertion (added by
+// ENC-1340 for exactly this reason) is what caught it.
+//
+// 1 is therefore the right value and the largest one is the wrong instinct:
+// it is sufficient, and it preserves the most overlap. The baseline's 47 M
+// reads are not a target to recover — those reads are the pathology itself,
+// readers spinning for 25 s because the writers cannot get in.
 //
 // It is deliberately a HINT and deliberately BOUNDED:
 //   * bounded, so a continuous write stream cannot starve readers — the exact
-//     mirror of the bug being fixed. A reader waits at most N yields and then
-//     takes the lock regardless. Strict writer preference (a hand-rolled fair
-//     rwlock, or PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP) would trade
-//     this bug for that one.
-//   * costs the read path ONE relaxed-ordering atomic load when no writer is
+//     mirror of the bug being fixed. A reader stands down for one yield and
+//     then takes the lock regardless of what the writers are doing. Strict
+//     writer preference (a hand-rolled fair rwlock, or
+//     PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP) would trade this bug for
+//     that one.
+//   * costs the read path ONE acquire-ordered atomic load when no writer is
 //     queued, which is the uncontended steady state, and nothing else. A fair
 //     rwlock would put a std::mutex round trip on every get().
 //   * needs no non-portable rwlock attribute and no platform #ifdef —
@@ -52,9 +79,9 @@ namespace {
 //     reproducible default build.
 //
 // What it does NOT claim: it is not a fairness guarantee. A reader that has
-// exhausted its yields still overtakes a queued writer. It converts an
-// unbounded starvation into a bounded delay, which is the property the data
-// path actually needs.
+// spent its yield still overtakes a queued writer. It converts an unbounded
+// starvation into a bounded delay, which is the property the data path
+// actually needs.
 constexpr int kReaderYieldsWhenWriterQueued = 8;
 
 // Publishes "a writer is queued" for exactly as long as the writer is blocked
@@ -141,8 +168,8 @@ void AtomicStore::setBatch(const std::string& streamKey,
 
 std::optional<ArgType> AtomicStore::get(const std::string& streamKey, const std::string& field) const {
   // Bounded stand-down so a queued writer can get in — see the ENC-1340 note
-  // at the top of this file. One relaxed load in the common (no writer
-  // queued) case; the loop body runs only while a writer is actually blocked.
+  // at the top of this file. One atomic load in the common (no writer queued)
+  // case; the loop body runs only while a writer is actually blocked.
   for (int i = 0; i < kReaderYieldsWhenWriterQueued &&
                   _writersQueued.load(std::memory_order_acquire) != 0; ++i) {
     std::this_thread::yield();
