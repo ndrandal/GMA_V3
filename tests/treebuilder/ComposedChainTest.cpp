@@ -1387,32 +1387,180 @@ TEST_F(ComposedChain, ForumsRsiOverboughtDemoShapeStillBuildsAndEmits) {
   for (auto& n : chain.keepAlive) if (n) n->shutdown();
 }
 
-// ─── THE KNOWN GAP, PINNED RATHER THAN LEFT TO BE REDISCOVERED ──────────────
+// ─── THE NESTED FORM: WHAT THE RECURSION REFUSES (ENC-1344) ─────────────────
 
-// A fan-in WRAPPED in a `Chain` or a `Tee` is NOT refused, and the silent
-// discard survives there untouched. This is ENC-1336's declared non-recursive
-// scope, not an oversight — but SPEC §5 Q7's stated reason for that scope
-// ("today no builder reachable from a pipeline stage takes a sub-node that
-// could hold a fan-in except a fan-in's own `inputs`") is measurably FALSE, and
-// a premise nobody can check is how this class of defect survives. So the fact
-// is a test.
+// This block replaces `FanInWrappedInAChainIsNotRefused_KnownGap`, which
+// ENC-1336's refuter added to PIN a defect it was scoped not to fix. The gap is
+// closed, so the test flips from asserting the discard to asserting the
+// refusal. Its two shapes are carried over verbatim so the flip is legible in
+// the diff.
 //
-// `Chain`'s builder ends `return curDown;` — the inner builder's head, verbatim
-// — so the stage head IS the `CompositeRoot`. The request below is the exact
-// shape `FanInAsAPipelineStageUnderANodeIsRefused` refuses, with one keyword
-// wrapped around the stage.
+// Read these against the enumeration in `src/core/TreeBuilder.cpp`: the rule is
+// no longer "this stage's `type` is a fan-in name", it is "a fan-in has a
+// value-producing node built directly upstream of it, however many wrappers
+// deep".
+
+// The two shapes the known-gap test pinned, now refused, with the nested path
+// NAMED. `pipeline[0]` alone would send the reader looking for an `Aggregate`
+// that is not there.
+TEST_F(ComposedChain, FanInWrappedInAChainIsRefused) {
+  const std::string viaChain = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Worker","fn":"last"},
+    "pipeline":[{"type":"Chain","stages":[
+      {"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]}]
+  })", deps_);
+  expectFanInRefusal(viaChain, "node + pipeline:[Chain{Aggregate}]",
+                     "Aggregate", "pipeline[0].stages[0]");
+  EXPECT_NE(viaChain.find("NOT the stage itself"), std::string::npos)
+      << "the message must say the fan-in is nested, or the reader looks for "
+         "an Aggregate at pipeline[0] and finds a Chain: " << viaChain;
+
+  const std::string viaTee = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Worker","fn":"last"},
+    "pipeline":[{"type":"Tee","outputs":[
+      {"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]}]
+  })", deps_);
+  expectFanInRefusal(viaTee, "node + pipeline:[Tee{Aggregate}]",
+                     "Aggregate", "pipeline[0].outputs[0]");
+}
+
+// THE ENUMERATION, AS A TEST. Every builder the comment on `isFanInType`
+// classifies as forwarding the upstream value into a sub-node gets a row, so
+// the classification is checked rather than asserted in prose. `Tee`, `Switch`
+// and `GroupSplit` matter most here: none of them builds a `CompositeRoot`, so
+// a rule keyed on "the stage's head IS a CompositeRoot" would catch `Chain` and
+// miss all three.
+TEST_F(ComposedChain, EveryForwardingWrapperIsSeenThrough) {
+  struct Row { const char* what; const char* stage; const char* where; };
+  const char* kAgg =
+    R"({"type":"Aggregate","arity":2,"inputs":[
+         {"type":"Listener","streamKey":"AAPL","field":"ask"},
+         {"type":"Listener","streamKey":"AAPL","field":"bid"}]})";
+
+  const std::vector<Row> rows = {
+    {"Chain{Aggregate}",
+     R"({"type":"Chain","stages":[%A%]})",             "pipeline[0].stages[0]"},
+    {"Tee{Worker, Aggregate}",
+     R"({"type":"Tee","outputs":[{"type":"Worker","fn":"last"},%A%]})",
+                                                       "pipeline[0].outputs[1]"},
+    {"Switch{cases:[Worker, Aggregate]}",
+     R"({"type":"Switch","select":{"ref":"value"},
+         "cases":[{"type":"Worker","fn":"last"},%A%]})", "pipeline[0].cases[1]"},
+    {"Switch{default:Aggregate}",
+     R"({"type":"Switch","select":{"ref":"value"},
+         "cases":[{"type":"Worker","fn":"last"}],"default":%A%})",
+                                                       "pipeline[0].default"},
+    {"GroupSplit{Aggregate}",
+     R"({"type":"GroupSplit","child":%A%})",           "pipeline[0].child"},
+    {"SymbolSplit{Aggregate}",
+     R"({"type":"SymbolSplit","child":%A%})",          "pipeline[0].child"},
+    {"Tee{Chain{Aggregate}} (two wrappers deep)",
+     R"({"type":"Tee","outputs":[{"type":"Chain","stages":[%A%]}]})",
+                                            "pipeline[0].outputs[0].stages[0]"},
+    {"Chain{GroupSplit{Tee{Aggregate}}} (three deep)",
+     R"({"type":"Chain","stages":[{"type":"GroupSplit","child":
+         {"type":"Tee","outputs":[%A%]}}]})",
+                               "pipeline[0].stages[0].child.outputs[0]"},
+  };
+
+  for (const auto& r : rows) {
+    std::string stage = r.stage;
+    for (std::size_t at = stage.find("%A%"); at != std::string::npos;
+         at = stage.find("%A%"))
+      stage.replace(at, 3, kAgg);
+    const std::string json =
+      R"({"key":1,"streamKey":"AAPL","field":"lastPrice",
+          "node":{"type":"Worker","fn":"last"},"pipeline":[)" + stage + "]}";
+    const std::string msg = buildAndReportJson(json.c_str(), deps_);
+    SCOPED_TRACE(r.what);
+    expectFanInRefusal(msg, r.what, "Aggregate", r.where);
+  }
+}
+
+// `Chain`'s SECOND defect, which the pass-through property alone does not
+// describe. `Chain{[Worker, Aggregate]}` at `pipeline[0]` of a request with NO
+// `node` is in the one ACCEPTED outer position — and is still wrong, because
+// the thing upstream of the `Aggregate` is the `Chain`'s own first stage. The
+// `Worker`'s output is discarded inside the Chain wherever the Chain sits.
+TEST_F(ComposedChain, AFanInAfterAStageInsideAChainIsRefusedEvenAtPipelineZero) {
+  const std::string msg = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "pipeline":[{"type":"Chain","stages":[
+      {"type":"Worker","fn":"last"},
+      {"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]}]
+  })", deps_);
+  expectFanInRefusal(msg, "pipeline:[Chain{Worker, Aggregate}] with no node",
+                     "Aggregate", "pipeline[0].stages[1]");
+  EXPECT_NE(msg.find("stages[0] precedes it"), std::string::npos)
+      << "the message must name the stage INSIDE the Chain that would be "
+         "discarded, not the Chain: " << msg;
+}
+
+// The same predicate applied to the `node` key, which ENC-1336 never scanned.
+// `node:Aggregate` is the BLESSED shape and stays accepted (the head Listener
+// is its clock); a fan-in nested behind a Chain stage under `node` is the same
+// silent discard and is refused. Leaving `node` unscanned would have made the
+// rule inconsistent in exactly the way that files the next gap ticket.
+TEST_F(ComposedChain, NestedFanInUnderTheNodeKeyIsRefused) {
+  const std::string msg = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Chain","stages":[
+      {"type":"Worker","fn":"last"},
+      {"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]},
+    "pipeline":[{"type":"Worker","fn":"diff"}]
+  })", deps_);
+  expectFanInRefusal(msg, "node:Chain{Worker, Aggregate}",
+                     "Aggregate", "node.stages[1]");
+}
+
+// A fan-in nested inside ANOTHER fan-in's declared input. The outer `Aggregate`
+// is in the accepted position, so the recursion enters its inputs in the
+// clock-only disposition — and finds the Chain-internal discard there too.
+TEST_F(ComposedChain, NestedFanInInsideAFanInsDeclaredInputIsRefused) {
+  const std::string msg = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Aggregate","arity":2,"inputs":[
+      {"type":"Listener","streamKey":"AAPL","field":"ask"},
+      {"type":"Chain","stages":[
+        {"type":"Worker","fn":"last"},
+        {"type":"Pack","fields":{
+          "a":{"type":"Listener","streamKey":"AAPL","field":"bid"},
+          "b":{"type":"Listener","streamKey":"AAPL","field":"ask"}}}]}]}
+  })", deps_);
+  expectFanInRefusal(msg, "node:Aggregate{Listener, Chain{Worker, Pack}}",
+                     "Pack", "node.inputs[1].stages[1]");
+}
+
+// ─── DIRECTION 2 FOR THE NESTED FORM: WHAT IT STILL ACCEPTS ─────────────────
 //
-// **This test asserts a DEFECT.** When a ruling extends Q7 to the nested case,
-// delete it and add the refusal to `FanInAsAPipelineStageUnderANodeIsRefused`.
-TEST_F(ComposedChain, FanInWrappedInAChainIsNotRefused_KnownGap) {
-  auto runOne = [this](const char* json) {
+// A widened refusal that only proves the NEW refusals is half a test. These
+// three are the accept half of the widening specifically; the corpus gate
+// (`NoCheckedInCorpusRequestIsRefusedForFanInPlacement`, 272 entries),
+// `ForumsRsiOverboughtDemoShapeStillBuildsAndEmits` and the whole of
+// `RecordTerminalTest` are the rest of it.
+
+// THE ONE ACCEPTED PLACEMENT SURVIVES BEING WRAPPED. If the recursion had been
+// written as "a fan-in anywhere inside a stage is refused" — the obvious wrong
+// widening — this would stop building, and nothing in the corpus would say so.
+TEST_F(ComposedChain, TheAcceptedPlacementIsStillAcceptedThroughAWrapper) {
+  auto run = [this](const char* json) {
     rapidjson::Document d;
     d.Parse(json);
     EXPECT_FALSE(d.HasParseError()) << "test JSON is malformed: " << json;
     auto sink = std::make_shared<Sink>();
     tree::BuiltChain chain;
     EXPECT_NO_THROW(chain = tree::buildForRequest(d, deps_, sink))
-        << "the check is non-recursive, so this still BUILDS today";
+        << "wrapping the ACCEPTED placement must not refuse it";
     for (int n = 0; n < 3; ++n)
       tick("AAPL", {{"ask", 1000.02 + n}, {"bid", 1000.00 + n},
                     {"lastPrice", 7777.0}});
@@ -1423,30 +1571,90 @@ TEST_F(ComposedChain, FanInWrappedInAChainIsNotRefused_KnownGap) {
     return vals;
   };
 
-  const auto viaChain = runOne(R"({
+  // `Chain{[Aggregate, Worker]}` at pipeline[0] with no node: the Aggregate's
+  // only upstream is the head Listener (a clock), and the Worker AFTER it is
+  // fed by it, not discarded by it.
+  const auto wrapped = run(R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
-    "node":{"type":"Worker","fn":"last"},
     "pipeline":[{"type":"Chain","stages":[
       {"type":"Aggregate","arity":2,"inputs":[
         {"type":"Listener","streamKey":"AAPL","field":"ask"},
-        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]}]
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]},
+      {"type":"Worker","fn":"diff"}]}]
   })");
-  const auto viaTee = runOne(R"({
+  const auto unwrapped = run(R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
-    "node":{"type":"Worker","fn":"last"},
-    "pipeline":[{"type":"Tee","outputs":[
-      {"type":"Aggregate","arity":2,"inputs":[
+    "pipeline":[{"type":"Aggregate","arity":2,"inputs":[
         {"type":"Listener","streamKey":"AAPL","field":"ask"},
-        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]}]
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]},
+      {"type":"Worker","fn":"diff"}]
   })");
 
-  for (const auto* vals : {&viaChain, &viaTee}) {
-    EXPECT_FALSE(vals->empty()) << "the join itself still fires";
-    for (double v : *vals)
-      EXPECT_NE(v, 7777.0)
-          << "THE GAP: the `node`'s output is still discarded in silence when "
-             "the fan-in is one wrapper deep. Got " << render(*vals);
-  }
+  ASSERT_FALSE(wrapped.empty())
+      << "it must BUILD AND EMIT; build success alone is not the criterion";
+  EXPECT_EQ(wrapped, unwrapped)
+      << "a `Chain` around the accepted placement is the same wiring:\n"
+         "  wrapped:   " << render(wrapped)
+      << "\n  unwrapped: " << render(unwrapped);
+  for (double v : wrapped)
+    EXPECT_NE(v, 7777.0) << "the head Listener is still only the CLOCK; got "
+                         << render(wrapped);
+}
+
+// A TIMER IS A CLOCK, NOT A DATA SOURCE, so the fan-in under it is in the
+// accepted disposition. `Interval::onValue` is a documented no-op — the child
+// is driven by the timer thread — which is why the recursion enters a timer's
+// `child` with `hasUpstream = false`. Getting this wrong would refuse
+// `Interval{child:Aggregate}`, the canonical "join on a clock" shape.
+TEST_F(ComposedChain, AFanInUnderATimerChildIsAccepted) {
+  rapidjson::Document d;
+  d.Parse(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Worker","fn":"last"},
+    "pipeline":[{"type":"Interval","ms":3600000,
+      "child":{"type":"Aggregate","arity":2,"inputs":[
+        {"type":"Listener","streamKey":"AAPL","field":"ask"},
+        {"type":"Listener","streamKey":"AAPL","field":"bid"}]}}]
+  })");
+  ASSERT_FALSE(d.HasParseError());
+  auto sink = std::make_shared<Sink>();
+  tree::BuiltChain chain;
+  ASSERT_NO_THROW(chain = tree::buildForRequest(d, deps_, sink))
+      << "a timer is a clock; the fan-in under it is the blessed shape";
+  if (chain.head) chain.head->shutdown();
+  for (auto& x : chain.keepAlive) if (x) x->shutdown();
+
+  // ...and the Chain-internal defect is still caught THROUGH the timer, so the
+  // `hasUpstream = false` above is a disposition and not a `return`.
+  const std::string msg = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "pipeline":[{"type":"Interval","ms":3600000,
+      "child":{"type":"Chain","stages":[
+        {"type":"Worker","fn":"last"},
+        {"type":"Aggregate","arity":2,"inputs":[
+          {"type":"Listener","streamKey":"AAPL","field":"ask"},
+          {"type":"Listener","streamKey":"AAPL","field":"bid"}]}]}}]
+  })", deps_);
+  expectFanInRefusal(msg, "pipeline:[Interval{child:Chain{Worker, Aggregate}}]",
+                     "Aggregate", "pipeline[0].child.stages[1]");
+}
+
+// The wrappers that do NOT forward the upstream value are not walked, and the
+// types with no sub-node cannot hide anything. This is the negative half of the
+// enumeration: a `Ref` drops its upstream too (its head is a no-op `RefStub`),
+// but that is a different defect — it discards with no fan-in involved — and
+// deliberately is NOT widened into here. If a future ticket makes a `Ref` as a
+// pipeline stage an error, it will be its own rule and this test says so.
+TEST_F(ComposedChain, ARefStageIsNotAFanInAndIsNotRefusedByThisRule) {
+  const std::string msg = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Worker","fn":"last"},
+    "pipeline":[{"type":"Ref","name":"nope"}]
+  })", deps_);
+  ASSERT_FALSE(msg.empty()) << "a Ref outside a Let is a build error already";
+  EXPECT_EQ(msg.find("FAN-IN"), std::string::npos)
+      << "a `Ref` must fail as an unknown binding, not as a fan-in placement: "
+      << msg;
 }
 
 } // namespace
