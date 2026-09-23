@@ -558,7 +558,7 @@ bool findFanInWithUpstream(const rapidjson::Value& spec,
   };
 
   if (isFanInType(type)) {
-    if (true) {  // M2 MUTATION: the WRONG widening — refuse a fan-in anywhere
+    if (hasUpstream) {
       out->type   = type;
       out->path   = path;
       out->reason = reason;
