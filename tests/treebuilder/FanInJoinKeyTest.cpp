@@ -42,6 +42,8 @@
 #include "gma/nodes/JoinBy.hpp"
 #include "gma/rt/ThreadPool.hpp"
 
+#include "../support/CorpusPath.hpp"
+
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
 #include <rapidjson/istreamwrapper.h>
@@ -115,20 +117,14 @@ rapidjson::Document parse(const char* json) {
 // LOUD, never a skip (ENC-807 L17).
 rapidjson::Document& corpusDoc() {
   static rapidjson::Document doc = [] {
-    const char* paths[] = {
-      "corpus_requests.json",
-      "../tests/treebuilder/corpus_requests.json",
-      "tests/treebuilder/corpus_requests.json",
-    };
+    // ENC-1340: one resolver, and it no longer depends on the cwd —
+    // tests/support/CorpusPath.hpp. A null Document still means "not found",
+    // and callers print corpusNotFoundDiagnostic() rather than guessing.
     rapidjson::Document d;
-    for (const char* p : paths) {
-      std::ifstream ifs(p);
-      if (!ifs.is_open()) continue;
-      rapidjson::IStreamWrapper isw(ifs);
-      d.ParseStream(isw);
-      return d;
-    }
-    d.SetNull();
+    std::ifstream ifs = gma::testsupport::openCorpusRequests();
+    if (!ifs.is_open()) { d.SetNull(); return d; }
+    rapidjson::IStreamWrapper isw(ifs);
+    d.ParseStream(isw);
     return d;
   }();
   return doc;
@@ -666,9 +662,7 @@ bool requestHasCrossStreamKeyFanIn(const rapidjson::Value& v) {
 
 TEST_F(FanInJoinKey, EveryCrossStreamKeyCorpusRequestJoinsUnderByNone) {
   rapidjson::Document& corpus = corpusDoc();
-  ASSERT_FALSE(corpus.IsNull()) << "corpus_requests.json not found — run the "
-      "suite from the directory CMake copies it into (add_test sets "
-      "WORKING_DIRECTORY; a hand-run from elsewhere is the failure)";
+  ASSERT_FALSE(corpus.IsNull()) << gma::testsupport::corpusNotFoundDiagnostic();
   ASSERT_TRUE(corpus.IsArray());
 
   struct Row { int id; std::size_t injected; std::size_t byDefault; std::size_t byNone; };

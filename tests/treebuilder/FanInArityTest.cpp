@@ -32,6 +32,8 @@
 #include "gma/nodes/INode.hpp"
 #include "gma/rt/ThreadPool.hpp"
 
+#include "../support/CorpusPath.hpp"
+
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
 #include <rapidjson/istreamwrapper.h>
@@ -79,20 +81,14 @@ std::string render(const std::vector<double>& v) {
 // LOUD, never a skip (ENC-807 L17).
 rapidjson::Document& corpusDoc() {
   static rapidjson::Document doc = [] {
-    const char* paths[] = {
-      "corpus_requests.json",
-      "../tests/treebuilder/corpus_requests.json",
-      "tests/treebuilder/corpus_requests.json",
-    };
+    // ENC-1340: one resolver, and it no longer depends on the cwd —
+    // tests/support/CorpusPath.hpp. A null Document still means "not found",
+    // and callers print corpusNotFoundDiagnostic() rather than guessing.
     rapidjson::Document d;
-    for (const char* p : paths) {
-      std::ifstream ifs(p);
-      if (!ifs.is_open()) continue;
-      rapidjson::IStreamWrapper isw(ifs);
-      d.ParseStream(isw);
-      return d;
-    }
-    d.SetNull();
+    std::ifstream ifs = gma::testsupport::openCorpusRequests();
+    if (!ifs.is_open()) { d.SetNull(); return d; }
+    rapidjson::IStreamWrapper isw(ifs);
+    d.ParseStream(isw);
     return d;
   }();
   return doc;
@@ -465,7 +461,7 @@ TEST_F(FanInArity, NestedFanInThrowLeavesNothingSubscribed) {
 
 TEST_F(FanInArity, EveryCorpusAggregateDeclaresArityEqualToItsInputCount) {
   rapidjson::Document& doc = corpusDoc();
-  ASSERT_FALSE(doc.IsNull()) << "corpus_requests.json not found";
+  ASSERT_FALSE(doc.IsNull()) << gma::testsupport::corpusNotFoundDiagnostic();
   ASSERT_FALSE(doc.HasParseError());
   ASSERT_TRUE(doc.IsArray());
 

@@ -7,6 +7,8 @@
 #include "gma/nodes/Listener.hpp"
 #include "gma/Event.hpp"
 #include "gma/StreamValue.hpp"
+#include "../support/CorpusPath.hpp"
+
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
 #include <rapidjson/istreamwrapper.h>
@@ -364,20 +366,14 @@ private:
 // next to the test binary and runs the suite from that directory.
 rapidjson::Document& corpusDoc() {
   static rapidjson::Document doc = [] {
-    const char* paths[] = {
-      "corpus_requests.json",
-      "../tests/treebuilder/corpus_requests.json",
-      "tests/treebuilder/corpus_requests.json",
-    };
+    // ENC-1340: one resolver, and it no longer depends on the cwd —
+    // tests/support/CorpusPath.hpp. A null Document still means "not found",
+    // and callers print corpusNotFoundDiagnostic() rather than guessing.
     rapidjson::Document d;
-    for (const char* p : paths) {
-      std::ifstream ifs(p);
-      if (!ifs.is_open()) continue;
-      rapidjson::IStreamWrapper isw(ifs);
-      d.ParseStream(isw);
-      return d;
-    }
-    d.SetNull();
+    std::ifstream ifs = gma::testsupport::openCorpusRequests();
+    if (!ifs.is_open()) { d.SetNull(); return d; }
+    rapidjson::IStreamWrapper isw(ifs);
+    d.ParseStream(isw);
     return d;
   }();
   return doc;

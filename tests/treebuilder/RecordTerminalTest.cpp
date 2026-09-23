@@ -52,6 +52,8 @@
 #include "gma/nodes/INode.hpp"
 #include "gma/rt/ThreadPool.hpp"
 
+#include "../support/CorpusPath.hpp"
+
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
 #include <rapidjson/istreamwrapper.h>
@@ -356,16 +358,11 @@ TEST_F(RecordTerminal, OrdinaryScalarRequestIsUnaffected) {
 // checked-in corpus entries are rendering silently empty charts today, and it
 // belongs on ENC-1293 and in the SPEC.
 TEST_F(RecordTerminal, NoCheckedInCorpusRequestIsRefused) {
-  const char* paths[] = {
-    "corpus_requests.json",
-    "../tests/treebuilder/corpus_requests.json",
-    "tests/treebuilder/corpus_requests.json",
-  };
-  std::ifstream ifs;
-  for (const char* p : paths) { ifs.open(p); if (ifs.is_open()) break; ifs.clear(); }
+  // ENC-1340: one resolver, one diagnostic — tests/support/CorpusPath.hpp.
+  std::ifstream ifs = gma::testsupport::openCorpusRequests();
   ASSERT_TRUE(ifs.is_open())
-      << "corpus_requests.json not found next to the test binary — a missing "
-         "corpus must not silently green this gate (ENC-807 L17)";
+      << "a missing corpus must not silently green this gate (ENC-807 L17).\n"
+      << gma::testsupport::corpusNotFoundDiagnostic();
 
   rapidjson::IStreamWrapper isw(ifs);
   rapidjson::Document doc;
