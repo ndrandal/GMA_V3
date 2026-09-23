@@ -558,7 +558,7 @@ bool findFanInWithUpstream(const rapidjson::Value& spec,
   };
 
   if (isFanInType(type)) {
-    if (hasUpstream) {
+    if (true) {  // M2 MUTATION: the WRONG widening — refuse a fan-in anywhere
       out->type   = type;
       out->path   = path;
       out->reason = reason;
@@ -601,7 +601,74 @@ bool findFanInWithUpstream(const rapidjson::Value& spec,
     return false;
   }
 
-  return false;  // M1 MUTATION: non-recursive, as ENC-1336 was
+  // `Chain` — the pass-through builder. Its head is stages[0]'s head verbatim,
+  // so stages[0] inherits the Chain's own disposition. Every LATER stage has
+  // stages[i-1] built directly upstream of it inside the Chain, which is this
+  // rule's defect regardless of where the Chain itself sits.
+  if (type == "Chain") {
+    if (!spec.HasMember("stages") || !spec["stages"].IsArray()) return false;
+    const auto arr = spec["stages"].GetArray();
+    for (rapidjson::SizeType i = 0; i < arr.Size(); ++i) {
+      const std::string p = path + ".stages[" + std::to_string(i) + "]";
+      if (i == 0) {
+        if (descend(arr[i], hasUpstream, p, reason)) return true;
+      } else {
+        const std::string r =
+          "it is stages[" + std::to_string(i) + "] of the 'Chain' at " + path +
+          ", and that Chain's stages[" + std::to_string(i - 1) + "] precedes it"
+          " and would be built directly upstream of it";
+        if (descend(arr[i], true, p, r)) return true;
+      }
+    }
+    return false;
+  }
+
+  // `Tee` and `Switch` fan the SAME incoming value into every branch head, so
+  // each branch inherits the wrapper's own disposition. Neither builds a
+  // `CompositeRoot`; both can hand the value into one.
+  if (type == "Tee") {
+    if (!spec.HasMember("outputs") || !spec["outputs"].IsArray()) return false;
+    const auto arr = spec["outputs"].GetArray();
+    for (rapidjson::SizeType i = 0; i < arr.Size(); ++i)
+      if (descend(arr[i], hasUpstream,
+                  path + ".outputs[" + std::to_string(i) + "]", reason))
+        return true;
+    return false;
+  }
+  if (type == "Switch") {
+    if (spec.HasMember("cases") && spec["cases"].IsArray()) {
+      const auto arr = spec["cases"].GetArray();
+      for (rapidjson::SizeType i = 0; i < arr.Size(); ++i)
+        if (descend(arr[i], hasUpstream,
+                    path + ".cases[" + std::to_string(i) + "]", reason))
+          return true;
+    }
+    if (spec.HasMember("default") &&
+        descend(spec["default"], hasUpstream, path + ".default", reason))
+      return true;
+    return false;
+  }
+
+  // `GroupSplit` / `SymbolSplit` route the incoming value to a per-key child
+  // built from this same JSON, so the child inherits the disposition too.
+  if (type == "GroupSplit" || type == "SymbolSplit") {
+    if (spec.HasMember("child") &&
+        descend(spec["child"], hasUpstream, path + ".child", reason))
+      return true;
+    return false;
+  }
+
+  // `Interval` / `BucketTime` are SOURCE nodes — `onValue` is a documented
+  // no-op, so nothing from upstream reaches the child. The child is driven by
+  // the TIMER, and a timer is a clock: enter it with `hasUpstream = false`,
+  // which is what makes `Interval{child:Aggregate}` the blessed shape it is.
+  if (type == "Interval" || type == "BucketTime") {
+    if (spec.HasMember("child") &&
+        descend(spec["child"], false, path + ".child", reason))
+      return true;
+    return false;
+  }
+
   return false;   // every remaining registered type builds no sub-node
 }
 
