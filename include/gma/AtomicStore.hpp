@@ -2,6 +2,7 @@
 #pragma once
 #include "StreamValue.hpp"
 
+#include <atomic>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -36,6 +37,16 @@ private:
   using FieldMap = std::unordered_map<std::string, ArgType>;
 
   mutable std::shared_mutex _mutex;
+  // ENC-1340: writer-starvation guard. `std::shared_mutex` on libstdc++ is a
+  // `pthread_rwlock_t` with DEFAULT attributes — PTHREAD_RWLOCK_PREFER_READER_NP
+  // — so an arriving reader may join a live shared acquisition even while a
+  // writer is already blocked. A reader population that never lets the shared
+  // count reach zero starves that writer for as long as it keeps reading, with
+  // no bound. Writers publish here before they block and an arriving reader
+  // stands down (bounded) while it is non-zero, so the count can drain. Read
+  // the full argument, and why this is a HINT rather than a fair lock, in
+  // src/core/AtomicStore.cpp.
+  std::atomic<unsigned> _writersQueued{0};
   std::unordered_map<std::string, FieldMap> _data;
   std::size_t _maxStreamKeys{0};         // 0 = unlimited
   std::size_t _maxFieldsPerStreamKey{0}; // 0 = unlimited
