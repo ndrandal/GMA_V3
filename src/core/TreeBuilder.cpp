@@ -673,6 +673,7 @@ bool findFanInWithUpstream(const rapidjson::Value& spec,
 }
 
 std::string fanInPipelineStageMessage(const FanInPlacement& f,
+                                      const char*           key,
                                       const std::string&    stagePath) {
   const std::string& where   = f.path;
   const std::string& because = f.reason;
@@ -717,7 +718,8 @@ std::string fanInPipelineStageMessage(const FanInPlacement& f,
          " request with NO 'node' key — there the fan-in's upstream is the head"
          " Listener itself, which is the same wiring it gets under 'node'. See"
          " specs/2026-09-20-gma-join-correctness/SPEC.md section 5 Q7 and D5"
-         " (ENC-1336).";
+         " (ENC-1336), and Corrections C13 (ENC-1344) for the nested form." +
+         nested;
 }
 
 } // namespace
@@ -1121,25 +1123,61 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
   // block is scheduled for deletion by ENC-1295 and nothing here moves with it.
   {
     const bool hasNode = rq.HasMember("node") && rq["node"].IsObject();
-    for (const char* k : {"pipeline", "stages"}) {
-      if (!rq.HasMember(k) || !rq[k].IsArray()) continue;
-      const auto arr = rq[k].GetArray();
+    FanInPlacement found;
+
+    // Which key the pipeline is spelled with — `stages` is the legacy spelling
+    // and the build loop takes the first key present, so this must too or the
+    // rule is bypassable by renaming one key.
+    const char* pkey = nullptr;
+    for (const char* k : {"pipeline", "stages"})
+      if (rq.HasMember(k) && rq[k].IsArray()) { pkey = k; break; }
+
+    // The `node` subtree. Its own head's only upstream is the head Listener —
+    // a CLOCK — so it is entered with `hasUpstream = false`, which keeps
+    // `node:Aggregate` and `node:Pack` accepted exactly as before. What this
+    // DOES reach is a defect nested inside it, e.g.
+    // `node:Chain{stages:[Worker, Aggregate]}`, where the Worker's output is
+    // discarded inside the Chain no matter where the Chain sits (ENC-1344).
+    if (hasNode)
+      findFanInWithUpstream(rq["node"], /*hasUpstream=*/false, "node",
+                            "it has a node built directly upstream of it",
+                            0, &found);
+
+    if (found.type.empty() && pkey) {
+      const auto arr = rq[pkey].GetArray();
       for (rapidjson::SizeType i = 0; i < arr.Size(); ++i) {
-        const auto& stage = arr[i];
-        if (!stage.IsObject() || !stage.HasMember("type") ||
-            !stage["type"].IsString())
-          continue;                    // malformed — buildOne throws its own error
-        const std::string type = stage["type"].GetString();
-        if (!isFanInType(type)) continue;
+        const std::string stagePath =
+          std::string(pkey) + "[" + std::to_string(i) + "]";
         // THE ACCEPTED CASE, and it is §5 Q1 rather than an exception: with no
         // `node`, `midHead` starts at `terminal`, so the head Listener is this
         // stage's only upstream — the same wiring the fan-in gets under `node`.
-        if (!hasNode && i == 0) continue;
-        throw std::runtime_error(
-          fanInPipelineStageMessage(type, k, static_cast<std::size_t>(i), hasNode));
+        // Note this is a property of the STAGE POSITION and is carried into the
+        // stage's sub-JSON by `hasUpstream`, not a `continue`: a fan-in nested
+        // behind a `Chain`'s second stage is refused even here, because there
+        // the thing upstream of it is that Chain's first stage.
+        const bool hasUpstream = hasNode || i != 0;
+        // `i - 1` is only reached with i >= 1: `hasUpstream` is false whenever
+        // !hasNode && i == 0, so the else-branch implies i != 0. Guarded anyway
+        // rather than relying on that at a distance — a SizeType underflow here
+        // would print `pipeline[18446744073709551615]`.
+        const std::string reason =
+          (hasNode || i == 0)
+            ? "this request also carries a 'node', whose subtree is built "
+              "directly upstream of the first pipeline stage"
+            : "it is not the first stage — " + std::string(pkey) + "[" +
+              std::to_string(i - 1) + "] precedes it and would be built"
+              " directly upstream of it";
+        if (findFanInWithUpstream(arr[i], hasUpstream, stagePath, reason, 0,
+                                  &found)) {
+          throw std::runtime_error(
+            fanInPipelineStageMessage(found, pkey, stagePath));
+        }
       }
-      break;                           // mirrors the build loop: first key wins
     }
+
+    if (!found.type.empty())
+      throw std::runtime_error(
+        fanInPipelineStageMessage(found, pkey ? pkey : "pipeline", "node"));
   }
   // ENC-1293 / SPEC specs/2026-09-20-gma-join-correctness D7 — TEMPORARY, and
   // lifted by ENC-1295 (embassy). See the long comment on `shapeInto` above for
