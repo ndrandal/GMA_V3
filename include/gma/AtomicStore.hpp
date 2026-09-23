@@ -46,7 +46,7 @@ private:
   // stands down (bounded) while it is non-zero, so the count can drain. Read
   // the full argument, and why this is a HINT rather than a fair lock, in
   // src/core/AtomicStore.cpp.
-  mutable std::atomic<unsigned> _writersQueued{0};
+  std::atomic<unsigned> _writersQueued{0};
   std::unordered_map<std::string, FieldMap> _data;
   std::size_t _maxStreamKeys{0};         // 0 = unlimited
   std::size_t _maxFieldsPerStreamKey{0}; // 0 = unlimited
