@@ -398,23 +398,102 @@ std::string recordTerminalMessage(const std::string& culprit) {
 // `Pack -> Field -> Responder` and `ClientSessionTest`'s
 // `SubscribeAcceptsPackFieldResponder` are both written in exactly that form.
 //
-// DELIBERATELY NOT RECURSIVE into a stage's own sub-JSON — AND THAT IS A REAL,
-// MEASURED HOLE, not a vacuous one. SPEC §5 Q7 says "today no builder reachable
-// from a pipeline stage takes a sub-node that could hold a fan-in except a
-// fan-in's own `inputs`, so the question is currently empty." **That is false.**
-// `Chain` holds `stages`, `Tee` holds `outputs`, `Switch` holds `cases`, and
-// `Chain`'s builder ends `return curDown;` — it hands back its inner builder's
-// head verbatim, so a `Chain` wrapping a fan-in makes the STAGE HEAD literally
-// a `CompositeRoot`. Measured on this branch: `node:Worker{last}` +
-// `pipeline:[Chain{stages:[Aggregate{Listener ask, Listener bid}]}]` builds,
-// and the node's output does not appear at the terminal — exactly the failure
-// this check exists to abolish, one keyword away. Reproduced identically
-// through `Tee`. `FanInWrappedInAChainIsNotRefused_KnownGap` pins both.
+// RECURSIVE SINCE ENC-1344, AND KEYED ON A PROPERTY RATHER THAN A TYPE NAME
+// (SPEC §5 Q7, Corrections C13.3 / C13.5).
 //
-// It stays out of scope because ENC-1336 was scoped non-recursive and because
-// inventing a rule for the nested shape would be inventing behaviour the SPEC
-// has not ruled. Widen this only with a ruling that says what the nested shape
-// should MEAN — but widen it from the fact above, not from Q7's premise.
+// ENC-1336 scoped this check non-recursive and said so out loud; its refuter
+// then measured that the premise behind the scoping was false. SPEC §5 Q7 said
+// "today no builder reachable from a pipeline stage takes a sub-node that could
+// hold a fan-in except a fan-in's own `inputs`, so the question is currently
+// empty." **That was false.** `Chain`'s builder ends `return curDown;` — it
+// hands back its inner builder's head verbatim — so
+// `node:Worker{last}` + `pipeline:[Chain{stages:[Aggregate{ask, bid}]}]` made
+// the STAGE HEAD literally a `CompositeRoot`, built without refusal, and
+// discarded the `node`'s output exactly as the un-wrapped shape did.
+// Reproduced identically through `Tee`.
+//
+// THE ENUMERATION, which is what ENC-1344 owes and what a longer
+// `isFanInType` list can never substitute for. All 19 registered node names,
+// classified by ONE question: when a value arrives at this builder's built
+// head, which sub-JSON does that value reach?
+//
+//   builder          sub-JSON built     on the UPSTREAM VALUE's path?
+//   ───────────────────────────────────────────────────────────────────────
+//   Aggregate        inputs[]           it IS the fan-in — stop and judge
+//   Pack             fields{}           it IS the fan-in — stop and judge
+//   Let              bindings{}, body   it IS the fan-in — stop and judge
+//   Chain            stages[]           YES. The head IS stages[0]'s head
+//                                       (`return curDown;`) — the pass-through
+//                                       property. AND every later stage has
+//                                       stages[i-1] built directly upstream of
+//                                       it, inside the Chain, unconditionally.
+//   Tee              outputs[]          YES — `Tee::onValue` pushes the value
+//                                       into EVERY output head. Note `Tee` is
+//                                       NOT a fan-in and builds no
+//                                       `CompositeRoot`; it reproduces the gap
+//                                       by forwarding INTO one. That is why
+//                                       "the head is a CompositeRoot" is not
+//                                       the whole property.
+//   Switch           cases[], default   YES — `Switch::onValue` routes the
+//                                       value into one branch head.
+//   GroupSplit       child              YES — routes the value per group key
+//                                       (the child is built lazily, per key,
+//                                       but from the same JSON).
+//   SymbolSplit      child              YES — legacy alias, same builder.
+//   Interval         child              NO. `Interval::onValue` is a NO-OP
+//   BucketTime       child              (source node) and the child is driven
+//                                       by the TIMER. The timer is a clock, so
+//                                       the child is entered in the clock-only
+//                                       disposition, not the has-upstream one.
+//   Listener         —                  no sub-node
+//   TumblingWindow   —                  no sub-node
+//   VectorReducer    —                  no sub-node
+//   AtomicAccessor   —                  no sub-node
+//   Worker           —                  no sub-node
+//   Field            —                  no sub-node
+//   Expr             —                  no sub-node (`expr` is an expression)
+//   Filter           —                  no sub-node (`when` is an expression)
+//   Ref              —                  no sub-node. It returns a `RefStub`
+//                                       whose `onValue` is a no-op, so a `Ref`
+//                                       reached from upstream drops that value
+//                                       too — a DIFFERENT defect (it discards
+//                                       without any fan-in involved) and NOT
+//                                       widened into here. Filed separately
+//                                       rather than smuggled in.
+//
+// So the implemented property is not "this stage's built head is a
+// `CompositeRoot`" — that catches `Chain` and misses `Tee`, `Switch` and
+// `GroupSplit`, which return their own node and still hand the upstream value
+// straight into one. It is:
+//
+//     A FAN-IN IS REFUSED WHEREVER A VALUE-PRODUCING NODE IS BUILT DIRECTLY
+//     UPSTREAM OF IT ON THE COMPOSED CHAIN, HOWEVER MANY WRAPPERS DEEP.
+//
+// `hasUpstream` below carries exactly that, and it is FALSE at the three
+// clock-only positions: the `node` subtree's own head, `pipeline[0]` of a
+// request with no `node`, and a timer's `child`. There the only thing upstream
+// is the head `Listener` (or the timer), which §5 Q1 already ruled is a CLOCK
+// and not a data source. THE ONE ACCEPTED PLACEMENT IS THEREFORE UNCHANGED,
+// which is why `Pack` at `pipeline[0]` with no `node` — forum's flagship
+// ENC-672 graph — still builds and still emits.
+//
+// SCOPE OF THE WIDENING, MEASURED, BOTH HALVES.
+//   * Corpus: 0 of 272 entries change verdict. The corpus contains no `Chain`,
+//     `Tee`, `Switch`, `Pack` or `Let` at all — its node vocabulary is
+//     `Worker` 161, `AtomicAccessor` 119, `Listener` 94, `Aggregate` 52,
+//     `Interval` 24, `SymbolSplit` 10 — and its only pipeline stage type is
+//     `Worker`. `NoCheckedInCorpusRequestIsRefusedForFanInPlacement` is the
+//     standing gate on that, and it is the instrument for the accept half.
+//   * forum: UNREACHABLE. forum's stage vocabulary is the 13 `case` labels in
+//     `translateStage`, and there is no `chain` and no `tee` kind anywhere in
+//     it (ENC-1343, Corrections C13.2). The un-wrapped shapes forum DOES emit
+//     (C13.2 / ENC-1383) are unaffected — they were already refused.
+//
+// So this closes a LATENT gap before anything depends on it; it is not a live
+// bug being fixed, and it must not be reported as one. Being corpus-invisible
+// AND forum-invisible is also why `FanInWrappedInAChainIsRefused` is the only
+// thing that will ever go red on it — which is precisely why it is a test and
+// not a note.
 //
 namespace {
 
