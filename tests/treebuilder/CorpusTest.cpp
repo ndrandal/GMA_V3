@@ -56,32 +56,11 @@ protected:
 };
 
 TEST_F(CorpusTestFixture, AllCorpusRequestsBuild) {
-    // Try multiple search paths for the corpus file
-    std::string paths[] = {
-        "corpus_requests.json",
-        "../tests/treebuilder/corpus_requests.json",
-        "tests/treebuilder/corpus_requests.json",
-    };
-
-    std::ifstream ifs;
-    std::string usedPath;
-    for (const auto& p : paths) {
-        ifs.open(p);
-        if (ifs.is_open()) {
-            usedPath = p;
-            break;
-        }
-    }
-
+    // ENC-807 (L17): a missing corpus must NOT silently green the suite.
+    // ENC-1340: one resolver, one diagnostic — see tests/support/CorpusPath.hpp.
+    std::ifstream ifs = gma::testsupport::openCorpusRequests();
     if (!ifs.is_open()) {
-        // ENC-807 (L17): a missing corpus must NOT silently green the suite.
-        // CMake copies corpus_requests.json next to the test binary (cwd), so a
-        // miss here is a real build/packaging failure, not a skip.
-        FAIL() << "corpus_requests.json not found next to the test binary "
-                  "(cwd) — the corpus must be present for this test to run. "
-                  "Searched: corpus_requests.json, "
-                  "../tests/treebuilder/corpus_requests.json, "
-                  "tests/treebuilder/corpus_requests.json";
+        FAIL() << gma::testsupport::corpusNotFoundDiagnostic();
         return;
     }
 

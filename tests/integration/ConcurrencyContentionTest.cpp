@@ -124,10 +124,16 @@ TEST(ConcurrencyContentionTest, MultiReaderMultiWriterNoTornReads) {
   // this code path, so the risk is not hypothetical: it is the change that was
   // landed alongside this line.
   //
-  // The floor is set two orders of magnitude below the measured value so it
-  // catches "the readers stopped reading", not "the box was busy today".
-  // Measured with the stand-down in place on a 16-core box at loadavg ~4:
-  // 4 readers, 4 writers x 20000 sets => ~2.9M reads over ~15 ms.
+  // The floor is set far below the measured value so it catches "the readers
+  // stopped reading", not "the box was busy today". Measured with the
+  // stand-down in place on a 16-core box at loadavg ~4-5, 15 runs:
+  // 455,137 reads minimum, 492,617 mean, against 80,000 writes. The floor of
+  // 10,000 is ~45x below the worst run observed.
+  //
+  // It has already earned its keep: the first cut of AtomicStore's stand-down
+  // yielded up to 64 times, and this assertion is what reported that the
+  // readers had fallen to 2,335 reads and the test had become a no-op that
+  // "passed" in 14 ms. See the yield-bound table in src/core/AtomicStore.cpp.
   const long long observed = reads.load();
   RecordProperty("reads", std::to_string(observed));
   RecordProperty("writes", std::to_string(static_cast<long long>(kWriters) * kIters));
