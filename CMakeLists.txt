@@ -361,6 +361,18 @@ if (GMA_BUILD_TESTS)
       "$<TARGET_FILE_DIR:gma_tests>/corpus_requests.json"
     COMMENT "Copying corpus_requests.json next to gma_tests")
 
+  # ENC-1340: let the binary find its corpus without help from the cwd.
+  # The three historical search paths were all cwd-relative, so `ctest` (which
+  # sets WORKING_DIRECTORY, above) always worked and a hand-run of the raw
+  # binary from anywhere else produced a dozen failures that looked like
+  # TreeBuilder bugs. tests/support/CorpusPath.hpp adds two cwd-independent
+  # candidates: the directory of the running executable, and this one — the
+  # configure-time source tree. Between them a binary built by this project
+  # finds the corpus from any directory, and the diagnostic it prints when it
+  # genuinely cannot names the cwd and every path tried.
+  target_compile_definitions(gma_tests PRIVATE
+    GMA_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
   # ─── ENC-1289's EXPECTED-FAILURE MACHINERY IS GONE. ENC-1292 CLEARED THE
   # LAST GATE, 2026-09-20.
   #

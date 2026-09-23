@@ -20,9 +20,12 @@
 #include "gma/util/Config.hpp"
 #include "gma/util/Logger.hpp"
 
+#include "support/CorpusPath.hpp"
+
 #include <boost/asio/io_context.hpp>
 #include <gtest/gtest.h>
 
+#include <cstdio>
 #include <memory>
 
 namespace {
@@ -53,6 +56,36 @@ public:
   // false. It is one flag away from running per iteration though, so make it
   // idempotent rather than merely lucky.
   void SetUp() override {
+    // ── ENC-1340: say it ONCE, at the top, in the words of the actual problem.
+    //
+    // `corpus_requests.json` is consumed by five test files. When it cannot be
+    // found, those files produce about a dozen failures that each look like a
+    // TreeBuilder bug, plus a sanitizer-flavoured warning — a false negative
+    // wearing a sanitizer's authority. ENC-1338 spent an hour inside that
+    // before working out the corpus was simply not where the process was
+    // looking, and the cause was nothing more than having run the raw binary
+    // from the wrong working directory.
+    //
+    // The resolver no longer depends on the cwd at all (see
+    // tests/support/CorpusPath.hpp), so reaching this branch now means the
+    // corpus is genuinely absent — a real build/packaging failure. Report it
+    // here, before the first test runs, so the answer is the first thing on
+    // stderr instead of an inference from a dozen reds. Deliberately NOT a
+    // fatal gtest failure: a run filtered to tests that never touch the corpus
+    // is legitimate, and those tests still deserve to run.
+    if (!gma::testsupport::corpusRequestsFound()) {
+      std::fputs("\n"
+                 "========================================================\n"
+                 "GMA_V3 TEST BOOTSTRAP — corpus_requests.json NOT FOUND\n"
+                 "Every corpus-backed test below will fail for THIS reason\n"
+                 "and for no other. Do not debug them individually.\n"
+                 "========================================================\n",
+                 stderr);
+      std::fputs(gma::testsupport::corpusNotFoundDiagnostic().c_str(), stderr);
+      std::fputs("========================================================\n\n",
+                 stderr);
+    }
+
     auto& g = globals();
 
     // Build the process-static objects once. They are documented above as
