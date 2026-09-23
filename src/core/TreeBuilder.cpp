@@ -1138,12 +1138,14 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
     // DOES reach is a defect nested inside it, e.g.
     // `node:Chain{stages:[Worker, Aggregate]}`, where the Worker's output is
     // discarded inside the Chain no matter where the Chain sits (ENC-1344).
-    if (hasNode)
-      findFanInWithUpstream(rq["node"], /*hasUpstream=*/false, "node",
-                            "it has a node built directly upstream of it",
-                            0, &found);
+    if (hasNode &&
+        findFanInWithUpstream(rq["node"], /*hasUpstream=*/false, "node",
+                              "it has a node built directly upstream of it",
+                              0, &found))
+      throw std::runtime_error(
+        fanInPipelineStageMessage(found, pkey ? pkey : "pipeline", "node"));
 
-    if (found.type.empty() && pkey) {
+    if (pkey) {
       const auto arr = rq[pkey].GetArray();
       for (rapidjson::SizeType i = 0; i < arr.Size(); ++i) {
         const std::string stagePath =
@@ -1174,10 +1176,6 @@ BuiltChain buildForRequest(const rapidjson::Value&      requestJson,
         }
       }
     }
-
-    if (!found.type.empty())
-      throw std::runtime_error(
-        fanInPipelineStageMessage(found, pkey ? pkey : "pipeline", "node"));
   }
   // ENC-1293 / SPEC specs/2026-09-20-gma-join-correctness D7 — TEMPORARY, and
   // lifted by ENC-1295 (embassy). See the long comment on `shapeInto` above for
