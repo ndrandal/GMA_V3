@@ -1828,3 +1828,11 @@ TEST_F(ComposedChain, EveryAcceptedRefPlacementStillBuilds) {
            "refused with: " << msg;
   }
 }
+TEST_F(ComposedChain, Enc1398WhyDoesTheOldRefTestPass) {
+  const std::string msg = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "node":{"type":"Worker","fn":"last"},
+    "pipeline":[{"type":"Ref","name":"nope"}]
+  })", deps_);
+  printf("MSG: %.300s\n", msg.c_str());
+}
