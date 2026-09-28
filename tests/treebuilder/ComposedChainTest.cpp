@@ -1665,144 +1665,166 @@ TEST_F(ComposedChain, ARefStageIsNotAFanInAndIsNotRefusedByThisRule) {
 // Same condition as ENC-1344's fan-in rule, different mechanism: a fan-in hands
 // the upstream value to a `CompositeRoot`; a `Ref`'s head is a `RefStub` whose
 // `onValue` is an empty no-op. ENC-1344 found this as a by-product of its
-// 19-type enumeration and deliberately did not widen into it.
+// 19-type enumeration and deliberately did not widen into it, so it is a
+// PARALLEL rule here and `isFanInType` is untouched — folding `Ref` into that
+// predicate would make the message say "fan-in" about a node that joins nothing.
 //
 // REACHABILITY, MEASURED (the ticket's "establish first"):
-//   * Corpus: invisible — 0 of 272 entries contain Chain/Tee/Switch/GroupSplit/
-//     Ref/Let at all.
-//   * forum: REACHABLE, contrary to the ticket's premise. `translateStage` in
+//   * Corpus: INVISIBLE. 0 of 272 entries contain `Chain`, `Tee`, `Switch`,
+//     `GroupSplit`, `Ref` or `Let` at all.
+//   * forum: REACHABLE — contrary to the ticket's premise that it is
+//     forum-invisible. `translateStage` in
 //     forum/internal/pipelinetranslate/config_mapping.go carries `case "let"`,
-//     `case "ref"` and `case "switch"`, and `Let.body` / `Switch.cases` go
-//     through `requireRaw` UNVALIDATED — so the whole node vocabulary reaches
-//     GMA through them, `Chain` included, despite there being no `case "chain"`.
-//   * The symptom is a plausible WRONG NUMBER, not a missing value: before this
-//     rule, Let{bindings:{p:Listener}, body:Chain{stages:[Expr{value*10},
-//     Ref{p}]}} built, and one price=4 event delivered 4 to the terminal rather
-//     than 40, because the binding's own Tee supplied the raw value in place of
-//     the Expr's discarded output.
+//     `case "ref"` AND `case "switch"`, and `Let.body` / `Switch.cases` go
+//     through `requireRaw` UNVALIDATED, so the whole node vocabulary reaches
+//     GMA through them — `Chain` included, despite there being no `case
+//     "chain"`. The absence of a case label is not the absence of a path.
+//   * The symptom is a plausible WRONG NUMBER, not a missing value. Before this
+//     rule, `Let{bindings:{p:Listener}, body:Chain{stages:[Expr{value*10},
+//     Ref{p}]}}` built with no refusal and one price=4 event delivered **4** to
+//     the terminal rather than 40: the Expr's output went into
+//     `RefStub::onValue` and the binding's own `Tee` supplied the raw value in
+//     its place. That is why it is a build-time refusal and not a warning.
 // ===========================================================================
 
 // The defect shape. Goes red if the refusal is removed.
-TEST(ComposedChainTest, RefWithUpstreamIsRefused) {
-  Rig rig;
-  auto rq = parse(R"({
-    "streamKey":"SYM","field":"price",
+TEST_F(ComposedChain, RefWithUpstreamIsRefused) {
+  const std::string msg = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
     "pipeline":[{
       "type":"Let",
-      "bindings":{ "p":{"type":"Listener","streamKey":"SYM","field":"price"} },
+      "bindings":{ "p":{"type":"Listener","streamKey":"AAPL","field":"lastPrice"} },
       "body":{"type":"Chain","stages":[
         {"type":"Expr","expr":{"op":"mul","args":[{"ref":"value"},10]}},
         {"type":"Ref","name":"p"}
       ]}
     }]
-  })");
+  })", deps_);
 
-  try {
-    (void)gma::tree::buildForRequest(rq, rig.deps, rig.terminal);
-    FAIL() << "a 'Ref' with a value-producing node built directly upstream of it "
-              "must be refused at build time (ENC-1398): unrefused, the Expr's "
-              "output is discarded by RefStub::onValue and the binding's own Tee "
-              "delivers the raw value instead, so the terminal gets 4 not 40";
-  } catch (const std::exception& ex) {
-    const std::string msg = ex.what();
+  ASSERT_FALSE(msg.empty())
+      << "a 'Ref' with a value-producing node built directly upstream of it must "
+         "be refused at build time (ENC-1398): unrefused, the Expr's output is "
+         "discarded by RefStub::onValue and the binding's own Tee delivers the "
+         "raw value instead, so the terminal receives 4 and not 40";
+  EXPECT_NE(msg.find("'Ref'"), std::string::npos)
+      << "the message must name the node type: " << msg;
+  // It must NOT claim to be a fan-in — a Ref joins nothing, and saying so sends
+  // the reader looking for declared inputs that do not exist.
+  EXPECT_EQ(msg.find("is a FAN-IN"), std::string::npos)
+      << "a 'Ref' is not a fan-in and must not be described as one: " << msg;
+  EXPECT_NE(msg.find("DISCARDED"), std::string::npos)
+      << "the message must say the upstream value is discarded: " << msg;
+  EXPECT_NE(msg.find("PLAUSIBLE WRONG NUMBER"), std::string::npos)
+      << "the message must say the symptom is a wrong value, not a missing one, "
+         "because that is what makes it worse than the fan-in case: " << msg;
+  // ENC-1344's shape: name the Ref's own path inside the wrapper, not the
+  // wrapper's, or the reader looks for a Ref at pipeline[0] and finds a Let.
+  EXPECT_NE(msg.find("stages[1]"), std::string::npos)
+      << "the message must name the Ref's own path, not the wrapper's: " << msg;
+  EXPECT_NE(msg.find("section 5 Q7"), std::string::npos)
+      << "the message must cite the SPEC section that ruled it: " << msg;
+  EXPECT_NE(msg.find("ENC-1398"), std::string::npos)
+      << "the message must name its own ticket: " << msg;
+}
+
+// Reached through the other forwarding wrappers too, so the rule is structural
+// rather than a special case for `Chain`. `Tee`/`Switch`/`GroupSplit` fan the
+// same incoming value into every branch, so a `Ref` behind one of them still has
+// that value upstream of it.
+TEST_F(ComposedChain, RefWithUpstreamIsRefusedThroughEveryForwardingWrapper) {
+  struct Row { const char* what; const char* body; const char* where; };
+  const std::vector<Row> rows = {
+    {"Chain{Expr, Ref}",
+     R"({"type":"Chain","stages":[
+          {"type":"Expr","expr":{"op":"mul","args":[{"ref":"value"},10]}},
+          {"type":"Ref","name":"p"}]})",
+     "stages[1]"},
+    {"Chain{Expr, Tee{Ref}}",
+     R"({"type":"Chain","stages":[
+          {"type":"Expr","expr":{"op":"mul","args":[{"ref":"value"},10]}},
+          {"type":"Tee","outputs":[{"type":"Ref","name":"p"}]}]})",
+     "stages[1].outputs[0]"},
+    {"Chain{Expr, Switch{cases:[Ref]}}",
+     R"({"type":"Chain","stages":[
+          {"type":"Expr","expr":{"op":"mul","args":[{"ref":"value"},10]}},
+          {"type":"Switch","select":{"ref":"value"},
+           "cases":[{"type":"Ref","name":"p"}]}]})",
+     "stages[1].cases[0]"},
+    {"Chain{Expr, GroupSplit{child:Ref}}",
+     R"({"type":"Chain","stages":[
+          {"type":"Expr","expr":{"op":"mul","args":[{"ref":"value"},10]}},
+          {"type":"GroupSplit","child":{"type":"Ref","name":"p"}}]})",
+     "stages[1].child"},
+  };
+
+  for (const auto& r : rows) {
+    const std::string json =
+      std::string(R"({"key":1,"streamKey":"AAPL","field":"lastPrice",
+        "pipeline":[{"type":"Let",
+          "bindings":{"p":{"type":"Listener","streamKey":"AAPL","field":"lastPrice"}},
+          "body":)") + r.body + "}]}";
+    const std::string msg = buildAndReportJson(json.c_str(), deps_);
+    EXPECT_FALSE(msg.empty())
+        << r.what << " must be refused — the Expr's output reaches a Ref: " << json;
+    if (msg.empty()) continue;
     EXPECT_NE(msg.find("'Ref'"), std::string::npos)
-        << "the message must name the node type; got: " << msg;
-    // It must NOT claim to be a fan-in — a Ref joins nothing, and saying so
-    // would send the reader looking for declared inputs that do not exist.
+        << r.what << " must name the node type: " << msg;
+    EXPECT_NE(msg.find(r.where), std::string::npos)
+        << r.what << " must name WHERE the Ref is (" << r.where << "): " << msg;
     EXPECT_EQ(msg.find("is a FAN-IN"), std::string::npos)
-        << "a 'Ref' is not a fan-in and must not be described as one; got: " << msg;
-    EXPECT_NE(msg.find("DISCARDED"), std::string::npos)
-        << "the message must say the value is discarded; got: " << msg;
-    // The path names the stage inside the wrapper, not the wrapper (ENC-1344's
-    // shape): .body.stages[1], not pipeline[0].
-    EXPECT_NE(msg.find("stages[1]"), std::string::npos)
-        << "the message must name the Ref's own path, not the wrapper's; got: " << msg;
+        << r.what << " must not call a Ref a fan-in: " << msg;
   }
 }
 
 // The accept direction, and it is the half that matters: every placement where a
-// `Ref` legitimately has no upstream must still build. Without these four rows
-// the test above would be equally satisfied by refusing every request that
-// contains a `Ref` at all, which would break named reuse outright.
-TEST(ComposedChainTest, EveryAcceptedRefPlacementStillBuilds) {
-  // (a) `Ref` as stages[0] of a Chain — a chain HEAD has no upstream. This is
-  //     the shape ExpressionLanguageCapstoneTest.LetBindingReusedByTwoExpressions
-  //     writes down, reached here through a fan-in's declared inputs.
-  {
-    Rig rig;
-    auto rq = parse(R"({
-      "streamKey":"SYM","field":"price",
-      "node":{
-        "type":"Let",
-        "bindings":{ "p":{"type":"Listener","streamKey":"SYM","field":"price"} },
-        "body":{
-          "type":"Aggregate","arity":2,
-          "inputs":[
+// `Ref` legitimately has no upstream must still build. Without these rows the
+// tests above would be equally satisfied by refusing every request containing a
+// `Ref` at all, which would break named reuse outright.
+TEST_F(ComposedChain, EveryAcceptedRefPlacementStillBuilds) {
+  struct Row { const char* what; const char* json; };
+  const std::vector<Row> rows = {
+    // (a) `Ref` as stages[0] of a Chain — a chain HEAD has no upstream. This is
+    //     the shape ExpressionLanguageCapstoneTest.LetBindingReusedByTwoExpressions
+    //     writes down, here as a fan-in's declared inputs.
+    {"Ref as stages[0] inside a fan-in's declared inputs",
+     R"({"key":1,"streamKey":"AAPL","field":"lastPrice",
+        "node":{"type":"Let",
+          "bindings":{"p":{"type":"Listener","streamKey":"AAPL","field":"lastPrice"}},
+          "body":{"type":"Aggregate","arity":2,"inputs":[
             {"type":"Chain","stages":[{"type":"Ref","name":"p"},
               {"type":"Expr","expr":{"op":"mul","args":[{"ref":"value"},10]}}]},
             {"type":"Chain","stages":[{"type":"Ref","name":"p"},
-              {"type":"Expr","expr":{"op":"add","args":[{"ref":"value"},1]}}]}
-          ]
-        }
-      }
-    })");
-    EXPECT_NO_THROW((void)gma::tree::buildForRequest(rq, rig.deps, rig.terminal))
-        << "a Ref as stages[0] of a Chain has no upstream and must still build";
-  }
+              {"type":"Expr","expr":{"op":"add","args":[{"ref":"value"},1]}}]}]}}})"},
+    // (b) `Ref` as the whole `Let` body — its only upstream is the head
+    //     Listener, which SPEC §5 Q1 rules is a CLOCK and not a data source.
+    {"Ref as the Let body under 'node'",
+     R"({"key":1,"streamKey":"AAPL","field":"lastPrice",
+        "node":{"type":"Let",
+          "bindings":{"p":{"type":"Listener","streamKey":"AAPL","field":"lastPrice"}},
+          "body":{"type":"Ref","name":"p"}}})"},
+    // (c) `Ref` as a branch head under `Tee` — each branch inherits the Tee's
+    //     own disposition, which here is clock-only.
+    {"Ref as a Tee branch head",
+     R"({"key":1,"streamKey":"AAPL","field":"lastPrice",
+        "node":{"type":"Let",
+          "bindings":{"p":{"type":"Listener","streamKey":"AAPL","field":"lastPrice"}},
+          "body":{"type":"Tee","outputs":[{"type":"Ref","name":"p"},
+            {"type":"Expr","expr":{"op":"add","args":[{"ref":"value"},1]}}]}}})"},
+    // (d) the transform written the RIGHT way round — Ref first, then the Expr.
+    //     This is exactly what the refusal's message tells the author to do, so
+    //     it has to actually build.
+    {"Chain{[Ref, Expr]} — the fix the refusal message names",
+     R"({"key":1,"streamKey":"AAPL","field":"lastPrice",
+        "pipeline":[{"type":"Let",
+          "bindings":{"p":{"type":"Listener","streamKey":"AAPL","field":"lastPrice"}},
+          "body":{"type":"Chain","stages":[{"type":"Ref","name":"p"},
+            {"type":"Expr","expr":{"op":"mul","args":[{"ref":"value"},10]}}]}}]})"},
+  };
 
-  // (b) `Ref` as the whole `Let` body — its only upstream is the head Listener,
-  //     which SPEC section 5 Q1 rules is a CLOCK and not a data source.
-  {
-    Rig rig;
-    auto rq = parse(R"({
-      "streamKey":"SYM","field":"price",
-      "node":{
-        "type":"Let",
-        "bindings":{ "p":{"type":"Listener","streamKey":"SYM","field":"price"} },
-        "body":{"type":"Ref","name":"p"}
-      }
-    })");
-    EXPECT_NO_THROW((void)gma::tree::buildForRequest(rq, rig.deps, rig.terminal))
-        << "a Ref as the Let body is clocked, not fed — it must still build";
-  }
-
-  // (c) `Ref` as a branch head under `Tee` — Tee fans the SAME incoming value
-  //     into every branch, so each branch inherits the Tee's own disposition,
-  //     which here is clock-only.
-  {
-    Rig rig;
-    auto rq = parse(R"({
-      "streamKey":"SYM","field":"price",
-      "node":{
-        "type":"Let",
-        "bindings":{ "p":{"type":"Listener","streamKey":"SYM","field":"price"} },
-        "body":{"type":"Tee","outputs":[
-          {"type":"Ref","name":"p"},
-          {"type":"Expr","expr":{"op":"add","args":[{"ref":"value"},1]}}
-        ]}
-      }
-    })");
-    EXPECT_NO_THROW((void)gma::tree::buildForRequest(rq, rig.deps, rig.terminal))
-        << "a Ref as a Tee branch head has no upstream and must still build";
-  }
-
-  // (d) the transform written the RIGHT way round — Ref first, then the Expr.
-  //     This is what the refusal's message tells the author to do, so it has to
-  //     actually build.
-  {
-    Rig rig;
-    auto rq = parse(R"({
-      "streamKey":"SYM","field":"price",
-      "pipeline":[{
-        "type":"Let",
-        "bindings":{ "p":{"type":"Listener","streamKey":"SYM","field":"price"} },
-        "body":{"type":"Chain","stages":[
-          {"type":"Ref","name":"p"},
-          {"type":"Expr","expr":{"op":"mul","args":[{"ref":"value"},10]}}
-        ]}
-      }]
-    })");
-    EXPECT_NO_THROW((void)gma::tree::buildForRequest(rq, rig.deps, rig.terminal))
-        << "Chain{[Ref, Expr]} is the fix the refusal message names — it must build";
+  for (const auto& r : rows) {
+    const std::string msg = buildAndReportJson(r.json, deps_);
+    EXPECT_TRUE(msg.empty())
+        << r.what << " has no upstream at the Ref and must still build; it was "
+           "refused with: " << msg;
   }
 }
