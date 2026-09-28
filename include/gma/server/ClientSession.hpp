@@ -211,7 +211,25 @@ private:
   void handleMessage(const std::string& text);
   void handleSubscribe(const ::rapidjson::Document& doc);
   void handleCancel(const ::rapidjson::Document& doc);
-  void sendError(const std::string& where, const std::string& message);
+  // sendError — emit an `{"type":"error","where":…,"message":…}` frame.
+  //
+  // ENC-1396: `reqKey`, when present, adds the request's identity to the frame
+  // via `writeRequestKeyJSON` — `"key": <int>` for an int subscription,
+  // `"requestId": "<string>"` for a string one, the same rendering `update`,
+  // `subscribed` and `canceled` already use. Without it a `subscribe` carrying
+  // N requests of which one is rejected produced a frame naming neither the
+  // failed request nor the survivors, and the client had to re-derive which by
+  // noticing whose `subscribed` ack never arrived.
+  //
+  // It is std::nullopt for CONNECTION-level failures, which have no request to
+  // name: a payload that is not JSON, a missing/unknown `type`, a malformed
+  // `subscribe`/`cancel` envelope, and the three per-request rejects that fire
+  // BEFORE a key has been parsed (not an object / both `key` and `id` / no
+  // valid key). Those keep the original three-key shape.
+  //
+  // Additive on the wire, so a client ignoring unknown keys is unaffected.
+  void sendError(const std::string& where, const std::string& message,
+                 const std::optional<RequestKey>& reqKey = std::nullopt);
 
 private:
   WebSocketServer*  server_{nullptr};
