@@ -157,6 +157,13 @@ std::string readUntilType(ws::stream<tcp::socket>& stream,
 struct ErrorFrame {
   std::string where;
   std::string message;
+  // ENC-1396: the request the rejection belongs to, as the frame renders it —
+  // `key` for an int subscription, `requestId` for a string one. Both stay
+  // absent on a connection-level error, which has no request to name.
+  bool                hasKey{false};
+  int                 key{0};
+  bool                hasRequestId{false};
+  std::string         requestId;
 };
 
 ErrorFrame expectErrorFrame(const std::string& payload) {
@@ -173,6 +180,14 @@ ErrorFrame expectErrorFrame(const std::string& payload) {
     ef.where = doc["where"].GetString();
   if (doc.HasMember("message") && doc["message"].IsString())
     ef.message = doc["message"].GetString();
+  if (doc.HasMember("key") && doc["key"].IsInt()) {
+    ef.hasKey = true;
+    ef.key    = doc["key"].GetInt();
+  }
+  if (doc.HasMember("requestId") && doc["requestId"].IsString()) {
+    ef.hasRequestId = true;
+    ef.requestId    = doc["requestId"].GetString();
+  }
   return ef;
 }
 
