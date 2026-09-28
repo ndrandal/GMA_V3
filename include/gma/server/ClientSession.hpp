@@ -16,6 +16,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -229,7 +230,7 @@ private:
   //
   // Additive on the wire, so a client ignoring unknown keys is unaffected.
   void sendError(const std::string& where, const std::string& message,
-                 const std::optional<RequestKey>& reqKey = std::nullopt);
+                 const std::optional<gma::server::RequestKey>& reqKey = std::nullopt);
 
 private:
   WebSocketServer*  server_{nullptr};
