@@ -527,7 +527,6 @@ void ClientSession::sendError(const std::string& where, const std::string& messa
   // the same renderer `update`/`subscribed`/`canceled` use — `key` for an int
   // subscription, `requestId` for a string one. Absent for connection-level
   // failures, which have no request to name.
-  if (reqKey) gma::server::writeRequestKeyJSON(w, *reqKey);
   w.EndObject();
 
   GMA_METRIC_HIT("ws.msg_out");
