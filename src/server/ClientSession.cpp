@@ -514,7 +514,8 @@ void ClientSession::onWrite(beast::error_code ec, std::size_t) {
 // ------------------------------
 // Protocol helpers
 // ------------------------------
-void ClientSession::sendError(const std::string& where, const std::string& message) {
+void ClientSession::sendError(const std::string& where, const std::string& message,
+                              const std::optional<gma::server::RequestKey>& reqKey) {
   ::rapidjson::StringBuffer sb;
   ::rapidjson::Writer<::rapidjson::StringBuffer> w(sb);
 
@@ -522,6 +523,11 @@ void ClientSession::sendError(const std::string& where, const std::string& messa
   w.Key("type");    w.String("error");
   w.Key("where");   w.String(where.c_str());
   w.Key("message"); w.String(message.c_str());
+  // ENC-1396: attribute the rejection to its request when one is in scope, using
+  // the same renderer `update`/`subscribed`/`canceled` use — `key` for an int
+  // subscription, `requestId` for a string one. Absent for connection-level
+  // failures, which have no request to name.
+  if (reqKey) gma::server::writeRequestKeyJSON(w, *reqKey);
   w.EndObject();
 
   GMA_METRIC_HIT("ws.msg_out");
@@ -605,11 +611,11 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     gma::server::RequestKey key = std::move(*keyOpt);
 
     if (!r.HasMember("streamKey") || !r["streamKey"].IsString()) {
-      sendError("subscribe", "request missing 'streamKey' string");
+      sendError("subscribe", "request missing 'streamKey' string", key);
       continue;
     }
     if (!r.HasMember("field") || !r["field"].IsString()) {
-      sendError("subscribe", "request missing 'field' string");
+      sendError("subscribe", "request missing 'field' string", key);
       continue;
     }
 
@@ -621,12 +627,12 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
     static constexpr std::size_t MAX_FIELD_LEN      = 128;
     if (streamKey.empty() || streamKey.size() > MAX_STREAM_KEY_LEN) {
       sendError("subscribe", "invalid 'streamKey' (empty or too long, max "
-                + std::to_string(MAX_STREAM_KEY_LEN) + ")");
+                + std::to_string(MAX_STREAM_KEY_LEN) + ")", key);
       continue;
     }
     if (field.empty() || field.size() > MAX_FIELD_LEN) {
       sendError("subscribe", "invalid 'field' (empty or too long, max "
-                + std::to_string(MAX_FIELD_LEN) + ")");
+                + std::to_string(MAX_FIELD_LEN) + ")", key);
       continue;
     }
 
@@ -730,7 +736,7 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
         gma::JsonValidator::validateTree(r["node"]);
       }
     } catch (const std::exception& ex) {
-      sendError("validate", ex.what());
+      sendError("validate", ex.what(), key);
       continue;
     }
 
@@ -783,7 +789,7 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
         std::lock_guard<std::mutex> lk(reqMu_);
         auto it = active_.find(key);
         if (it == active_.end() && active_.size() >= MAX_SUBSCRIPTIONS) {
-          sendError("subscribe", "max subscriptions reached");
+          sendError("subscribe", "max subscriptions reached", key);
           continue;
         }
       }
@@ -838,7 +844,7 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
                                 {"streamKey", streamKey},
                                 {"field", field} });
     } catch (const std::exception& ex) {
-      sendError("build", ex.what());
+      sendError("build", ex.what(), key);
     }
   }
 }

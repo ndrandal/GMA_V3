@@ -157,6 +157,13 @@ std::string readUntilType(ws::stream<tcp::socket>& stream,
 struct ErrorFrame {
   std::string where;
   std::string message;
+  // ENC-1396: the request the rejection belongs to, as the frame renders it —
+  // `key` for an int subscription, `requestId` for a string one. Both stay
+  // absent on a connection-level error, which has no request to name.
+  bool                hasKey{false};
+  int                 key{0};
+  bool                hasRequestId{false};
+  std::string         requestId;
 };
 
 ErrorFrame expectErrorFrame(const std::string& payload) {
@@ -173,6 +180,14 @@ ErrorFrame expectErrorFrame(const std::string& payload) {
     ef.where = doc["where"].GetString();
   if (doc.HasMember("message") && doc["message"].IsString())
     ef.message = doc["message"].GetString();
+  if (doc.HasMember("key") && doc["key"].IsInt()) {
+    ef.hasKey = true;
+    ef.key    = doc["key"].GetInt();
+  }
+  if (doc.HasMember("requestId") && doc["requestId"].IsString()) {
+    ef.hasRequestId = true;
+    ef.requestId    = doc["requestId"].GetString();
+  }
   return ef;
 }
 
@@ -743,6 +758,153 @@ TEST(ClientSessionTest, UnbucketedSubscriptionEmitsNoBucketStartMs) {
   ASSERT_FALSE(upd.HasParseError()) << updatePayload;
   EXPECT_FALSE(upd.HasMember("bucketStartMs"))
       << "an un-bucketed stream must declare no basis at all: " << updatePayload;
+
+  beast::error_code ec;
+  stream.close(ws::close_code::normal, ec);
+}
+
+// ---------------------------------------------------------------------------
+// ENC-1396: a rejection must name the request it belongs to.
+//
+// Before this, `sendError` wrote exactly three keys — type/where/message — while
+// every other frame the session writes (`update`, `subscribed`, `canceled`)
+// carried the request identity through `writeRequestKeyJSON`. A `subscribe` of N
+// requests where one fails to build produced one frame naming neither the failed
+// request nor the survivors, so a client had to re-derive which by noticing whose
+// `subscribed` ack never arrived.
+//
+// The batch below is the case that matters: two requests, one good and one that
+// throws out of `buildForRequest` (a `Pack`-valued terminal, the ENC-1293 reject
+// reused from SubscribeRejectsRecordValuedTerminal above). The error frame must
+// name key 7, and the surviving request must still be acked — a fix that refused
+// the whole batch would pass a weaker assertion.
+// ---------------------------------------------------------------------------
+TEST(ClientSessionTest, BuildErrorInABatchNamesTheFailingRequest) {
+  ServerHarness srv;
+  asio::io_context clientIoc;
+  auto stream = connect(clientIoc, srv.port());
+
+  // key 6 is well-formed; key 7's Pack-valued terminal throws in buildForRequest.
+  std::string req =
+    R"({"type":"subscribe","requests":[)"
+    R"({"key":6,"streamKey":"AAPL","field":"lastPrice"},)"
+    R"({"key":7,"streamKey":"AAPL","field":"lastPrice",)"
+    R"("pipeline":[{"type":"Pack","fields":{)"
+    R"("ask":{"type":"Listener","streamKey":"AAPL","field":"ask"},)"
+    R"("bid":{"type":"Listener","streamKey":"AAPL","field":"bid"}}}]}]})";
+  stream.write(asio::buffer(req));
+
+  // Collect both the error and the ack, in whichever order they arrive.
+  ErrorFrame err;
+  bool sawError = false, sawAckFor6 = false;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while ((!sawError || !sawAckFor6) && std::chrono::steady_clock::now() < deadline) {
+    auto frame = readFrameBounded(stream, std::chrono::milliseconds(600));
+    if (frame.empty()) continue;
+    rapidjson::Document d;
+    d.Parse(frame.c_str());
+    ASSERT_FALSE(d.HasParseError()) << "frame is not JSON: " << frame;
+    ASSERT_TRUE(d.HasMember("type") && d["type"].IsString()) << frame;
+    const std::string type = d["type"].GetString();
+    if (type == "error") {
+      err = expectErrorFrame(frame);
+      sawError = true;
+    } else if (type == "subscribed" && d.HasMember("key") && d["key"].IsInt()
+               && d["key"].GetInt() == 6) {
+      sawAckFor6 = true;
+    }
+  }
+
+  ASSERT_TRUE(sawError) << "expected an error frame for the Pack-terminal request";
+  EXPECT_EQ(err.where, "build")
+      << "the reject is thrown from buildForRequest and caught by the 'build' "
+         "catch; got where=" << err.where;
+
+  // The point of the ticket.
+  EXPECT_TRUE(err.hasKey)
+      << "the error frame carries no request key, so the rejection cannot be "
+         "attributed to a subscription (ENC-1396); frame said where=" << err.where
+      << " message=" << err.message;
+  EXPECT_EQ(err.key, 7)
+      << "the error must name the request that FAILED (7), not the one that "
+         "succeeded (6); got key=" << err.key;
+  EXPECT_FALSE(err.hasRequestId)
+      << "an int-keyed subscription renders `key`, never `requestId`";
+
+  // And the batch is not refused wholesale: request 6 still subscribes.
+  EXPECT_TRUE(sawAckFor6)
+      << "the well-formed request in the same batch must still be acked — "
+         "otherwise this test would also pass if the whole batch were refused";
+
+  beast::error_code ec;
+  stream.close(ws::close_code::normal, ec);
+}
+
+// The string-keyed half: the same rejection on an `id`-carrying request must
+// render `requestId`, not `key`. Without this the fix could hardcode `key` and
+// still pass the test above, leaving embassy — which reads `requestId` — exactly
+// as blind as before (ENC-1387 wired its onError to this frame shape).
+TEST(ClientSessionTest, BuildErrorOnStringIdRequestNamesRequestId) {
+  ServerHarness srv;
+  asio::io_context clientIoc;
+  auto stream = connect(clientIoc, srv.port());
+
+  std::string req =
+    R"({"type":"subscribe","requests":[)"
+    R"({"id":"r-AAPL-packed","streamKey":"AAPL","field":"lastPrice",)"
+    R"("pipeline":[{"type":"Pack","fields":{)"
+    R"("ask":{"type":"Listener","streamKey":"AAPL","field":"ask"},)"
+    R"("bid":{"type":"Listener","streamKey":"AAPL","field":"bid"}}}]}]})";
+  stream.write(asio::buffer(req));
+
+  auto frame = readFrameBounded(stream, std::chrono::seconds(2));
+  ASSERT_FALSE(frame.empty()) << "expected an error frame; got nothing";
+  auto err = expectErrorFrame(frame);
+  EXPECT_EQ(err.where, "build") << "got where=" << err.where;
+  EXPECT_TRUE(err.hasRequestId)
+      << "a string-keyed subscription must render `requestId` on the error frame "
+         "(ENC-1396); message=" << err.message;
+  EXPECT_EQ(err.requestId, "r-AAPL-packed");
+  EXPECT_FALSE(err.hasKey)
+      << "a string-keyed subscription renders `requestId`, never `key`";
+
+  beast::error_code ec;
+  stream.close(ws::close_code::normal, ec);
+}
+
+// The negative half of the contract: a CONNECTION-level failure has no request
+// to name and must keep the original three-key shape. Without this row the fix
+// could attach a key unconditionally (defaulting to 0 / ""), which would be
+// worse than the defect — a client would attribute a parse failure to request 0.
+TEST(ClientSessionTest, ConnectionLevelErrorsCarryNoRequestKey) {
+  ServerHarness srv;
+  asio::io_context clientIoc;
+  auto stream = connect(clientIoc, srv.port());
+
+  // (a) not JSON at all -> where="parse"
+  stream.write(asio::buffer(std::string("{not json")));
+  auto f1 = readFrameBounded(stream, std::chrono::seconds(2));
+  ASSERT_FALSE(f1.empty());
+  auto e1 = expectErrorFrame(f1);
+  EXPECT_EQ(e1.where, "parse");
+  EXPECT_FALSE(e1.hasKey)      << "a parse failure has no request to attribute to";
+  EXPECT_FALSE(e1.hasRequestId) << "a parse failure has no request to attribute to";
+
+  // (b) a per-request reject that fires BEFORE a key is parsed. The ticket's
+  // enumeration put these in the "key available" group; they are not — the key
+  // is precisely what is missing, so they stay keyless.
+  stream.write(asio::buffer(std::string(
+    R"({"type":"subscribe","requests":[{"streamKey":"AAPL","field":"lastPrice"}]})")));
+  auto f2 = readFrameBounded(stream, std::chrono::seconds(2));
+  ASSERT_FALSE(f2.empty());
+  auto e2 = expectErrorFrame(f2);
+  EXPECT_EQ(e2.where, "subscribe");
+  EXPECT_NE(e2.message.find("missing valid"), std::string::npos)
+      << "expected the no-valid-key reject; got: " << e2.message;
+  EXPECT_FALSE(e2.hasKey)
+      << "this reject fires because there IS no valid key — it cannot name one";
+  EXPECT_FALSE(e2.hasRequestId)
+      << "this reject fires because there IS no valid key — it cannot name one";
 
   beast::error_code ec;
   stream.close(ws::close_code::normal, ec);
