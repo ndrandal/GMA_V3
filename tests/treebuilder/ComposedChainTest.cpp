@@ -1645,7 +1645,16 @@ TEST_F(ComposedChain, AFanInUnderATimerChildIsAccepted) {
 // but that is a different defect — it discards with no fan-in involved — and
 // deliberately is NOT widened into here. If a future ticket makes a `Ref` as a
 // pipeline stage an error, it will be its own rule and this test says so.
-TEST_F(ComposedChain, ARefStageIsNotAFanInAndIsNotRefusedByThisRule) {
+// AMENDED BY ENC-1398, AND THE AMENDMENT IS THE POINT. This row was written to
+// say "a Ref at pipeline[0] under a `node` fails as an UNKNOWN BINDING, not as a
+// fan-in placement". It still passes, but no longer for that reason: that shape
+// has the `node` subtree built directly upstream of the Ref, so ENC-1398's rule
+// refuses it FIRST, before any binding lookup happens. Left asserting only the
+// absence of "FAN-IN", the row would have kept passing while the behaviour it was
+// written to pin had been displaced — a green that means nothing. So it now
+// asserts the reason it actually passes for, and the unknown-binding path it used
+// to cover moved to its own row below, on a shape ENC-1398 does not touch.
+TEST_F(ComposedChain, ARefStageWithUpstreamIsRefusedAsAPlacementNotAsAFanIn) {
   const std::string msg = buildAndReportJson(R"({
     "key":1,"streamKey":"AAPL","field":"lastPrice",
     "node":{"type":"Worker","fn":"last"},
@@ -1653,8 +1662,34 @@ TEST_F(ComposedChain, ARefStageIsNotAFanInAndIsNotRefusedByThisRule) {
   })", deps_);
   ASSERT_FALSE(msg.empty()) << "a Ref outside a Let is a build error already";
   EXPECT_EQ(msg.find("FAN-IN"), std::string::npos)
-      << "a `Ref` must fail as an unknown binding, not as a fan-in placement: "
-      << msg;
+      << "a `Ref` joins nothing and must never be described as a fan-in: " << msg;
+  // What it IS now: ENC-1398's placement refusal, because the `node` subtree is
+  // built directly upstream of pipeline[0].
+  EXPECT_NE(msg.find("'Ref'"), std::string::npos) << msg;
+  EXPECT_NE(msg.find("DISCARDED"), std::string::npos)
+      << "this is the ENC-1398 placement refusal, which says the upstream value "
+         "is discarded: " << msg;
+  EXPECT_NE(msg.find("ENC-1398"), std::string::npos) << msg;
+}
+
+// The coverage ENC-1398 displaced above, on a shape its rule does not reach: a
+// `Ref` naming a binding that does not exist, with NO upstream (pipeline[0] of a
+// request with no `node`, so its only upstream is the head Listener — a clock).
+// The builder's own unknown-binding error must still be what fires here.
+TEST_F(ComposedChain, ARefNamingAnUnknownBindingStillFailsAsAnUnknownBinding) {
+  const std::string msg = buildAndReportJson(R"({
+    "key":1,"streamKey":"AAPL","field":"lastPrice",
+    "pipeline":[{"type":"Ref","name":"nope"}]
+  })", deps_);
+  ASSERT_FALSE(msg.empty()) << "a Ref outside a Let is a build error";
+  EXPECT_EQ(msg.find("FAN-IN"), std::string::npos)
+      << "still not a fan-in: " << msg;
+  // And NOT ENC-1398's refusal — there is nothing upstream of this Ref to
+  // discard, so the rule must stay out of the way and let the real error through.
+  EXPECT_EQ(msg.find("DISCARDED"), std::string::npos)
+      << "ENC-1398's placement rule must NOT fire here — this Ref has no "
+         "upstream, and swallowing the unknown-binding error would hide the "
+         "author's actual mistake: " << msg;
 }
 
 } // namespace
