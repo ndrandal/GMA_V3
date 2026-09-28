@@ -525,7 +525,13 @@ bool isFanInType(const std::string& type) {
 // nested culprit reports `pipeline[0].stages[0]` rather than `pipeline[0]` —
 // naming the stage and not the wrapper is half the diagnosis.
 struct FanInPlacement {
-  std::string type;     // "Aggregate" | "Pack" | "Let"
+  // "Aggregate" | "Pack" | "Let" — or "Ref" (ENC-1398). The first three DISCARD
+  // an upstream value by handing it to a `CompositeRoot`; a `Ref` discards it
+  // because its head is a `RefStub` whose `onValue` is a no-op. Same condition,
+  // same traversal, different mechanism — and deliberately NOT folded into
+  // `isFanInType`, which would make the message say "fan-in" about a node that
+  // joins nothing.
+  std::string type;
   std::string path;     // "pipeline[1]", "node.stages[1]", "pipeline[0].outputs[0]"
   std::string reason;   // what is built upstream of it, in words
 };
@@ -556,6 +562,48 @@ bool findFanInWithUpstream(const rapidjson::Value& spec,
                            const std::string& p, const std::string& r) {
     return findFanInWithUpstream(child, up, p, r, depth + 1, out);
   };
+
+  // ENC-1398 — a `Ref` reached FROM upstream drops that value in silence.
+  //
+  // `Ref` has no local upstream by design: its binding's producer feeds the
+  // Ref's DOWNSTREAM directly via a `Tee`, and the builder returns a `RefStub`
+  // whose `onValue` is an empty no-op purely to satisfy "every buildOne returns
+  // an INode". That is correct where a `Ref` is a join member or a chain HEAD.
+  // Put one where it does receive an upstream value and the value is discarded
+  // with no log, no metric and no error.
+  //
+  // MEASURED, not assumed (the ticket's "establish first"):
+  //   * `Let{bindings:{p:Listener}, body:Chain{stages:[Expr{value*10}, Ref{p}]}}`
+  //     builds today with no refusal, and on one price=4 event the terminal
+  //     receives **4, not 40** — the Expr's output went into `RefStub::onValue`
+  //     and the binding's own `Tee` delivered the raw value in its place. So the
+  //     symptom is a PLAUSIBLE WRONG NUMBER, not a missing one, which is why it
+  //     has to be a build-time refusal and not a warning.
+  //   * Corpus: invisible. 0 of 272 entries contain `Chain`, `Tee`, `Switch`,
+  //     `GroupSplit`, `Ref` or `Let` at all.
+  //   * forum: REACHABLE, contrary to this ticket's premise that it is
+  //     forum-invisible. `translateStage`
+  //     (`forum/internal/pipelinetranslate/config_mapping.go`) does carry
+  //     `case "let"`, `case "ref"` and `case "switch"`, and `Let.body` /
+  //     `Switch.cases` are passed through by `requireRaw` **unvalidated**, so
+  //     the whole node vocabulary reaches GMA through them — `Chain` included,
+  //     despite there being no `case "chain"`. The absence of a case label is
+  //     not the absence of a path.
+  //
+  // WHY REFUSE RATHER THAN FORWARD. Forwarding `RefStub::onValue` to the Ref's
+  // downstream would DOUBLE-DELIVER: the binding's `Tee` already delivers there,
+  // so the terminal would see both 4 and 40 and nothing decides which is meant.
+  // Refusal is the conservative move and matches the two rulings next door
+  // (ENC-1336, ENC-1344).
+  if (type == "Ref") {
+    if (hasUpstream) {
+      out->type   = "Ref";
+      out->path   = path;
+      out->reason = reason;
+      return true;
+    }
+    return false;   // the accepted placement: a join member, or a chain head
+  }
 
   if (isFanInType(type)) {
     if (hasUpstream) {
@@ -685,12 +733,45 @@ std::string fanInPipelineStageMessage(const FanInPlacement& f,
   const std::string nested =
     (f.path == stagePath)
       ? std::string()
-      : " NOTE: the fan-in is NOT the stage itself — it sits inside it at the"
+      : std::string(" NOTE: the ") + (type == "Ref" ? "'Ref'" : "fan-in") +
+        " is NOT the stage itself — it sits inside it at the"
         " path above. 'Chain' returns its FIRST stage's head verbatim, and"
         " 'Tee', 'Switch' and 'GroupSplit' forward each incoming value into"
-        " every branch, so wrapping a fan-in in one of them does not put"
-        " anything between the upstream and the fan-in; it only hides it"
+        " every branch, so wrapping it in one of them does not put"
+        " anything between the upstream and it; it only hides it"
         " (ENC-1344).";
+
+  // ENC-1398 — a `Ref` is not a fan-in and must not be described as one. It
+  // joins nothing; it DISCARDS, because its head is a `RefStub` whose `onValue`
+  // is a no-op. The failure is also worse than the fan-in's: the binding's own
+  // `Tee` delivers the raw bound value to the Ref's downstream in place of the
+  // upstream's, so the terminal receives a PLAUSIBLE WRONG NUMBER rather than
+  // nothing at all.
+  if (type == "Ref") {
+    return "buildForRequest: node type 'Ref' appears as " + where + " of this"
+           " request with something upstream of it in the composed chain: " +
+           because + ". That is rejected at build time. A 'Ref' has no local"
+           " upstream by design — the binding it names is produced elsewhere and"
+           " fed to this Ref's DOWNSTREAM directly, so the Ref's own head is a"
+           " no-op stub. A value arriving from upstream is therefore DISCARDED"
+           " with no log, no metric and no error, and because the binding keeps"
+           " delivering its own value to the same downstream, the terminal"
+           " receives a PLAUSIBLE WRONG NUMBER rather than nothing: measured on"
+           " Let{bindings:{p:Listener}, body:Chain{stages:[Expr{value*10},"
+           " Ref{p}]}}, one price=4 event yields 4 at the terminal, not 40 —"
+           " the Expr's output vanishes silently. THE FIX: a 'Ref' belongs where"
+           " it has no upstream — as stages[0] of a 'Chain', as a branch head"
+           " under 'Tee'/'Switch'/'GroupSplit', or as a declared input of a"
+           " fan-in, which are the placements that make named reuse work. If you"
+           " meant to transform the bound value, put the transform AFTER the Ref"
+           " (Chain{stages:[Ref{p}, Expr{...}]}), not before it. Forwarding the"
+           " upstream instead of refusing was considered and rejected: the"
+           " binding's own fan-out already delivers to this downstream, so"
+           " forwarding would DOUBLE-DELIVER and nothing decides which value is"
+           " meant. See specs/2026-09-20-gma-join-correctness/SPEC.md section 5"
+           " Q7; found by ENC-1344's builder enumeration, filed as ENC-1398." +
+           nested;
+  }
 
   return "buildForRequest: node type '" + type + "' is a FAN-IN and it appears"
          " as " + where + " of this request, with something upstream of it in"
