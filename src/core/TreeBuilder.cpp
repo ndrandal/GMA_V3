@@ -733,12 +733,45 @@ std::string fanInPipelineStageMessage(const FanInPlacement& f,
   const std::string nested =
     (f.path == stagePath)
       ? std::string()
-      : " NOTE: the fan-in is NOT the stage itself — it sits inside it at the"
+      : std::string(" NOTE: the ") + (type == "Ref" ? "'Ref'" : "fan-in") +
+        " is NOT the stage itself — it sits inside it at the"
         " path above. 'Chain' returns its FIRST stage's head verbatim, and"
         " 'Tee', 'Switch' and 'GroupSplit' forward each incoming value into"
-        " every branch, so wrapping a fan-in in one of them does not put"
-        " anything between the upstream and the fan-in; it only hides it"
+        " every branch, so wrapping it in one of them does not put"
+        " anything between the upstream and it; it only hides it"
         " (ENC-1344).";
+
+  // ENC-1398 — a `Ref` is not a fan-in and must not be described as one. It
+  // joins nothing; it DISCARDS, because its head is a `RefStub` whose `onValue`
+  // is a no-op. The failure is also worse than the fan-in's: the binding's own
+  // `Tee` delivers the raw bound value to the Ref's downstream in place of the
+  // upstream's, so the terminal receives a PLAUSIBLE WRONG NUMBER rather than
+  // nothing at all.
+  if (type == "Ref") {
+    return "buildForRequest: node type 'Ref' appears as " + where + " of this"
+           " request with something upstream of it in the composed chain: " +
+           because + ". That is rejected at build time. A 'Ref' has no local"
+           " upstream by design — the binding it names is produced elsewhere and"
+           " fed to this Ref's DOWNSTREAM directly, so the Ref's own head is a"
+           " no-op stub. A value arriving from upstream is therefore DISCARDED"
+           " with no log, no metric and no error, and because the binding keeps"
+           " delivering its own value to the same downstream, the terminal"
+           " receives a PLAUSIBLE WRONG NUMBER rather than nothing: measured on"
+           " Let{bindings:{p:Listener}, body:Chain{stages:[Expr{value*10},"
+           " Ref{p}]}}, one price=4 event yields 4 at the terminal, not 40 —"
+           " the Expr's output vanishes silently. THE FIX: a 'Ref' belongs where"
+           " it has no upstream — as stages[0] of a 'Chain', as a branch head"
+           " under 'Tee'/'Switch'/'GroupSplit', or as a declared input of a"
+           " fan-in, which are the placements that make named reuse work. If you"
+           " meant to transform the bound value, put the transform AFTER the Ref"
+           " (Chain{stages:[Ref{p}, Expr{...}]}), not before it. Forwarding the"
+           " upstream instead of refusing was considered and rejected: the"
+           " binding's own fan-out already delivers to this downstream, so"
+           " forwarding would DOUBLE-DELIVER and nothing decides which value is"
+           " meant. See specs/2026-09-20-gma-join-correctness/SPEC.md section 5"
+           " Q7; found by ENC-1344's builder enumeration, filed as ENC-1398." +
+           nested;
+  }
 
   return "buildForRequest: node type '" + type + "' is a FAN-IN and it appears"
          " as " + where + " of this request, with something upstream of it in"
