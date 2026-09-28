@@ -1658,3 +1658,151 @@ TEST_F(ComposedChain, ARefStageIsNotAFanInAndIsNotRefusedByThisRule) {
 }
 
 } // namespace
+
+// ===========================================================================
+// ENC-1398 — a `Ref` reached FROM upstream drops that value in silence.
+//
+// Same condition as ENC-1344's fan-in rule, different mechanism: a fan-in hands
+// the upstream value to a `CompositeRoot`; a `Ref`'s head is a `RefStub` whose
+// `onValue` is an empty no-op. ENC-1344 found this as a by-product of its
+// 19-type enumeration and deliberately did not widen into it.
+//
+// REACHABILITY, MEASURED (the ticket's "establish first"):
+//   * Corpus: invisible — 0 of 272 entries contain Chain/Tee/Switch/GroupSplit/
+//     Ref/Let at all.
+//   * forum: REACHABLE, contrary to the ticket's premise. `translateStage` in
+//     forum/internal/pipelinetranslate/config_mapping.go carries `case "let"`,
+//     `case "ref"` and `case "switch"`, and `Let.body` / `Switch.cases` go
+//     through `requireRaw` UNVALIDATED — so the whole node vocabulary reaches
+//     GMA through them, `Chain` included, despite there being no `case "chain"`.
+//   * The symptom is a plausible WRONG NUMBER, not a missing value: before this
+//     rule, Let{bindings:{p:Listener}, body:Chain{stages:[Expr{value*10},
+//     Ref{p}]}} built, and one price=4 event delivered 4 to the terminal rather
+//     than 40, because the binding's own Tee supplied the raw value in place of
+//     the Expr's discarded output.
+// ===========================================================================
+
+// The defect shape. Goes red if the refusal is removed.
+TEST(ComposedChainTest, RefWithUpstreamIsRefused) {
+  Rig rig;
+  auto rq = parse(R"({
+    "streamKey":"SYM","field":"price",
+    "pipeline":[{
+      "type":"Let",
+      "bindings":{ "p":{"type":"Listener","streamKey":"SYM","field":"price"} },
+      "body":{"type":"Chain","stages":[
+        {"type":"Expr","expr":{"op":"mul","args":[{"ref":"value"},10]}},
+        {"type":"Ref","name":"p"}
+      ]}
+    }]
+  })");
+
+  try {
+    (void)gma::tree::buildForRequest(rq, rig.deps, rig.terminal);
+    FAIL() << "a 'Ref' with a value-producing node built directly upstream of it "
+              "must be refused at build time (ENC-1398): unrefused, the Expr's "
+              "output is discarded by RefStub::onValue and the binding's own Tee "
+              "delivers the raw value instead, so the terminal gets 4 not 40";
+  } catch (const std::exception& ex) {
+    const std::string msg = ex.what();
+    EXPECT_NE(msg.find("'Ref'"), std::string::npos)
+        << "the message must name the node type; got: " << msg;
+    // It must NOT claim to be a fan-in — a Ref joins nothing, and saying so
+    // would send the reader looking for declared inputs that do not exist.
+    EXPECT_EQ(msg.find("is a FAN-IN"), std::string::npos)
+        << "a 'Ref' is not a fan-in and must not be described as one; got: " << msg;
+    EXPECT_NE(msg.find("DISCARDED"), std::string::npos)
+        << "the message must say the value is discarded; got: " << msg;
+    // The path names the stage inside the wrapper, not the wrapper (ENC-1344's
+    // shape): .body.stages[1], not pipeline[0].
+    EXPECT_NE(msg.find("stages[1]"), std::string::npos)
+        << "the message must name the Ref's own path, not the wrapper's; got: " << msg;
+  }
+}
+
+// The accept direction, and it is the half that matters: every placement where a
+// `Ref` legitimately has no upstream must still build. Without these four rows
+// the test above would be equally satisfied by refusing every request that
+// contains a `Ref` at all, which would break named reuse outright.
+TEST(ComposedChainTest, EveryAcceptedRefPlacementStillBuilds) {
+  // (a) `Ref` as stages[0] of a Chain — a chain HEAD has no upstream. This is
+  //     the shape ExpressionLanguageCapstoneTest.LetBindingReusedByTwoExpressions
+  //     writes down, reached here through a fan-in's declared inputs.
+  {
+    Rig rig;
+    auto rq = parse(R"({
+      "streamKey":"SYM","field":"price",
+      "node":{
+        "type":"Let",
+        "bindings":{ "p":{"type":"Listener","streamKey":"SYM","field":"price"} },
+        "body":{
+          "type":"Aggregate","arity":2,
+          "inputs":[
+            {"type":"Chain","stages":[{"type":"Ref","name":"p"},
+              {"type":"Expr","expr":{"op":"mul","args":[{"ref":"value"},10]}}]},
+            {"type":"Chain","stages":[{"type":"Ref","name":"p"},
+              {"type":"Expr","expr":{"op":"add","args":[{"ref":"value"},1]}}]}
+          ]
+        }
+      }
+    })");
+    EXPECT_NO_THROW((void)gma::tree::buildForRequest(rq, rig.deps, rig.terminal))
+        << "a Ref as stages[0] of a Chain has no upstream and must still build";
+  }
+
+  // (b) `Ref` as the whole `Let` body — its only upstream is the head Listener,
+  //     which SPEC section 5 Q1 rules is a CLOCK and not a data source.
+  {
+    Rig rig;
+    auto rq = parse(R"({
+      "streamKey":"SYM","field":"price",
+      "node":{
+        "type":"Let",
+        "bindings":{ "p":{"type":"Listener","streamKey":"SYM","field":"price"} },
+        "body":{"type":"Ref","name":"p"}
+      }
+    })");
+    EXPECT_NO_THROW((void)gma::tree::buildForRequest(rq, rig.deps, rig.terminal))
+        << "a Ref as the Let body is clocked, not fed — it must still build";
+  }
+
+  // (c) `Ref` as a branch head under `Tee` — Tee fans the SAME incoming value
+  //     into every branch, so each branch inherits the Tee's own disposition,
+  //     which here is clock-only.
+  {
+    Rig rig;
+    auto rq = parse(R"({
+      "streamKey":"SYM","field":"price",
+      "node":{
+        "type":"Let",
+        "bindings":{ "p":{"type":"Listener","streamKey":"SYM","field":"price"} },
+        "body":{"type":"Tee","outputs":[
+          {"type":"Ref","name":"p"},
+          {"type":"Expr","expr":{"op":"add","args":[{"ref":"value"},1]}}
+        ]}
+      }
+    })");
+    EXPECT_NO_THROW((void)gma::tree::buildForRequest(rq, rig.deps, rig.terminal))
+        << "a Ref as a Tee branch head has no upstream and must still build";
+  }
+
+  // (d) the transform written the RIGHT way round — Ref first, then the Expr.
+  //     This is what the refusal's message tells the author to do, so it has to
+  //     actually build.
+  {
+    Rig rig;
+    auto rq = parse(R"({
+      "streamKey":"SYM","field":"price",
+      "pipeline":[{
+        "type":"Let",
+        "bindings":{ "p":{"type":"Listener","streamKey":"SYM","field":"price"} },
+        "body":{"type":"Chain","stages":[
+          {"type":"Ref","name":"p"},
+          {"type":"Expr","expr":{"op":"mul","args":[{"ref":"value"},10]}}
+        ]}
+      }]
+    })");
+    EXPECT_NO_THROW((void)gma::tree::buildForRequest(rq, rig.deps, rig.terminal))
+        << "Chain{[Ref, Expr]} is the fix the refusal message names — it must build";
+  }
+}
