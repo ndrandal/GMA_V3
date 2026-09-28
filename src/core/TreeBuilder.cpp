@@ -525,7 +525,13 @@ bool isFanInType(const std::string& type) {
 // nested culprit reports `pipeline[0].stages[0]` rather than `pipeline[0]` —
 // naming the stage and not the wrapper is half the diagnosis.
 struct FanInPlacement {
-  std::string type;     // "Aggregate" | "Pack" | "Let"
+  // "Aggregate" | "Pack" | "Let" — or "Ref" (ENC-1398). The first three DISCARD
+  // an upstream value by handing it to a `CompositeRoot`; a `Ref` discards it
+  // because its head is a `RefStub` whose `onValue` is a no-op. Same condition,
+  // same traversal, different mechanism — and deliberately NOT folded into
+  // `isFanInType`, which would make the message say "fan-in" about a node that
+  // joins nothing.
+  std::string type;
   std::string path;     // "pipeline[1]", "node.stages[1]", "pipeline[0].outputs[0]"
   std::string reason;   // what is built upstream of it, in words
 };
@@ -556,6 +562,48 @@ bool findFanInWithUpstream(const rapidjson::Value& spec,
                            const std::string& p, const std::string& r) {
     return findFanInWithUpstream(child, up, p, r, depth + 1, out);
   };
+
+  // ENC-1398 — a `Ref` reached FROM upstream drops that value in silence.
+  //
+  // `Ref` has no local upstream by design: its binding's producer feeds the
+  // Ref's DOWNSTREAM directly via a `Tee`, and the builder returns a `RefStub`
+  // whose `onValue` is an empty no-op purely to satisfy "every buildOne returns
+  // an INode". That is correct where a `Ref` is a join member or a chain HEAD.
+  // Put one where it does receive an upstream value and the value is discarded
+  // with no log, no metric and no error.
+  //
+  // MEASURED, not assumed (the ticket's "establish first"):
+  //   * `Let{bindings:{p:Listener}, body:Chain{stages:[Expr{value*10}, Ref{p}]}}`
+  //     builds today with no refusal, and on one price=4 event the terminal
+  //     receives **4, not 40** — the Expr's output went into `RefStub::onValue`
+  //     and the binding's own `Tee` delivered the raw value in its place. So the
+  //     symptom is a PLAUSIBLE WRONG NUMBER, not a missing one, which is why it
+  //     has to be a build-time refusal and not a warning.
+  //   * Corpus: invisible. 0 of 272 entries contain `Chain`, `Tee`, `Switch`,
+  //     `GroupSplit`, `Ref` or `Let` at all.
+  //   * forum: REACHABLE, contrary to this ticket's premise that it is
+  //     forum-invisible. `translateStage`
+  //     (`forum/internal/pipelinetranslate/config_mapping.go`) does carry
+  //     `case "let"`, `case "ref"` and `case "switch"`, and `Let.body` /
+  //     `Switch.cases` are passed through by `requireRaw` **unvalidated**, so
+  //     the whole node vocabulary reaches GMA through them — `Chain` included,
+  //     despite there being no `case "chain"`. The absence of a case label is
+  //     not the absence of a path.
+  //
+  // WHY REFUSE RATHER THAN FORWARD. Forwarding `RefStub::onValue` to the Ref's
+  // downstream would DOUBLE-DELIVER: the binding's `Tee` already delivers there,
+  // so the terminal would see both 4 and 40 and nothing decides which is meant.
+  // Refusal is the conservative move and matches the two rulings next door
+  // (ENC-1336, ENC-1344).
+  if (type == "Ref") {
+    if (hasUpstream) {
+      out->type   = "Ref";
+      out->path   = path;
+      out->reason = reason;
+      return true;
+    }
+    return false;   // the accepted placement: a join member, or a chain head
+  }
 
   if (isFanInType(type)) {
     if (hasUpstream) {
