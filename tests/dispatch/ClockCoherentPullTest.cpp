@@ -95,6 +95,8 @@
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
 #include <rapidjson/istreamwrapper.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 #include <cmath>
 #include <fstream>
@@ -212,7 +214,7 @@ enum class Mode {
   BlockedPool,     // deterministic: every clock is queued before any runs
 };
 
-struct Run {
+struct DriveResult {
   std::vector<double>              emitted;
   std::vector<std::optional<double>> storeAfterEachTick;  // the per-tick truth
   std::size_t                      nonNumeric{0};
@@ -224,13 +226,13 @@ struct Run {
 // the ingress thread immediately after each tick. That read is the independent
 // oracle: it is what the store held when the tick's clock was produced, and it
 // never passes through the DAG at all.
-Run drive(const rapidjson::Value& request,
+DriveResult drive(const rapidjson::Value& request,
           const std::vector<std::string>& symbols,
           std::size_t ticks,
           unsigned threads,
           Mode mode,
           std::pair<std::string, std::string> probe = {}) {
-  Run out;
+  DriveResult out;
   AtomicStore store;
   auto pool = std::make_shared<rt::ThreadPool>(threads);
   auto prevGlobalPool = gThreadPool;
@@ -294,7 +296,7 @@ Run drive(const rapidjson::Value& request,
 
 // The truth as a plain sequence: the store's value at each tick, with the ticks
 // that had no value at all omitted — those must produce no arrival.
-std::vector<double> truthSequence(const Run& r) {
+std::vector<double> truthSequence(const DriveResult& r) {
   std::vector<double> out;
   for (const auto& v : r.storeAfterEachTick) if (v.has_value()) out.push_back(*v);
   return out;
@@ -381,7 +383,7 @@ TEST(ClockCoherentPull, PerTickTruthIsReadFromTheStoreAndIsStableAcrossRuns) {
 
   std::vector<double> first;
   for (int rep = 0; rep < 5; ++rep) {
-    Run r = drive(*req, kAAPL, kTicks, /*threads=*/1, Mode::DrainEachTick, kProbe51);
+    DriveResult r = drive(*req, kAAPL, kTicks, /*threads=*/1, Mode::DrainEachTick, kProbe51);
     ASSERT_FALSE(r.threw) << r.error;
     ASSERT_EQ(r.storeAfterEachTick.size(), kTicks);
     const auto truth = truthSequence(r);
@@ -406,7 +408,7 @@ TEST(ClockCoherentPull, PerTickTruthIsReadFromTheStoreAndIsStableAcrossRuns) {
   std::set<long long> distinctFinite;
   for (const auto& v : {0}) { (void)v; }
   {
-    Run r = drive(*corpusRequest(kCorpus51), kAAPL, kTicks, 1,
+    DriveResult r = drive(*corpusRequest(kCorpus51), kAAPL, kTicks, 1,
                   Mode::DrainEachTick, kProbe51);
     for (const auto& v : r.storeAfterEachTick) {
       if (!v.has_value())          ++absent;
@@ -445,11 +447,11 @@ TEST(ClockCoherentPull, EveryClockQueuedBeforeAnyRuns_StillCarriesItsOwnTicksSam
   const rapidjson::Value* req = corpusRequest(kCorpus51);
   ASSERT_NE(req, nullptr) << gma::testsupport::corpusNotFoundDiagnostic();
 
-  Run oracle = drive(*req, kAAPL, kTicks, 1, Mode::DrainEachTick, kProbe51);
+  DriveResult oracle = drive(*req, kAAPL, kTicks, 1, Mode::DrainEachTick, kProbe51);
   ASSERT_FALSE(oracle.threw) << oracle.error;
   const auto truth = truthSequence(oracle);
 
-  Run blocked = drive(*req, kAAPL, kTicks, 1, Mode::BlockedPool, kProbe51);
+  DriveResult blocked = drive(*req, kAAPL, kTicks, 1, Mode::BlockedPool, kProbe51);
   ASSERT_FALSE(blocked.threw) << blocked.error;
 
   // The store genuinely advanced while the deliveries sat in the queue.
@@ -504,7 +506,7 @@ TEST(ClockCoherentPull, LiveIngressSequenceEqualsThePerTickTruth) {
   const rapidjson::Value* req = corpusRequest(kCorpus51);
   ASSERT_NE(req, nullptr) << gma::testsupport::corpusNotFoundDiagnostic();
 
-  Run oracle = drive(*req, kAAPL, kTicks, 1, Mode::DrainEachTick, kProbe51);
+  DriveResult oracle = drive(*req, kAAPL, kTicks, 1, Mode::DrainEachTick, kProbe51);
   ASSERT_FALSE(oracle.threw) << oracle.error;
   const auto truth = truthSequence(oracle);
   ASSERT_GE(truth.size(), 2u);
@@ -512,7 +514,7 @@ TEST(ClockCoherentPull, LiveIngressSequenceEqualsThePerTickTruth) {
   constexpr int kReps = 4;
   for (unsigned threads : {1u, 2u, 4u}) {
     for (int rep = 0; rep < kReps; ++rep) {
-      Run live = drive(*req, kAAPL, kTicks, threads, Mode::LiveBurst, kProbe51);
+      DriveResult live = drive(*req, kAAPL, kTicks, threads, Mode::LiveBurst, kProbe51);
       ASSERT_FALSE(live.threw) << live.error;
       EXPECT_TRUE(sameSequence(live.emitted, truth))
           << "threads=" << threads << " rep=" << rep
@@ -545,13 +547,13 @@ TEST(ClockCoherentPull, PullOnlyFanInSamplesBothPortsAsOfOneClockTick) {
   const rapidjson::Value* req = corpusRequest(111);
   ASSERT_NE(req, nullptr) << gma::testsupport::corpusNotFoundDiagnostic();
 
-  Run oracle = drive(*req, requestStreamKeys(*req), kTicks, 1, Mode::DrainEachTick);
+  DriveResult oracle = drive(*req, requestStreamKeys(*req), kTicks, 1, Mode::DrainEachTick);
   ASSERT_FALSE(oracle.threw) << oracle.error;
   ASSERT_FALSE(oracle.emitted.empty())
       << "corpus 111's pull-only join must EMIT — ENC-1290 clocked it into "
          "life, and if it is silent this test is measuring nothing";
 
-  Run blocked = drive(*req, requestStreamKeys(*req), kTicks, 1, Mode::BlockedPool);
+  DriveResult blocked = drive(*req, requestStreamKeys(*req), kTicks, 1, Mode::BlockedPool);
   ASSERT_FALSE(blocked.threw) << blocked.error;
   EXPECT_TRUE(sameSequence(blocked.emitted, oracle.emitted))
       << "every clock was queued before any delivery ran, so both ports must "
@@ -662,10 +664,10 @@ TEST(ClockCoherentPull, NoCorpusEntryEmitsADifferentSequenceUnderLiveIngress) {
     const auto syms = requestStreamKeys(r);
     if (syms.empty()) continue;
 
-    Run a = drive(r, syms, kSweepTicks, 1, Mode::DrainEachTick);
+    DriveResult a = drive(r, syms, kSweepTicks, 1, Mode::DrainEachTick);
     if (a.threw) { ++refused; continue; }
     ++built;
-    Run b = drive(r, syms, kSweepTicks, 1, Mode::LiveBurst);
+    DriveResult b = drive(r, syms, kSweepTicks, 1, Mode::LiveBurst);
     ASSERT_FALSE(b.threw) << "corpus " << id << " built once and threw once: "
                           << b.error;
     ++checked;
