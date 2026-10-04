@@ -847,7 +847,17 @@ class CompositeRoot final : public gma::INode {
 public:
   CompositeRoot(std::vector<std::shared_ptr<gma::INode>> roots,
                 std::vector<std::weak_ptr<gma::INode>>   clockTargets)
-    : roots_(std::move(roots)), clockTargets_(std::move(clockTargets)) {}
+    : roots_(std::move(roots)), clockTargets_(std::move(clockTargets)) {
+    // ENC-1335. Decided once, at construction, while every target is still
+    // held alive by `roots_` — the hot path must not walk weak_ptrs to answer
+    // a predicate. `clockTargets_` is immutable after construction, so the
+    // answer cannot go stale.
+    for (const auto& w : clockTargets_) {
+      if (auto t = w.lock()) {
+        if (t->samplesAtClock()) { anyTargetSamplesAtClock_ = true; break; }
+      }
+    }
+  }
 
   void onValue(const gma::StreamValue& sv) override {
     // The clock tick. Empty for every fan-in whose inputs are all Listeners
@@ -863,6 +873,51 @@ public:
     }
   }
 
+  // ENC-1335 — FORWARD THE BIND, BECAUSE THIS NODE IS A CLOCK HOP AND NOTHING
+  // ELSE.
+  //
+  // `onValue` above is a pure fan-out: it computes nothing, buffers nothing and
+  // drops nothing, so "sample as of this clock tick" means the same thing on
+  // either side of it. That is precisely the condition `INode::samplesAtClock`
+  // requires before a bind may be forwarded, and it is why a `Worker` or a
+  // `Filter` may NOT forward one.
+  //
+  // This is the 7 pull-only fan-ins (corpus ids 111-115, 192, 200), whose
+  // declared inputs are `AtomicAccessor`s and whose join ENC-1290 clocked into
+  // life for the first time. Without this they would read two ports' samples at
+  // two unrelated moments and join them — a mismatched tuple built out of the
+  // same race, in the one shape where the defect also corrupts the pairing.
+  //
+  // The 45 all-`Listener` fan-ins have an EMPTY `clockTargets_`, so
+  // `anyTargetSamplesAtClock_` is false and this whole path is unreachable for
+  // them; they keep `onValue` exactly as it is.
+  bool samplesAtClock() const noexcept override {
+    return anyTargetSamplesAtClock_;
+  }
+
+  std::function<void()> bindAtClock(const gma::StreamValue& sv) override {
+    if (stopping_.load(std::memory_order_acquire)) return {};
+    std::vector<std::function<void()>> steps;
+    steps.reserve(clockTargets_.size());
+    for (const auto& w : clockTargets_) {
+      auto t = w.lock();
+      if (!t) continue;
+      if (t->samplesAtClock()) {
+        // Bound NOW, on the clock's thread.
+        if (auto deliver = t->bindAtClock(sv)) steps.push_back(std::move(deliver));
+      } else {
+        // A push target keeps its deferred `onValue`: its value travels with
+        // it, so moving its compute onto the clock's thread would buy nothing
+        // and cost the ingress thread.
+        steps.push_back([t = std::move(t), sv]() { t->onValue(sv); });
+      }
+    }
+    if (steps.empty()) return {};
+    return [steps = std::move(steps)]() {
+      for (auto& s : steps) s();
+    };
+  }
+
   void shutdown() noexcept override {
     stopping_.store(true, std::memory_order_release);
     for (auto& r : roots_) {
@@ -874,6 +929,7 @@ public:
 private:
   std::vector<std::shared_ptr<gma::INode>>       roots_;         // lifecycle only
   const std::vector<std::weak_ptr<gma::INode>>   clockTargets_;  // the clock's fan-out
+  bool                                           anyTargetSamplesAtClock_{false};
   std::atomic<bool>                              stopping_{false};
 };
 
