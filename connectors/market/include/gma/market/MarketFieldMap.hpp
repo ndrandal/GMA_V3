@@ -24,12 +24,35 @@ struct MarketFieldMap {
   std::vector<std::string> volumeFields = {"volume", "vol", "qty", "size"};
 
   // Field names to try for best bid price (empty = not extracted).
-  std::vector<std::string> bidFields;
+  //
+  // ENC-1028: these defaulted EMPTY, which made the bid/ask scan in
+  // MarketTickComputer::compute run zero times for every source that did not
+  // explicitly configure `market.source.bidFields` — i.e. all of them. The
+  // canonical name goes first here for the same reason `lastPrice` leads
+  // priceFields: an upstream that has already normalised to GMA's vocabulary
+  // (the ITCH path now injects a book-derived `bid`/`ask` onto the tick —
+  // see WsFeedClient::dispatchEvent) must resolve without per-deployment
+  // config. Vendor aliases still go after it.
+  std::vector<std::string> bidFields  = {"bid"};
 
   // Field names to try for best ask price (empty = not extracted).
-  std::vector<std::string> askFields;
+  std::vector<std::string> askFields  = {"ask"};
 
-  // Field name for event timestamp in nanoseconds (empty = not extracted).
+  // Field name for event timestamp in NANOSECONDS SINCE THE UNIX EPOCH
+  // (empty = not extracted).
+  //
+  // This is the FALLBACK path, for a pre-aggregated source that carries its
+  // time inside the tick payload. The primary path is the typed
+  // Event::timestampNs, which MarketTickComputer prefers when it is non-zero;
+  // see the note there and on ItchAdapter::itchTimestampToEpochNs.
+  //
+  // Deliberately still EMPTY by default, and deliberately NOT defaulted to
+  // "timestamp". A field literally named `timestamp` is exactly what raw ITCH
+  // JSON calls its nanos-since-UTC-midnight value, so defaulting to that name
+  // would scoop up a value on a DIFFERENT BASIS and store it as though it were
+  // epoch nanos — a timestamp wrong by 54 years that still renders as a
+  // believable time of day. A payload-borne timestamp has to be opted into by
+  // a deployment that knows its source's basis.
   std::string timestampField;
 
   // Whether the full TA indicator suite runs on every tick.
