@@ -637,7 +637,7 @@ TEST(ClockCoherentPull, NoCorpusEntryEmitsADifferentSequenceUnderLiveIngress) {
   ASSERT_FALSE(doc.IsNull()) << gma::testsupport::corpusNotFoundDiagnostic();
   ASSERT_TRUE(doc.IsArray());
 
-  constexpr std::size_t kSweepTicks = 8;
+  constexpr std::size_t kSweepTicks = 30;
   std::size_t checked = 0, emitted = 0, timerDriven = 0, built = 0, refused = 0;
   // ANTI-VACUITY. An entry whose drained sequence is CONSTANT cannot tell two
   // sampling rules apart: a mistimed sample of an unchanging value is the same
