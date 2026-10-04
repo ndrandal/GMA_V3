@@ -421,3 +421,81 @@ TEST(SharedSubscriptionE2E, PreDedupRejectsKeepTheirRequestKey) {
   EXPECT_EQ(srv.reg().buildCount(), 0u)
       << "a request rejected before the build reached the registry";
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// 5. THE CORRECTNESS CLAIM, not the resource claim: a merged subscription
+//    delivers exactly what an unmerged one would.
+//
+//    This is the question "is dedup a correctness change?" asked directly. A
+//    LATE subscriber joins a DAG that has already been running and carrying
+//    values. What it must receive is exactly what its own freshly-built DAG
+//    would have delivered from that moment: every subsequent value, in order,
+//    and NOTHING from before it attached.
+//
+//    "Nothing from before" is the half that could have gone wrong and is the
+//    reason the sharing rule refuses an attach-sensitive tree. For the
+//    shareable class it holds structurally — `Dispatcher::registerListener`
+//    appends without replaying a last value, and no node on a shareable DAG
+//    accumulates across values — and this test is where that is observed
+//    rather than argued.
+// ───────────────────────────────────────────────────────────────────────────
+TEST(SharedSubscriptionE2E, ALateJoinerReceivesExactlyWhatAFreshDagWould) {
+  Harness srv;
+  Client a(srv.port());
+
+  a.send(subInt(1, "NVDA", "lastPrice"));
+  ASSERT_FALSE(a.readUntilType("subscribed", std::chrono::seconds(3)).empty());
+  ASSERT_EQ(srv.reg().buildCount(), 1u);
+
+  // Three values BEFORE the second subscriber exists.
+  const double before[] = {10.0, 11.0, 12.0};
+  for (double v : before) {
+    srv.dispatcher->notifyListeners("NVDA", "lastPrice", v);
+    const auto f = a.readUntilType("update", std::chrono::seconds(3));
+    ASSERT_FALSE(f.empty()) << "A missed pre-join value " << v;
+    EXPECT_DOUBLE_EQ(parse(f)["value"].GetDouble(), v);
+  }
+
+  // B joins the already-running DAG.
+  Client b(srv.port());
+  b.send(subStr("late", "NVDA", "lastPrice"));
+  ASSERT_FALSE(b.readUntilType("subscribed", std::chrono::seconds(3)).empty());
+  EXPECT_EQ(srv.reg().buildCount(), 1u) << "B built its own DAG";
+  EXPECT_EQ(srv.reg().shareCount(), 1u);
+
+  // Two more values. Both subscribers must see the SAME sequence, in order.
+  const double after[] = {13.0, 14.0};
+  for (double v : after) {
+    srv.dispatcher->notifyListeners("NVDA", "lastPrice", v);
+
+    const auto fa = a.readUntilType("update", std::chrono::seconds(3));
+    ASSERT_FALSE(fa.empty()) << "A missed post-join value " << v;
+    auto da = parse(fa);
+    EXPECT_DOUBLE_EQ(da["value"].GetDouble(), v);
+    EXPECT_EQ(da["key"].GetInt(), 1);
+
+    const auto fb = b.readUntilType("update", std::chrono::seconds(3));
+    ASSERT_FALSE(fb.empty()) << "B missed post-join value " << v;
+    auto db = parse(fb);
+    // The decisive assertion: B's FIRST frame is 13.0, not 10.0. A replay of
+    // the DAG's accumulated state — or any node holding a pre-join value —
+    // would surface here as B being handed a number it was never present for.
+    EXPECT_DOUBLE_EQ(db["value"].GetDouble(), v)
+        << "the late joiner received a value from before it attached, or the "
+           "sequences diverged. A merged subscription must deliver exactly "
+           "what an unmerged one would.";
+    EXPECT_STREQ(db["requestId"].GetString(), "late");
+    // Same value, same bucket identity — the two frames differ only in the
+    // request key they are addressed to.
+    EXPECT_EQ(da.HasMember("bucketStartMs"), db.HasMember("bucketStartMs"));
+    if (da.HasMember("bucketStartMs") && db.HasMember("bucketStartMs")) {
+      EXPECT_EQ(da["bucketStartMs"].GetInt64(), db["bucketStartMs"].GetInt64());
+    }
+  }
+
+  // And B never had a stale frame waiting: with both streams drained above,
+  // there is nothing further queued for it.
+  EXPECT_TRUE(b.readUntilType("update", std::chrono::milliseconds(300)).empty())
+      << "the late joiner had an extra update queued — it received more values "
+         "than its own DAG would have produced";
+}
