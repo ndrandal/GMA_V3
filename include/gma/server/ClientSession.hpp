@@ -24,6 +24,7 @@
 #include "gma/rt/Strand.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include "gma/server/RequestKey.hpp"
+#include "gma/server/SharedSubscriptionRegistry.hpp"
 
 namespace gma {
 namespace server {
@@ -281,11 +282,33 @@ private:
   // into each other.
   std::uint64_t nextSubId_{1};
 
+  // ENC-1041. One live subscription of this session, in exactly one of two
+  // ownership modes. The two used to be one mode and two maps (`active_` for
+  // the head, `chains_` for the keepAlive list); they are one struct now
+  // because the SHARED mode owns neither — it owns a lease, and tearing a
+  // shared subscription down by calling `shutdown()` on the head would stop a
+  // computation the other N-1 connections are still being fed from.
+  struct Subscription {
+    // SHARED: the DAG lives in `ExecutionContext::subscriptions()` and this
+    // session's only hold on it is this lease. Releasing it detaches this
+    // session's `Responder` and tears the DAG down iff this was the last
+    // subscriber. `head`/`keepAlive` stay empty.
+    gma::server::SharedSubscriptionRegistry::Lease lease;
+    // PRIVATE (lease invalid): this session exclusively owns the DAG, exactly
+    // as it did before dedup existed. Both are shut down on teardown — a
+    // head `shutdown()` does not propagate down a linear pipeline.
+    std::shared_ptr<INode>              head;
+    std::vector<std::shared_ptr<INode>> keepAlive;
+
+    bool shared() const noexcept { return lease.valid(); }
+    // Release this session's claim. Safe to call twice.
+    void teardown() noexcept;
+  };
+
   // Active requests for this session. Variant key supports both
   // smoke.js's int-keyed wire and embassy's string-id wire.
   std::mutex reqMu_;
-  std::unordered_map<gma::server::RequestKey, std::shared_ptr<INode>> active_;
-  std::unordered_map<gma::server::RequestKey, std::vector<std::shared_ptr<INode>>> chains_; // keeps pipeline alive
+  std::unordered_map<gma::server::RequestKey, Subscription> active_;
 
   // Rate limiting: token-bucket for subscribe requests
   static constexpr int    RATE_LIMIT_BURST    = 20;   // max burst of subscribes

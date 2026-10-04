@@ -8,6 +8,9 @@
 #include "gma/rt/Strand.hpp"
 #include "gma/JsonValidator.hpp"
 #include "gma/nodes/Responder.hpp"
+#include "gma/nodes/SharedTerminal.hpp"
+#include "gma/server/RequestCanonicalKey.hpp"
+#include "gma/server/SharedSubscriptionRegistry.hpp"
 #include "gma/util/Logger.hpp"
 #include "gma/util/Metrics.hpp"
 #include "gma/util/JsonUtil.hpp"
@@ -70,6 +73,31 @@ SubscriptionStrandMint::mint(gma::rt::ThreadPool* pool) {
 }
 
 } // namespace server
+
+// ENC-1041. The one teardown for both ownership modes. See the struct comment
+// in the header: a SHARED subscription must never be stopped by shutting its
+// head down, because the head is somebody else's computation too.
+void ClientSession::Subscription::teardown() noexcept {
+  if (lease.valid()) {
+    // Detaches this session's Responder and, iff this was the last subscriber,
+    // shuts the shared DAG down inside the registry.
+    lease.release();
+    return;
+  }
+  if (head) {
+    try { head->shutdown(); } catch (...) {}
+  }
+  // A head shutdown() does not propagate down a linear pipeline, so every node
+  // is stopped explicitly — otherwise a mid-pipeline timer keeps ticking until
+  // its last reference happens to go.
+  for (auto& node : keepAlive) {
+    if (node) {
+      try { node->shutdown(); } catch (...) {}
+    }
+  }
+  head.reset();
+  keepAlive.clear();
+}
 
 // ------------------------------
 // Construction / lifecycle
@@ -200,22 +228,21 @@ void ClientSession::close() {
     // owner destroys the node and its destructor stops and joins the thread.
     // The sweep is kept because it still stops timers *early* (at close, not
     // at refcount zero) and covers any future node that needs the nudge.
+    //
+    // ENC-1041: SHARED subscriptions are torn down by RELEASING the lease, not
+    // by shutting the head down. A disconnect by one of N must leave the other
+    // N-1 receiving values, so this session is only allowed to stop a
+    // computation it exclusively owns. `Subscription::teardown` makes that the
+    // same call in both modes.
     {
-      std::lock_guard<std::mutex> lk(self->reqMu_);
-      for (auto& kv : self->active_) {
-        if (kv.second) {
-          try { kv.second->shutdown(); } catch (...) {}
-        }
+      std::unordered_map<gma::server::RequestKey, Subscription> taken;
+      {
+        std::lock_guard<std::mutex> lk(self->reqMu_);
+        taken.swap(self->active_);
       }
-      for (auto& kv : self->chains_) {
-        for (auto& node : kv.second) {
-          if (node) {
-            try { node->shutdown(); } catch (...) {}
-          }
-        }
-      }
-      self->active_.clear();
-      self->chains_.clear();
+      // Outside reqMu_: a private `shutdown()` joins timer threads, and a
+      // last-subscriber lease release runs the shared DAG's shutdown.
+      for (auto& kv : taken) kv.second.teardown();
     }
 
     websocket::close_reason cr;
@@ -794,30 +821,91 @@ void ClientSession::handleSubscribe(const ::rapidjson::Document& doc) {
         }
       }
 
-      // Build pipeline OUTSIDE the lock — buildForRequest may be expensive
-      // and should not block other subscribe/cancel operations.
-      auto built = gma::tree::buildForRequest(rq, deps, terminal);
+      // ------------------------------------------------------------------
+      // ENC-1041 — CROSS-CONNECTION DEDUP.
+      //
+      // The equivalence relation and every case it refuses are documented in
+      // `gma/server/RequestCanonicalKey.hpp`. Three properties of WHERE this
+      // sits are load-bearing:
+      //
+      //  1. It is AFTER every per-request reject above. Rate limit, both
+      //     key-parse rejects, the streamKey/field presence and length checks
+      //     and `JsonValidator` all run per subscriber and all still
+      //     `sendError(..., key)` under THIS subscriber's request key. Dedup
+      //     cannot swallow an ENC-1396 attribution because dedup never sees a
+      //     request that one of those rejected.
+      //  2. The build is the ONLY thing shared. A build that throws is not
+      //     cached (`SharedSubscriptionRegistry::acquire` erases the entry and
+      //     rethrows), so the `catch` below reports it under this subscriber's
+      //     key — and a later identical subscribe re-runs the build and is
+      //     rejected under its own key rather than inheriting a silence.
+      //  3. The `Responder` is per subscriber, so each connection keeps its
+      //     own `RequestKey` in its `update` frames even though one
+      //     computation produced the value. That is what `terminal` is below:
+      //     the shared path attaches it as a SINK of the shared DAG rather
+      //     than building a DAG around it.
+      //
+      // `rq` is canonicalized rather than the inbound `r`, because `rq` is
+      // exactly what `buildForRequest` reads (it looks at `streamKey`,
+      // `field`, `node` and the `pipeline`/`stages` arrays and nothing else —
+      // src/core/TreeBuilder.cpp:1155-1392). Keying on the raw request would
+      // make two byte-identical builds look different because the client sent
+      // different junk alongside them.
+      // ------------------------------------------------------------------
+      const auto canon = gma::server::canonicalizeRequest(rq);
+
+      Subscription sub;
+      if (canon.shareable()) {
+        sub.lease = exec_->subscriptions().acquire(
+            canon.key, terminal,
+            [&rq, &deps](std::shared_ptr<gma::nodes::SharedTerminal> shared)
+                -> gma::server::SharedSubscriptionRegistry::Built {
+              auto built = gma::tree::buildForRequest(rq, deps, std::move(shared));
+              return {std::move(built.head), std::move(built.keepAlive)};
+            });
+      }
+
+      if (!sub.lease.valid()) {
+        // Either the request is not shareable, or the shared DAG was torn down
+        // underneath us mid-acquire. Build privately — the pre-dedup path,
+        // which is always correct, just not shared.
+        //
+        // Build OUTSIDE the lock: buildForRequest may be expensive and should
+        // not block other subscribe/cancel operations.
+        auto built     = gma::tree::buildForRequest(rq, deps, terminal);
+        sub.head       = std::move(built.head);
+        sub.keepAlive  = std::move(built.keepAlive);
+        if (!canon.shareable()) {
+          GMA_METRIC_HIT("ws.subscribe_unshared");
+          gma::util::logger().log(gma::util::LogLevel::Debug,
+                                  "ws.subscribe_unshared",
+                                  {{"reason", gma::server::shareRefusalName(canon.refusal)},
+                                   {"detail", canon.detail},
+                                   {"streamKey", streamKey},
+                                   {"field", field}});
+        }
+      } else {
+        GMA_METRIC_HIT("ws.subscribe_shared");
+      }
 
       {
-        std::lock_guard<std::mutex> lk(reqMu_);
-        // Replace any existing request with the same key. Shut down the old
-        // head AND every node in its keepAlive chain before discarding it, so
-        // a replaced mid-pipeline timer node stops at replace time rather than
-        // whenever its last reference happens to go (see close()).
-        auto it = active_.find(key);
-        if (it != active_.end() && it->second) {
-          it->second->shutdown();
-        }
-        auto cit = chains_.find(key);
-        if (cit != chains_.end()) {
-          for (auto& node : cit->second) {
-            if (node) {
-              try { node->shutdown(); } catch (...) {}
-            }
+        Subscription replaced;
+        {
+          std::lock_guard<std::mutex> lk(reqMu_);
+          // Replace any existing request with the same key. The old
+          // subscription is moved out and torn down BELOW the lock, so a
+          // replaced shared subscription releases its lease (and a replaced
+          // private one shuts its whole chain down) without `reqMu_` held
+          // across a thread join.
+          auto it = active_.find(key);
+          if (it != active_.end()) {
+            replaced = std::move(it->second);
+            it->second = std::move(sub);
+          } else {
+            active_.emplace(key, std::move(sub));
           }
         }
-        active_[key] = built.head;
-        chains_[key] = std::move(built.keepAlive);
+        replaced.teardown();
       }
 
       // Ack
@@ -886,32 +974,22 @@ void ClientSession::handleCancel(const ::rapidjson::Document& doc) {
   }
 
   for (auto& key : toCancel) {
-    std::shared_ptr<gma::INode> root;
-    std::vector<std::shared_ptr<gma::INode>> chainVec;
+    Subscription sub;
     {
       std::lock_guard<std::mutex> lk(reqMu_);
       auto it = active_.find(key);
       if (it != active_.end()) {
-        root = std::move(it->second);
+        sub = std::move(it->second);
         active_.erase(it);
-      }
-      auto cit = chains_.find(key);
-      if (cit != chains_.end()) {
-        chainVec = std::move(cit->second);
-        chains_.erase(cit);
       }
     }
 
-    // Shut down the head AND every node in the keepAlive chain (outside the
-    // lock) — head shutdown() does not propagate down a linear pipeline, so
-    // without this a mid-pipeline timer node keeps ticking until its last
-    // reference is dropped (see close()).
-    if (root) root->shutdown();
-    for (auto& node : chainVec) {
-      if (node) {
-        try { node->shutdown(); } catch (...) {}
-      }
-    }
+    // Outside the lock. ENC-1041: for a SHARED subscription this releases the
+    // lease — detaching only this session's Responder, and tearing the DAG
+    // down only if this was its last subscriber. For a private one it shuts
+    // the head AND every node in the keepAlive chain down, because a head
+    // shutdown() does not propagate down a linear pipeline (see close()).
+    sub.teardown();
 
     ::rapidjson::StringBuffer sb;
     ::rapidjson::Writer<::rapidjson::StringBuffer> w(sb);
