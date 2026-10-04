@@ -1,0 +1,31 @@
+itch_live_capture.ndjson — ENC-1028
+
+296 consecutive ITCH 5.0 JSON messages for ONE symbol (BLITZ, stockLocate 28),
+captured verbatim off the live hosted feed-simulator at
+wss://feed-sim.v3m.xyz/feed on 2026-10-04 at ~12:35:00 UTC. Nothing is
+hand-written, re-timed, re-priced or re-ordered: the lines are the bytes the
+feed sent, filtered to one stockLocate and kept in wire order.
+
+Why a capture and not a generator: the three atomics ENC-1028 populates are
+only meaningful against real values. `timestamp` in particular is the thing
+under test — these files carry the feed's actual nanos-since-UTC-midnight
+stamps (45284765608047 .. 45300475802429, i.e. 12:34:44 .. 12:35:00 UTC), and
+ItchAtomicsTest asserts the stored atomic reduces modulo one day back to
+exactly these numbers. A fabricated timestamp could not catch a basis error,
+because the fabricator and the asserter would share the mistake.
+
+Message mix: stock_directory 1, add_order 106, add_order_mpid 29,
+order_executed 42, trade 42, order_delete 49, order_replace 27.
+
+Two properties of this data that the tests rely on and that are NOT defects in
+GMA:
+  * 22 order_executed and 18 order_delete messages reference an orderRef added
+    before the capture window, so ItchAdapter drops them. That is correct
+    mid-stream behaviour, not a parse failure.
+  * feed-simulator publishes add_order messages that CROSS the opposite side
+    without a matching execution (12 of them in this window), so the
+    reconstructed book is sometimes crossed and `spread` is sometimes
+    negative. Reproduced by an independent reconstruction outside GMA, so it
+    is in the source data. A crossed book being accepted unflagged is already
+    pinned by tests/book/CrossedBookTest.cpp (ENC-807 L20). The tests here
+    therefore assert `spread == ask - bid` exactly, and never `spread > 0`.
