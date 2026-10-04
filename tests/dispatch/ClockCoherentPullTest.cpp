@@ -639,6 +639,14 @@ TEST(ClockCoherentPull, NoCorpusEntryEmitsADifferentSequenceUnderLiveIngress) {
 
   constexpr std::size_t kSweepTicks = 8;
   std::size_t checked = 0, emitted = 0, timerDriven = 0, built = 0, refused = 0;
+  // ANTI-VACUITY. An entry whose drained sequence is CONSTANT cannot tell two
+  // sampling rules apart: a mistimed sample of an unchanging value is the same
+  // value. `differing == 0` is therefore only meaningful alongside a floor on
+  // how many entries could have differed at all. Over an 8-tick window most of
+  // the long-period TA fields (sma_20, sma_50, ema_50, atr_14, …) are absent or
+  // NaN throughout, which is exactly why the measured verdict change is ~35 of
+  // the 88 entries that structurally bind an AtomicAccessor and not all 88.
+  std::size_t sensitive = 0;
   std::vector<std::string> differing;
 
   for (auto& e : doc.GetArray()) {
@@ -672,6 +680,12 @@ TEST(ClockCoherentPull, NoCorpusEntryEmitsADifferentSequenceUnderLiveIngress) {
                           << b.error;
     ++checked;
     if (!a.emitted.empty()) ++emitted;
+    {
+      bool varies = false;
+      for (std::size_t i = 1; i < a.emitted.size(); ++i)
+        if (!sameValue(a.emitted[i], a.emitted[0])) { varies = true; break; }
+      if (varies) ++sensitive;
+    }
     if (!sameSequence(a.emitted, b.emitted) && differing.size() < 12) {
       std::ostringstream os;
       os << "\n  corpus_id " << id
@@ -685,12 +699,19 @@ TEST(ClockCoherentPull, NoCorpusEntryEmitsADifferentSequenceUnderLiveIngress) {
 
   std::cout << "[ENC-1335 sweep] checked=" << checked << " emitting=" << emitted
             << " timer-driven(excluded)=" << timerDriven
-            << " build-refused=" << refused << " differing=" << differing.size()
-            << "\n";
+            << " build-refused=" << refused
+            << " sensitive(non-constant drained sequence)=" << sensitive
+            << " differing=" << differing.size() << "\n";
 
   EXPECT_GE(emitted, 150u)
       << "only " << emitted << " of " << checked << " entries emitted "
          "anything; a sweep over silent DAGs proves nothing";
+  EXPECT_GE(sensitive, 30u)
+      << "only " << sensitive << " of " << checked << " entries emit a "
+         "NON-CONSTANT sequence over " << kSweepTicks
+         << " ticks. A mistimed sample of a constant value is the same value, "
+            "so `differing == 0` below would be vacuous. Measured at 36 when "
+            "this test was written.";
 
   std::string detail;
   for (const auto& d : differing) detail += d;
