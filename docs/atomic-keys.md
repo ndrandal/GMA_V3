@@ -338,7 +338,77 @@ history (parameters from `Config.ta*`):
   no `bollinger_middle`/`bollinger_width` and no `bb.*` keys)
 - `volatility_rank`
 
-All bare keys are **Listener-subscribable**.
+### Which bare keys a `Listener` can actually bind to (ENC-1028)
+
+**Not all of them, and the exceptions are silent.** `Dispatcher::onTick`
+notifies a `Listener` only when the tick *payload* has a **numeric member of
+that exact name** (`src/core/Dispatcher.cpp`, the `toNotify` loop). So the
+bare vocabulary splits in two:
+
+| Bare key | `Listener` | `AtomicAccessor` | Why |
+|---|---|---|---|
+| `lastPrice`, `volume`, `bid`, `ask` | **yes** | yes | present as payload members on the tick |
+| every `sma_*`/`ema_*`/`rsi_*`/… TA key | **yes** | yes | pushed explicitly via `Dispatcher::notifyListeners` |
+| `spread`, `timestamp` | **no — never fires** | yes | written straight to the `AtomicStore` and not in `taResults`, so nothing notifies them |
+
+`bid` and `ask` are in the first row **because** the ITCH ingress injects the
+reconstructed book's best onto the tick payload (see *Where `bid`/`ask` come
+from* below); a source that supplies neither leaves them absent and a
+`Listener` on them simply never fires.
+
+A `Listener` bound to `spread` or `timestamp` is accepted at build time and then
+never delivers a value — read those two through an `AtomicAccessor` on a bare
+clock, the same shape as the `ob.*` pattern below.
+
+### Where `bid`/`ask` come from, and what "absent" means (ENC-1028)
+
+For a **pre-aggregated tick source**, `bid`/`ask` are payload fields resolved
+through `MarketFieldMap::bidFields`/`askFields` (which now default to
+`{"bid"}`/`{"ask"}` — they used to default empty, which made the scan run zero
+times for every source that had not configured them by hand).
+
+For an **L2/L3 source there is no such field to resolve.** No ITCH message type
+carries a bid or an ask — verified against the live feed and pinned by
+`tests/feed/ItchAtomicsTest.cpp::NoItchMessageTypeCarriesABidOrAnAsk` — so the
+alias layer could not have populated them however it was configured. The
+reconstructed book is the only source, and `WsFeedClient::dispatchEvent` samples
+`OrderBookManager::bestBid`/`bestAsk` onto the tick at dispatch time. The
+as-of semantics follow from emission order: the ITCH handlers emit their book
+mutations *before* the tick, so the value is the top of book **after** the
+message that produced the tick was applied. A `trade` print is `bookNeutral`
+and mutates nothing, so for those the book is unchanged.
+
+**Absence is not zero, at every hop.** `bestBid`/`bestAsk` return
+`std::optional`; a side with no resting liquidity injects *nothing*;
+`MarketTickComputer` writes `bid`/`ask`/`spread` only when it has them;
+`AtomicStore::get` answers `std::nullopt`; and `AtomicAccessor::onValue`
+emits nothing on a `nullopt`. No code on this path writes `0` to stand in for
+"not reported" — which matters because `0` is a perfectly plausible price, and a
+plausible wrong number is worse here than a value that never arrives.
+
+### `timestamp`: the basis is part of the value (ENC-1028)
+
+The `timestamp` atomic is **nanoseconds since the Unix epoch**, stored as a
+**string** because epoch nanos exceed 2^53 and a `double` would round them.
+
+It is the **source-reported message time**, not an ingest re-stamp. On the ITCH
+path there is a conversion in between, and it is a real limitation worth
+knowing: ITCH 5.0 stamps *nanoseconds since UTC midnight* and carries no date at
+all, so **the feed supplies the time of day and GMA supplies the UTC day**
+(`ItchAdapter::itchTimestampToEpochNs`). Every case it cannot resolve — a zero
+field, a value that is not a since-midnight offset, a nonsense receiver clock —
+yields `0`, which is this path's "not reported" marker, rather than a guess.
+
+A separate fidelity limit belongs to the current data source, not to GMA:
+`feed-simulator` stamps a whole broadcast batch with one `time.Now()` at send
+time (`go-feed/internal/session/manager.go`), so against *that* feed the value
+is publish time rather than matching-engine time. Real NASDAQ ITCH stamps at the
+exchange, and this path carries whatever the protocol field holds.
+
+Not to be confused with **`bucketStartMs`**, the bar-identity stamp on the
+outbound value frame (`specs/2026-09-20-timestamps-on-the-wire/SPEC.md` D9).
+That is bucket-derived and is about *which bar a value belongs to*; this is the
+source's event time.
 
 ## `ob.*` vocabulary
 

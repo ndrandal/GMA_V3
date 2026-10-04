@@ -60,8 +60,8 @@ struct MarketFieldMap {
     std::string name = "default";
     std::vector<std::string> priceFields  = {"lastPrice", "price", "last", "px"};
     std::vector<std::string> volumeFields = {"volume", "vol", "qty", "size"};
-    std::vector<std::string> bidFields;        // empty = not extracted
-    std::vector<std::string> askFields;        // empty = not extracted
+    std::vector<std::string> bidFields  = {"bid"};   // ENC-1028: were empty
+    std::vector<std::string> askFields  = {"ask"};   // ENC-1028: were empty
     std::string timestampField;                // empty = not extracted
     bool taEnabled = true;                     // false = skip SMA/EMA/RSI/etc.
 };
@@ -71,6 +71,56 @@ struct MarketFieldMap {
 > `Config::sourceProfile` member. The engine no longer knows about
 > market-flavored fields — the market connector owns the struct and populates it
 > from the `market.source.*` config namespace through `ConfigNamespaceRegistry`.
+
+> **ENC-1028 — what this layer can and cannot do for you.** `bidFields` and
+> `askFields` defaulted **empty**, so the bid/ask scan in
+> `MarketTickComputer::compute` ran **zero times** for every source that had not
+> configured them by hand. They now default to the canonical names, for the same
+> reason `priceFields` leads with `lastPrice`.
+>
+> But fixing the default does **not** give an L2/L3 source a bid or an ask, and
+> it is worth being clear about why: **ITCH carries no top-of-book field.** Its
+> message types are `add_order`, `add_order_mpid`, `order_executed`,
+> `order_cancel`, `order_delete`, `order_replace` and `trade`, and not one of
+> them has a bid or ask member — verified against the live feed and pinned by
+> `tests/feed/ItchAtomicsTest.cpp::NoItchMessageTypeCarriesABidOrAnAsk`. There
+> is nothing to alias. For such a source the top of book is injected onto the
+> tick from the reconstructed book by `WsFeedClient::dispatchEvent`, and this
+> field map resolves it from there.
+>
+> **So if you are writing an adapter for a depth protocol, do not reach for
+> `bidFields`.** Emit the book mutations and let the ingress sample the book.
+> `bidFields` is for a source that hands you a pre-aggregated quote.
+
+### Timestamps: convert the basis in the adapter (ENC-1028)
+
+`TickEvent::timestampNs` and `gma::Event::timestampNs` are **nanoseconds since
+the Unix epoch**, and `0` means *the source did not report one*. The unit is
+part of the contract: an adapter whose protocol uses a different basis must
+convert **before** the value reaches these fields.
+
+`ItchAdapter` is exactly that case and is the worked example. ITCH 5.0 stamps
+nanoseconds since **UTC midnight** and puts no date on the wire; the two bases
+differ by ~1.7e18 ns, so copying one into the other produces a timestamp that
+reads as a believable *time of day* in 1970 — wrong by 54 years, and wrong in a
+way nothing downstream can detect. `ItchAdapter::itchTimestampToEpochNs` rebases
+it (the feed supplies the time of day, GMA supplies the UTC day, including the
+day-boundary case) and returns `0` for every input it cannot resolve rather than
+inventing a time.
+
+Prefer the typed field to a payload member, for two reasons:
+
+1. **Precision.** `Dispatcher::onTick` raw-injects every *numeric* payload
+   member into the `AtomicStore` as a `double` (ENC-1007). Epoch nanos exceed
+   2^53, so a payload-borne timestamp is silently rounded to ~256 ns.
+   `MarketTickComputer` stores the `timestamp` atomic as a **string** for the
+   same reason.
+2. **Ambiguity.** A payload key named `timestamp` is what the raw ITCH wire
+   already calls its since-midnight value, so the same name would mean two
+   different bases depending on which side of the adapter you read it from.
+   `MarketFieldMap::timestampField` is therefore deliberately **still empty by
+   default** — a payload-borne timestamp has to be opted into by a deployment
+   that knows its source's basis.
 
 ### Example: Coinbase
 
