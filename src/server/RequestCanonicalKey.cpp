@@ -210,7 +210,7 @@ bool canonWalk(const ::rapidjson::Value& v, CanonWriter& w, int depth,
     // and `{"a":2,"a":1}` build different trees. A stable sort preserves their
     // relative order and therefore keeps those two documents apart; an unstable
     // one could collapse them and merge two requests that are not the same.
-    std::vector<const ::rapidjson::Value::ConstMemberIterator::Pointer> members;
+    std::vector<const ::rapidjson::Value::Member*> members;
     members.reserve(v.MemberCount());
     for (auto m = v.MemberBegin(); m != v.MemberEnd(); ++m) members.push_back(&*m);
     std::stable_sort(members.begin(), members.end(),
