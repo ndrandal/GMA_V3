@@ -348,7 +348,6 @@ void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx)
     }
   }
   double bid = 0.0, ask = 0.0;
-  std::uint64_t tsNs = 0;
   for (const auto& bf : _fieldMap.bidFields) {
     if (doc.HasMember(bf.c_str()) && doc[bf.c_str()].IsNumber()) {
       bid = doc[bf.c_str()].GetDouble();
@@ -361,7 +360,17 @@ void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx)
       break;
     }
   }
-  if (!_fieldMap.timestampField.empty() &&
+  // ENC-1028: prefer the typed, source-reported event time on the canonical
+  // Event. It is epoch nanos by contract (gma::Event), exact (uint64, not a
+  // double), and it is the only channel an L3 adapter has — ITCH synthesizes
+  // its tick payload from scratch, so there is no payload field to alias.
+  // The payload scan below stays as the fallback for pre-aggregated sources
+  // that carry their time in the JSON and have opted in via
+  // `market.source.timestampField`. 0 means "not reported" in both channels,
+  // so an absent typed time falls through rather than suppressing the scan.
+  std::uint64_t tsNs = tick.timestampNs;
+  if (tsNs == 0 &&
+      !_fieldMap.timestampField.empty() &&
       doc.HasMember(_fieldMap.timestampField.c_str()) &&
       doc[_fieldMap.timestampField.c_str()].IsUint64()) {
     tsNs = doc[_fieldMap.timestampField.c_str()].GetUint64();

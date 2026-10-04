@@ -7,6 +7,7 @@
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <type_traits>
 #include <variant>
@@ -68,8 +69,47 @@ double ItchAdapter::parsePrice(const rapidjson::Value& v) {
     return 0.0;
 }
 
+// ENC-1028. See the long contract note on itchTimestampToEpochNs in the header:
+// ITCH stamps nanos since UTC midnight, Event::timestampNs is epoch nanos, and
+// every refusal below returns 0 (= not reported) instead of inventing a time.
+uint64_t ItchAdapter::itchTimestampToEpochNs(uint64_t nsSinceMidnightUtc,
+                                             uint64_t nowEpochNs) {
+    if (nsSinceMidnightUtc == 0)            return 0;  // field unset, not midnight
+    if (nsSinceMidnightUtc >= kNsPerDay)    return 0;  // not a since-midnight offset
+    if (nowEpochNs < kNsPerDay)             return 0;  // nonsense receiver clock
+
+    const uint64_t todayMidnightUtc = nowEpochNs - (nowEpochNs % kNsPerDay);
+    uint64_t candidate = todayMidnightUtc + nsSinceMidnightUtc;
+
+    // The receiver has rolled past 00:00 UTC while this message was in flight.
+    if (candidate > nowEpochNs + kFutureSlackNs) {
+        // todayMidnightUtc >= kNsPerDay here (nowEpochNs >= kNsPerDay), and
+        // candidate > todayMidnightUtc, so this cannot underflow.
+        candidate -= kNsPerDay;
+    }
+    return candidate;
+}
+
+uint64_t ItchAdapter::parseTimestampNs(const rapidjson::Value& doc) {
+    if (!doc.HasMember("timestamp")) return 0;
+    const auto& v = doc["timestamp"];
+    // Go marshals int64 as a bare JSON integer, so RapidJSON reports both Int64
+    // and Uint64 for a positive value. A negative stamp is not a valid
+    // since-midnight offset — refuse rather than wrap it through uint64.
+    if (!v.IsUint64()) return 0;
+
+    const uint64_t nowEpochNs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
+    const uint64_t out = itchTimestampToEpochNs(v.GetUint64(), nowEpochNs);
+    if (out == 0) GMA_METRIC_HIT("feed_ws.itch_timestamp_unusable");
+    return out;
+}
+
 TickEvent ItchAdapter::makeTradeTickEvent(const std::string& symbol,
-                                           double price, uint64_t size) {
+                                           double price, uint64_t size,
+                                           uint64_t timestampNs) {
     auto payload = std::make_shared<rapidjson::Document>();
     payload->SetObject();
     auto& a = payload->GetAllocator();
@@ -78,9 +118,23 @@ TickEvent ItchAdapter::makeTradeTickEvent(const std::string& symbol,
     payload->AddMember("lastPrice", price, a);
     payload->AddMember("volume", static_cast<double>(size), a);
 
+    // DELIBERATELY NOT a payload member. The time rides TickEvent::timestampNs
+    // (and from there Event::timestampNs) rather than the JSON payload, for two
+    // reasons:
+    //   1. Precision. Dispatcher::onTick raw-injects every NUMERIC payload
+    //      member into the AtomicStore as a `double` (ENC-1007). Epoch nanos
+    //      (~1.76e18) exceeds 2^53, so a payload-borne timestamp would be
+    //      silently rounded to ~256 ns and stored as a lossy second copy under
+    //      its own key. The uint64 field keeps it exact end to end, and
+    //      MarketTickComputer stores it as a STRING for the same reason.
+    //   2. Basis. A payload key named `timestamp` is what the raw ITCH wire
+    //      already calls its since-midnight value, so the same name would mean
+    //      two different bases depending on which side of this adapter you read
+    //      it from. A typed field cannot be confused that way.
     TickEvent te;
-    te.symbol  = symbol;
-    te.payload = std::move(payload);
+    te.symbol      = symbol;
+    te.payload     = std::move(payload);
+    te.timestampNs = timestampNs;
     return te;
 }
 
@@ -181,21 +235,25 @@ void ItchAdapter::routeOrderExecuted(const rapidjson::Value& doc,
     // the fill. The trade event is emitted print-only (bookNeutral) so it does
     // NOT consume the book a second time — the TA/print signal is the separate
     // makeTradeTickEvent tick.
+    // ENC-1028: the source-reported event time, rebased to epoch nanos.
+    const uint64_t tsNs = parseTimestampNs(doc);
+
     ObTradeEvent trade{symbol, os.price, execShares, aggr};
     trade.bookNeutral = true;
+    trade.timestampNs = tsNs;
 
     if (execShares >= os.remainingShares) {
         // Fully filled — delete the order and erase tracking state
         out.push_back(ObDeleteEvent{symbol, orderRef});
         out.push_back(trade);
-        out.push_back(makeTradeTickEvent(symbol, os.price, execShares));
+        out.push_back(makeTradeTickEvent(symbol, os.price, execShares, tsNs));
         orders_.erase(it);
     } else {
         // Partial fill — reduce size, keep tracking
         os.remainingShares -= execShares;
         out.push_back(ObUpdateEvent{symbol, orderRef, std::nullopt, os.remainingShares});
         out.push_back(trade);
-        out.push_back(makeTradeTickEvent(symbol, os.price, execShares));
+        out.push_back(makeTradeTickEvent(symbol, os.price, execShares, tsNs));
     }
 
     GMA_METRIC_HIT("feed_ws.order_executed");
@@ -313,12 +371,16 @@ void ItchAdapter::routeTrade(const rapidjson::Value& doc,
     // M1: a top-level ITCH `trade` print is a non-displayable/hidden execution.
     // It must NOT consume displayed resting liquidity, so emit it print-only
     // (bookNeutral). The TA/print signal is the separate trade tick below.
+    // ENC-1028: the source-reported event time, rebased to epoch nanos.
+    const uint64_t tsNs = parseTimestampNs(doc);
+
     ObTradeEvent trade{stock, price, shares, aggr};
     trade.bookNeutral = true;
+    trade.timestampNs = tsNs;
     out.push_back(trade);
 
     // Emit tick to dispatcher for TA computation
-    out.push_back(makeTradeTickEvent(stock, price, shares));
+    out.push_back(makeTradeTickEvent(stock, price, shares, tsNs));
 
     GMA_METRIC_HIT("feed_ws.trade");
 }
