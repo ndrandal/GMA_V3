@@ -892,7 +892,7 @@ public:
   // `anyTargetSamplesAtClock_` is false and this whole path is unreachable for
   // them; they keep `onValue` exactly as it is.
   bool samplesAtClock() const noexcept override {
-    return anyTargetSamplesAtClock_;
+    return false; // ENC-1335 MUTATION M2
   }
 
   std::function<void()> bindAtClock(const gma::StreamValue& sv) override {
