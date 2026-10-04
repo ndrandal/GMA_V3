@@ -383,11 +383,7 @@ void WsFeedClient::dispatchEvent(feed::FeedEvent& evt, bool dropBookMutations) {
         // must never stand in for "not reported".
         if (obManager_ && e.payload && e.payload->IsObject()) {
           auto& alloc = e.payload->GetAllocator();
-          if (!e.payload->HasMember("bid")) {
-            if (auto b = obManager_->bestBid(e.symbol); b.has_value()) {
-              e.payload->AddMember("bid", *b, alloc);
-            }
-          }
+          // MUTATION M4: bid no longer injected
           if (!e.payload->HasMember("ask")) {
             if (auto a = obManager_->bestAsk(e.symbol); a.has_value()) {
               e.payload->AddMember("ask", *a, alloc);
