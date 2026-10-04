@@ -437,16 +437,33 @@ TEST(RequestCanonicalKey, CorpusMeasurement) {
   EXPECT_EQ(shareable, 122u);
   EXPECT_EQ(refused, 150u);
 
-  // 3. The refusals, by cause. Worker is the dominant one and it is the reason
-  //    the rule is as narrow as it is: `Worker::acc_` retains up to 1000 values
-  //    per symbol and reduces over all of them, with no clear on any semantic
-  //    boundary, so a late attacher's first value is a reduction over history
-  //    it was not present for.
-  EXPECT_EQ(refusals["attach_sensitive_node:Worker"], 126)
+  // 3. The refusals, by cause.
+  //
+  //    READ THESE AS FIRST-FOUND, NOT AS A TYPE CENSUS. `canonicalizeRequest`
+  //    returns on the FIRST attach-sensitive type it meets in canonical walk
+  //    order, so an entry whose `node` is an `Aggregate` and whose `pipeline`
+  //    holds a `Worker` is counted under `Aggregate`. The type census over the
+  //    same 272 entries is different and larger: Worker 161 occurrences,
+  //    AtomicAccessor 119, Listener 94, Aggregate 52, Interval 24,
+  //    SymbolSplit 10.
+  //
+  //    `Worker` is nevertheless the reason the rule is as narrow as it is: it
+  //    is the most common node in the corpus and `Worker::acc_` retains up to
+  //    1000 values per symbol and reduces over all of them with no clear on any
+  //    semantic boundary, so a late attacher's first value is a reduction over
+  //    history it was not present for. Of the 150 refusals, 126 are entries
+  //    that contain a `Worker` somewhere (64 reported under `Worker`, 52 under
+  //    `Aggregate`, 10 under `SymbolSplit`).
+  EXPECT_EQ(refusals["attach_sensitive_node:Worker"], 64)
       << "refusal mix moved; re-measure";
+  EXPECT_EQ(refusals["attach_sensitive_node:Aggregate"], 52);
   EXPECT_EQ(refusals["attach_sensitive_node:Interval"], 24);
-  EXPECT_EQ(refusals.size(), 2u)
+  EXPECT_EQ(refusals["attach_sensitive_node:SymbolSplit"], 10);
+  EXPECT_EQ(refusals.size(), 4u)
       << "a new refusal cause appeared in the corpus";
+  std::size_t refusalTotal = 0;
+  for (const auto& kv : refusals) refusalTotal += static_cast<std::size_t>(kv.second);
+  EXPECT_EQ(refusalTotal, refused) << "the per-cause counts do not add up";
 
   // 4. The benefit, if every corpus request were subscribed on one server:
   //    DAGs saved = (entries in a shareable duplicate group) - (such groups).
