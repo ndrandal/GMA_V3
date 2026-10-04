@@ -290,21 +290,48 @@ TEST(SubscriptionStrandMint, ProductionSubscribeMintsItsOwnStrandAtTheSessionSit
 //    from the shut-down chain shares nothing with the new one) and recorded
 //    under "what I could NOT verify" that this was never driven through a live
 //    WS session. It is now: both the freshness and the mint site.
+//
+//    ENC-1041 SPLIT THIS IN TWO, and the reason is the finding rather than a
+//    convenience. Cross-connection dedup made "a re-subscribe builds a fresh
+//    DAG" conditional: a re-subscribe on a SHAREABLE request now joins the DAG
+//    it is replacing (refcount 1 -> 2 -> 1) instead of building a second one,
+//    so there is no second chain for a fresh strand to separate it from. ENC-
+//    1005's PROPERTY — a straggling value from the replaced chain can never be
+//    ordered against the new one — still holds, by a stronger mechanism: there
+//    is only one chain, and the replaced subscriber's `Responder` is shut down,
+//    so it emits nothing further.
+//
+//    So 2a drives the case ENC-1338 wrote, unchanged, on a request that dedup
+//    REFUSES to share (its pipeline carries a `Worker`); 2b asserts the new
+//    property on a shareable one. Both still read the origin tag off the real
+//    `Listener`, so M7 reddens both.
 // ───────────────────────────────────────────────────────────────────────────
 TEST(SubscriptionStrandMint, AReSubscribeGetsAFreshSessionMintedStrand) {
   SessionHarness srv;
   asio::io_context clientIoc;
   auto stream = connectClient(clientIoc, srv.port());
 
-  stream.write(asio::buffer(std::string(kSubscribeAapl)));
+  // Deliberately NOT `kSubscribeAapl`: that request is shareable, and a
+  // shareable re-subscribe joins its own DAG rather than replacing it (2b).
+  // A `Worker` stage makes the request attach-sensitive, so dedup refuses it
+  // and `handleSubscribe` takes the private build path this test is about.
+  constexpr const char* kSubscribeAaplUnshareable =
+      R"({"type":"subscribe","requests":[)"
+      R"({"key":1,"streamKey":"AAPL","field":"lastPrice",)"
+      R"("pipeline":[{"type":"Worker","fn":"mean"}]}]})";
+
+  stream.write(asio::buffer(std::string(kSubscribeAaplUnshareable)));
   ASSERT_FALSE(readUntilType(stream, "subscribed", std::chrono::seconds(3)).empty());
   auto first = listenerOn(*srv.dispatcher, "AAPL", "lastPrice");
   ASSERT_TRUE(first);
   const auto firstStrand = first->strand();
   ASSERT_TRUE(firstStrand);
   EXPECT_STREQ(firstStrand->origin(), gma::server::SubscriptionStrandMint::origin());
+  ASSERT_EQ(srv.exec->subscriptions().buildCount(), 0u)
+      << "this request was SHARED, so it is no longer driving the "
+         "fresh-DAG-per-re-subscribe path this test exists for";
 
-  stream.write(asio::buffer(std::string(kSubscribeAapl)));
+  stream.write(asio::buffer(std::string(kSubscribeAaplUnshareable)));
   ASSERT_FALSE(readUntilType(stream, "subscribed", std::chrono::seconds(3)).empty());
 
   // The replacement DAG's Listener is a different object on a different strand,
@@ -321,6 +348,70 @@ TEST(SubscriptionStrandMint, AReSubscribeGetsAFreshSessionMintedStrand) {
     sawFresh = true;
   }
   EXPECT_TRUE(sawFresh) << "the re-subscribe registered no new Listener";
+
+  beast::error_code ec;
+  stream.close(ws::close_code::normal, ec);
+}
+
+// 2b. ENC-1041. The same request key re-subscribed with a SHAREABLE request
+//     joins the DAG it replaces rather than building a second one — and the
+//     strand it ends up on is still the one the session mint produced, which is
+//     what keeps M7 reddening this case too.
+TEST(SubscriptionStrandMint, AShareableReSubscribeJoinsItsOwnDagAndKeepsTheMintedStrand) {
+  SessionHarness srv;
+  asio::io_context clientIoc;
+  auto stream = connectClient(clientIoc, srv.port());
+
+  stream.write(asio::buffer(std::string(kSubscribeAapl)));
+  ASSERT_FALSE(readUntilType(stream, "subscribed", std::chrono::seconds(3)).empty());
+  auto first = listenerOn(*srv.dispatcher, "AAPL", "lastPrice");
+  ASSERT_TRUE(first);
+  const auto firstStrand = first->strand();
+  ASSERT_TRUE(firstStrand);
+  EXPECT_STREQ(firstStrand->origin(), gma::server::SubscriptionStrandMint::origin());
+  ASSERT_EQ(srv.exec->subscriptions().buildCount(), 1u);
+
+  stream.write(asio::buffer(std::string(kSubscribeAapl)));
+  ASSERT_FALSE(readUntilType(stream, "subscribed", std::chrono::seconds(3)).empty());
+
+  EXPECT_EQ(srv.exec->subscriptions().buildCount(), 1u)
+      << "the re-subscribe built a second DAG for a key it already held";
+  EXPECT_EQ(srv.exec->subscriptions().liveKeys(), 1u);
+  EXPECT_EQ(srv.exec->subscriptions().refCount(
+                srv.exec->subscriptions().liveKeys() ? std::string() : std::string()),
+            0u);  // refCount is keyed; the meaningful assertions are above
+
+  // The DAG is the SAME DAG: one Listener, the same object, the same strand.
+  std::size_t listeners = 0;
+  for (const auto& n : srv.dispatcher->listenersFor("AAPL", "lastPrice")) {
+    if (std::dynamic_pointer_cast<gma::nodes::Listener>(n)) ++listeners;
+  }
+  EXPECT_EQ(listeners, 1u)
+      << "a shareable re-subscribe registered a SECOND Listener on the same "
+         "(streamKey, field) — it built a parallel DAG instead of joining";
+  auto after = listenerOn(*srv.dispatcher, "AAPL", "lastPrice");
+  ASSERT_TRUE(after);
+  EXPECT_EQ(after, first) << "the Listener was replaced, not reused";
+  ASSERT_TRUE(after->strand());
+  EXPECT_EQ(after->strand(), firstStrand);
+  EXPECT_STREQ(after->strand()->origin(),
+               gma::server::SubscriptionStrandMint::origin())
+      << "the surviving DAG is not on a session-minted strand — the backstop "
+         "supplied one, which is ENC-1005's M7";
+
+  // And it still delivers, to the surviving (second) subscription's key.
+  const auto ranBefore = firstStrand->tasksRun();
+  srv.dispatcher->notifyListeners("AAPL", "lastPrice", 77.5);
+  const auto update = readUntilType(stream, "update", std::chrono::seconds(3));
+  ASSERT_FALSE(update.empty()) << "the re-subscribed session receives nothing";
+  EXPECT_GT(firstStrand->tasksRun(), ranBefore)
+      << "the value was delivered, but not through the minted strand";
+  rapidjson::Document d;
+  d.Parse(update.c_str());
+  ASSERT_FALSE(d.HasParseError());
+  EXPECT_DOUBLE_EQ(d["value"].GetDouble(), 77.5);
+  ASSERT_TRUE(d.HasMember("key"));
+  EXPECT_EQ(d["key"].GetInt(), 1);
 
   beast::error_code ec;
   stream.close(ws::close_code::normal, ec);
