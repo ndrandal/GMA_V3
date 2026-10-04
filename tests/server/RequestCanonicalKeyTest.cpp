@@ -24,7 +24,7 @@
 #include "gma/NodeRegistry.hpp"
 #include "gma/engine/NodeTypeRegistry.hpp"
 #include "gma/server/RequestCanonicalKey.hpp"
-#include "tests/support/CorpusPath.hpp"
+#include "../support/CorpusPath.hpp"
 
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
