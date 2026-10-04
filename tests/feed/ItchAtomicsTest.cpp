@@ -453,3 +453,132 @@ TEST(ItchAtomicsTest, AbsentBookLeavesBidAskUnsetRatherThanZero) {
   // is per-field and not a blanket suppression.
   EXPECT_TRUE(h.store.get(kSymbol, "timestamp").has_value());
 }
+
+// ===========================================================================
+// 6. THE `spread` COLLISION, pinned.
+//
+// `spread` is BOTH a market atomic (`ask - bid`, written by
+// MarketTickComputer) and one of FunctionMap's 56 builtin reducers
+// (`src/core/BuiltinFunctions.cpp`). `Dispatcher::computeAndStoreAtomics` runs
+// AFTER the computers and `set()`s the builtin under the same flat bare key, so
+// the moment ANY Listener exists on the symbol the bid-ask spread is replaced
+// by a reducer over the subscribed field's history — and a Listener bound to
+// `spread` is delivered that reducer, not the quote spread.
+//
+// Three facts about this test, because they decide how to read it:
+//
+//   * THE COLLISION IS NOT NEW. The `set(symbol, "spread", ask - bid)` line
+//     predates ENC-1028; it was simply unreachable on ITCH because bid/ask were
+//     never populated. Supplying them makes a pre-existing hazard live on this
+//     path, which is exactly why it is pinned here rather than left as prose.
+//     CLAUDE.md's ENC-1008 note names `spread`, `mean` and `median` as the
+//     three colliding keys; this repo's builtin list and the market bare
+//     vocabulary overlap in precisely those three and nothing else — `bid`,
+//     `ask` and `timestamp` are clear.
+//
+//   * IT IS A PLAUSIBLE WRONG NUMBER, not a missing one, which is the bad
+//     shape. The clobbered value is a real spread of something, just not of the
+//     quote.
+//
+//   * THE MITIGATION EXISTS AND IS OFF BY DEFAULT.
+//     `atomicKeyNamespaceByField = true` moves the builtin to
+//     `<field>.spread`, leaving bare `spread` to the quote. The second half of
+//     this test shows that, so the fix is recorded as tested rather than as a
+//     suggestion.
+// ===========================================================================
+namespace {
+// Minimal recording Listener-shaped node. The real `nodes::Listener` is not
+// needed — `Dispatcher` only requires an `INode`, and using a bare one keeps
+// this test out of the dispatch/subscription machinery ENC-1041 is editing.
+class RecordingNode : public INode {
+public:
+  void onValue(const StreamValue& sv) override {
+    std::lock_guard<std::mutex> lk(mx_);
+    if (std::holds_alternative<double>(sv.value))
+      seen_.push_back(std::get<double>(sv.value));
+  }
+  void shutdown() noexcept override {}
+  std::vector<double> seen() const {
+    std::lock_guard<std::mutex> lk(mx_);
+    return seen_;
+  }
+private:
+  mutable std::mutex  mx_;
+  std::vector<double> seen_;
+};
+} // namespace
+
+TEST(ItchAtomicsTest, BareSpreadIsClobberedByTheFunctionMapBuiltin) {
+  const auto lines = loadCapture();
+  ASSERT_FALSE(lines.empty());
+
+  // --- Default config: the builtin wins the bare `spread` key. ---
+  {
+    Harness h;
+    auto node = std::make_shared<RecordingNode>();
+    h.dispatcher->registerListener(kSymbol, "lastPrice", node);
+    h.feed(lines);
+
+    ASSERT_FALSE(node->seen().empty())
+        << "the Listener never fired, so computeAndStoreAtomics never ran and "
+           "this test cannot observe the collision";
+
+    const auto bid = h.store.get(kSymbol, "bid");
+    const auto ask = h.store.get(kSymbol, "ask");
+    const auto spr = h.store.get(kSymbol, "spread");
+    ASSERT_TRUE(bid.has_value());
+    ASSERT_TRUE(ask.has_value());
+    ASSERT_TRUE(spr.has_value());
+
+    const double quote = std::get<double>(*ask) - std::get<double>(*bid);
+    // THE DEFECT: bare `spread` is NOT the quote spread once a Listener exists.
+    EXPECT_NE(std::get<double>(*spr), quote)
+        << "bare `spread` happens to equal ask-bid here; if the collision has "
+           "been fixed, invert this expectation and delete the mitigation half "
+           "below";
+    // It is the builtin over lastPrice history — a non-negative range.
+    EXPECT_GE(std::get<double>(*spr), 0.0);
+    // `bid` and `ask` are NOT builtin names, so they survive intact.
+    EXPECT_GT(std::get<double>(*bid), 1.0);
+    EXPECT_GT(std::get<double>(*ask), 1.0);
+  }
+
+  // --- Mitigation: atomicKeyNamespaceByField moves the builtin aside. ---
+  {
+    Harness h;
+    h.cfg.atomicKeyNamespaceByField = true;
+    // The Dispatcher copies cfg at construction, so rebuild it with the flag on.
+    h.dispatcher = std::make_unique<Dispatcher>(&h.pool, &h.store, h.cfg);
+    h.dispatcher->addComputer(std::make_unique<MarketTickComputer>(
+        h.cfg, market::MarketFieldMap{}));
+    auto tapOwned = std::make_unique<TickTap>(&h.obm);
+    h.tap = tapOwned.get();
+    h.dispatcher->addComputer(std::move(tapOwned));
+    h.client = std::make_shared<ws::WsFeedClient>(
+        h.ioc, h.dispatcher.get(), &h.obm, "ws://unused.invalid/feed",
+        std::make_unique<feed::ItchAdapter>(),
+        std::vector<std::string>{"*"});
+
+    auto node = std::make_shared<RecordingNode>();
+    h.dispatcher->registerListener(kSymbol, "lastPrice", node);
+    h.feed(lines);
+    ASSERT_FALSE(node->seen().empty());
+
+    const auto bid = h.store.get(kSymbol, "bid");
+    const auto ask = h.store.get(kSymbol, "ask");
+    const auto spr = h.store.get(kSymbol, "spread");
+    ASSERT_TRUE(bid.has_value());
+    ASSERT_TRUE(ask.has_value());
+    ASSERT_TRUE(spr.has_value());
+
+    // With the flag on, bare `spread` keeps the quote spread...
+    EXPECT_DOUBLE_EQ(std::get<double>(*spr),
+                     std::get<double>(*ask) - std::get<double>(*bid));
+    // ...and the builtin lands under its own namespaced key instead.
+    const auto nsSpread = h.store.get(kSymbol, "lastPrice.spread");
+    ASSERT_TRUE(nsSpread.has_value())
+        << "the builtin did not move to `lastPrice.spread`; the mitigation "
+           "this test documents does not actually work";
+    EXPECT_GE(std::get<double>(*nsSpread), 0.0);
+  }
+}
