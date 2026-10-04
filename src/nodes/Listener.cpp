@@ -3,6 +3,8 @@
 #include "gma/rt/ThreadPool.hpp"
 #include "gma/util/Logger.hpp"
 
+#include <utility>
+
 using namespace gma::nodes;
 
 namespace {
@@ -106,11 +108,39 @@ void Listener::onValue(const gma::StreamValue& sv) {
   // calls the raw Listener path "no bucket identity"), so there is nothing to
   // lose on either path. It is written the correct way here so the difference
   // does not become one later.
+  // ENC-1335 — THE PULL SAMPLE IS TAKEN HERE, NOT ON THE EXECUTOR.
+  //
+  // This function runs on the ingress thread (ENC-1005 made `Dispatcher`
+  // call a strand-bearing Listener inline), and `Dispatcher::onTick` has just
+  // written this tick's atomics into the `AtomicStore`. That makes HERE the
+  // only point at which the store is coherent with the tick being delivered:
+  // by the time the executor runs, the ingress thread has posted tick n+1 and
+  // overwritten it. A downstream that reads the store rather than the value —
+  // `AtomicAccessor`, and the `CompositeRoot` that clocks a pull-only fan-in's
+  // inputs — therefore gets its sample taken now and its DELIVERY posted.
+  //
+  // An empty binding means the pull found nothing for this tick, and the
+  // correct action is to post nothing at all. Falling through to `onValue`
+  // would read the store again, later, and emit a value this tick did not
+  // have — the phantom arrival in `INode::samplesAtClock`'s note.
+  //
+  // Both async paths bind. The strand path is production; the bare-pool path
+  // is the legacy unordered one, where binding does not buy ordering (it never
+  // had any) but does stop every sample being read at a scheduler's whim. The
+  // inline `else` needs nothing: there, delivery already happens at the clock.
   if (strand_) {
+    if (down->samplesAtClock()) {
+      if (auto deliver = down->bindAtClock(sv)) strand_->post(std::move(deliver));
+      return;
+    }
     strand_->post([d = down, sv]() mutable {
       d->onValue(sv);
     });
   } else if (pool_) {
+    if (down->samplesAtClock()) {
+      if (auto deliver = down->bindAtClock(sv)) pool_->post(std::move(deliver));
+      return;
+    }
     pool_->post([d = std::move(down), sym = sv.symbol, val = sv.value]() mutable {
       d->onValue(gma::StreamValue{std::move(sym), std::move(val)});
     });
