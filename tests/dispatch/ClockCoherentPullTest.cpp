@@ -642,10 +642,19 @@ TEST(ClockCoherentPull, NoCorpusEntryEmitsADifferentSequenceUnderLiveIngress) {
   // ANTI-VACUITY. An entry whose drained sequence is CONSTANT cannot tell two
   // sampling rules apart: a mistimed sample of an unchanging value is the same
   // value. `differing == 0` is therefore only meaningful alongside a floor on
-  // how many entries could have differed at all. Over an 8-tick window most of
-  // the long-period TA fields (sma_20, sma_50, ema_50, atr_14, …) are absent or
-  // NaN throughout, which is exactly why the measured verdict change is ~35 of
-  // the 88 entries that structurally bind an AtomicAccessor and not all 88.
+  // how many entries could have differed at all — 159 of 248 at the budget
+  // below. Without this counter, shortening the window until every sequence
+  // went flat would turn this test green while changing nothing.
+  //
+  // THE BUDGET IS WHY THE MEASURED VERDICT CHANGE UNDERSTATES THE DEFECT.
+  // 88 of the 272 entries structurally bind an `AtomicAccessor` at a clock hop
+  // (81 + 7, see EveryCorpusAtomicAccessorSitsAtAClockHop). Under the mutation
+  // that disables the fix, 56-60 of the 248 driven here differ over 6 runs —
+  // not 88 — because 30 ticks is not enough history for the long-period fields
+  // (`sma_50`, `ema_50`, `rsi_14`, …) to reach the store at all, so those
+  // entries emit nothing in BOTH arms. At 8 ticks the same mutation differed in
+  // only 33-36. The number is a floor set by the window, not a count of the
+  // entries at risk.
   std::size_t sensitive = 0;
   std::vector<std::string> differing;
 
@@ -710,7 +719,7 @@ TEST(ClockCoherentPull, NoCorpusEntryEmitsADifferentSequenceUnderLiveIngress) {
       << "only " << sensitive << " of " << checked << " entries emit a "
          "NON-CONSTANT sequence over " << kSweepTicks
          << " ticks. A mistimed sample of a constant value is the same value, "
-            "so `differing == 0` below would be vacuous. Measured at 36 when "
+            "so `differing == 0` below would be vacuous. Measured at 159 when "
             "this test was written.";
 
   std::string detail;
