@@ -63,6 +63,10 @@
 //   M10b unguarded mint inlined at the call site   -> tests 1, 2 RED (untagged)
 //                                                  -> DOES NOT COMPILE (tagged)
 //
+// Test 2 is now 2a + 2b (see the comment above them, ENC-1041). "tests 1, 2"
+// above means both halves: each reads the origin tag off the real `Listener`,
+// so M7 leaves both on a backstop strand.
+//
 // RELATED, DELIBERATELY NOT TESTED HERE. Ordered delivery additionally requires
 // single-threaded ingress per symbol, which `Dispatcher::onTick`'s contract
 // expressly does not promise (ENC-1005's HIGH finding; ruled under ENC-1337).
@@ -376,10 +380,8 @@ TEST(SubscriptionStrandMint, AShareableReSubscribeJoinsItsOwnDagAndKeepsTheMinte
 
   EXPECT_EQ(srv.exec->subscriptions().buildCount(), 1u)
       << "the re-subscribe built a second DAG for a key it already held";
-  EXPECT_EQ(srv.exec->subscriptions().liveKeys(), 1u);
-  EXPECT_EQ(srv.exec->subscriptions().refCount(
-                srv.exec->subscriptions().liveKeys() ? std::string() : std::string()),
-            0u);  // refCount is keyed; the meaningful assertions are above
+  EXPECT_EQ(srv.exec->subscriptions().liveKeys(), 1u)
+      << "the replaced subscription left a second registry entry behind";
 
   // The DAG is the SAME DAG: one Listener, the same object, the same strand.
   std::size_t listeners = 0;
