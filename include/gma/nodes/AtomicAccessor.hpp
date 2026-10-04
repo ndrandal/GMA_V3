@@ -22,7 +22,7 @@ public:
   // ENC-1335. See the contract on `INode::samplesAtClock`. This node's output
   // is read from the `AtomicStore` and has nothing to do with the value handed
   // to it, so the read must happen at the clock.
-  bool samplesAtClock() const noexcept override { return true; }
+  bool samplesAtClock() const noexcept override { return false; } // ENC-1335 MUTATION M1
   std::function<void()> bindAtClock(const StreamValue& clock) override;
 
 private:
