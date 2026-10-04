@@ -101,10 +101,32 @@ SharedSubscriptionRegistry::acquire(const std::string& key,
       entry->keepAlive = std::move(built.keepAlive);
       entry->building  = false;
       ++builds_;
-      cv_.notify_all();
 
+      // Attach BEFORE waking the waiters, and still under `mu_`: the entry must
+      // never be observable as Live-with-zero-subscribers, or a concurrent
+      // release could not tell "nobody has joined yet" from "the last
+      // subscriber left" and would tear the DAG down under us.
       const auto id = entry->terminal->attach(std::move(sink));
-      if (id == 0) return Lease{};
+      if (id == 0) {
+        // Only reachable if this terminal was shut down between creation and
+        // here, which the identity check above already rules out — handled
+        // anyway, because the alternative is an entry nobody holds a lease on
+        // and that `release` can therefore never reclaim.
+        auto cur2 = entries_.find(key);
+        if (cur2 != entries_.end() && cur2->second == entry) entries_.erase(cur2);
+        auto head = std::move(entry->head);
+        auto keep = std::move(entry->keepAlive);
+        lk.unlock();
+        cv_.notify_all();
+        terminal->shutdown();
+        if (head) head->shutdown();
+        for (auto& n : keep) {
+          if (n) n->shutdown();
+        }
+        return Lease{};
+      }
+      lk.unlock();
+      cv_.notify_all();
       return Lease{this, key, id};
     }
 
