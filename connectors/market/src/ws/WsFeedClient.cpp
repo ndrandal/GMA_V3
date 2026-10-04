@@ -384,8 +384,9 @@ void WsFeedClient::dispatchEvent(feed::FeedEvent& evt, bool dropBookMutations) {
         if (obManager_ && e.payload && e.payload->IsObject()) {
           auto& alloc = e.payload->GetAllocator();
           if (!e.payload->HasMember("bid")) {
-            auto b = obManager_->bestBid(e.symbol);  // MUTATION M5
-            e.payload->AddMember("bid", b.value_or(0.0), alloc);
+            if (auto b = obManager_->bestBid(e.symbol); b.has_value()) {
+              e.payload->AddMember("bid", *b, alloc);
+            }
           }
           if (!e.payload->HasMember("ask")) {
             if (auto a = obManager_->bestAsk(e.symbol); a.has_value()) {
