@@ -8,6 +8,9 @@
 #include "gma/rt/Strand.hpp"
 #include "gma/JsonValidator.hpp"
 #include "gma/nodes/Responder.hpp"
+#include "gma/nodes/SharedTerminal.hpp"
+#include "gma/server/RequestCanonicalKey.hpp"
+#include "gma/server/SharedSubscriptionRegistry.hpp"
 #include "gma/util/Logger.hpp"
 #include "gma/util/Metrics.hpp"
 #include "gma/util/JsonUtil.hpp"
@@ -971,32 +974,22 @@ void ClientSession::handleCancel(const ::rapidjson::Document& doc) {
   }
 
   for (auto& key : toCancel) {
-    std::shared_ptr<gma::INode> root;
-    std::vector<std::shared_ptr<gma::INode>> chainVec;
+    Subscription sub;
     {
       std::lock_guard<std::mutex> lk(reqMu_);
       auto it = active_.find(key);
       if (it != active_.end()) {
-        root = std::move(it->second);
+        sub = std::move(it->second);
         active_.erase(it);
-      }
-      auto cit = chains_.find(key);
-      if (cit != chains_.end()) {
-        chainVec = std::move(cit->second);
-        chains_.erase(cit);
       }
     }
 
-    // Shut down the head AND every node in the keepAlive chain (outside the
-    // lock) — head shutdown() does not propagate down a linear pipeline, so
-    // without this a mid-pipeline timer node keeps ticking until its last
-    // reference is dropped (see close()).
-    if (root) root->shutdown();
-    for (auto& node : chainVec) {
-      if (node) {
-        try { node->shutdown(); } catch (...) {}
-      }
-    }
+    // Outside the lock. ENC-1041: for a SHARED subscription this releases the
+    // lease — detaching only this session's Responder, and tearing the DAG
+    // down only if this was its last subscriber. For a private one it shuts
+    // the head AND every node in the keepAlive chain down, because a head
+    // shutdown() does not propagate down a linear pipeline (see close()).
+    sub.teardown();
 
     ::rapidjson::StringBuffer sb;
     ::rapidjson::Writer<::rapidjson::StringBuffer> w(sb);
