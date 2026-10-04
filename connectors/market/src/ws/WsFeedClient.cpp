@@ -403,7 +403,7 @@ void WsFeedClient::dispatchEvent(feed::FeedEvent& evt, bool dropBookMutations) {
         // a timestampNs since the feed layer was written and nothing ever read
         // it, because gma::Event had nowhere to put it — so the one timestamp
         // ITCH does supply died here, two lines from its consumer.
-        tick.timestampNs = e.timestampNs;
+        // MUTATION M2: dropped
         dispatcher_->onTick(tick);
       }
     }
