@@ -44,6 +44,19 @@ public:
   void start();
   void stop();
 
+  // ---- Message handling ----
+  //
+  // The ingress seam: everything from here down is independent of the socket.
+  // PUBLIC FOR TESTS ONLY, in the same spirit as the public
+  // `nodes::Listener` constructor — production code reaches it only from
+  // onRead(). It is exposed rather than extracted into a free function so a
+  // test drives the REAL routing: the per-frame gap evaluation, the emission
+  // ORDER of an adapter's events (which decides whether the book is mutated
+  // before the tick is dispatched — ENC-1028 depends on exactly that), and
+  // dispatchEvent itself. A copy of this logic in a test helper would prove
+  // the copy correct and the shipped path untested.
+  void handleMessage(const std::string& text);
+
 private:
   // ---- URL parsing ----
   struct Url {
@@ -74,8 +87,6 @@ private:
   // ---- Error ----
   void fail(boost::beast::error_code ec, const char* where);
 
-  // ---- Message handling ----
-  void handleMessage(const std::string& text);
   void dispatchEvent(feed::FeedEvent& evt, bool dropBookMutations);
 
   // ---- ASIO plumbing ----
