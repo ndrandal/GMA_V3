@@ -235,21 +235,25 @@ void ItchAdapter::routeOrderExecuted(const rapidjson::Value& doc,
     // the fill. The trade event is emitted print-only (bookNeutral) so it does
     // NOT consume the book a second time — the TA/print signal is the separate
     // makeTradeTickEvent tick.
+    // ENC-1028: the source-reported event time, rebased to epoch nanos.
+    const uint64_t tsNs = parseTimestampNs(doc);
+
     ObTradeEvent trade{symbol, os.price, execShares, aggr};
     trade.bookNeutral = true;
+    trade.timestampNs = tsNs;
 
     if (execShares >= os.remainingShares) {
         // Fully filled — delete the order and erase tracking state
         out.push_back(ObDeleteEvent{symbol, orderRef});
         out.push_back(trade);
-        out.push_back(makeTradeTickEvent(symbol, os.price, execShares));
+        out.push_back(makeTradeTickEvent(symbol, os.price, execShares, tsNs));
         orders_.erase(it);
     } else {
         // Partial fill — reduce size, keep tracking
         os.remainingShares -= execShares;
         out.push_back(ObUpdateEvent{symbol, orderRef, std::nullopt, os.remainingShares});
         out.push_back(trade);
-        out.push_back(makeTradeTickEvent(symbol, os.price, execShares));
+        out.push_back(makeTradeTickEvent(symbol, os.price, execShares, tsNs));
     }
 
     GMA_METRIC_HIT("feed_ws.order_executed");
@@ -367,12 +371,16 @@ void ItchAdapter::routeTrade(const rapidjson::Value& doc,
     // M1: a top-level ITCH `trade` print is a non-displayable/hidden execution.
     // It must NOT consume displayed resting liquidity, so emit it print-only
     // (bookNeutral). The TA/print signal is the separate trade tick below.
+    // ENC-1028: the source-reported event time, rebased to epoch nanos.
+    const uint64_t tsNs = parseTimestampNs(doc);
+
     ObTradeEvent trade{stock, price, shares, aggr};
     trade.bookNeutral = true;
+    trade.timestampNs = tsNs;
     out.push_back(trade);
 
     // Emit tick to dispatcher for TA computation
-    out.push_back(makeTradeTickEvent(stock, price, shares));
+    out.push_back(makeTradeTickEvent(stock, price, shares, tsNs));
 
     GMA_METRIC_HIT("feed_ws.trade");
 }

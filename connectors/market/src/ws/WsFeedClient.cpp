@@ -357,9 +357,53 @@ void WsFeedClient::dispatchEvent(feed::FeedEvent& evt, bool dropBookMutations) {
 
     if constexpr (std::is_same_v<T, feed::TickEvent>) {
       if (dispatcher_) {
+        // ENC-1028: publish the top of book onto the tick.
+        //
+        // WHY HERE AND NOT THROUGH MarketFieldMap. ITCH carries no top-of-book
+        // field at all — verified against the live feed (wss://feed-sim.v3m.xyz
+        // /feed), whose six message types are add_order, add_order_mpid,
+        // order_executed, order_cancel/delete, order_replace and trade, and not
+        // one of them has a bid or ask member. So the field-alias scan in
+        // MarketTickComputer has nothing to alias on this protocol; it was not
+        // merely unconfigured. The reconstructed book is the only source of a
+        // bid/ask for an L3 feed, and this is the one place that holds both the
+        // tick and the book.
+        //
+        // AS-OF SEMANTICS. handleMessage dispatches an adapter's events in
+        // emission order, and the ITCH handlers emit their book mutations
+        // BEFORE the TickEvent. So this is the top of book immediately AFTER
+        // the message that produced the tick was applied. A `trade` print is
+        // bookNeutral and mutates nothing, so for those the book is unchanged.
+        //
+        // ABSENCE STAYS ABSENCE. bestBid/bestAsk return std::optional, and a
+        // side with no resting liquidity (or a symbol with no book at all)
+        // injects NOTHING. No sentinel is written at any point, so a one-sided
+        // or empty book leaves `bid`/`ask` unset in the AtomicStore rather than
+        // 0 — and 0 is a perfectly plausible price, which is exactly why it
+        // must never stand in for "not reported".
+        if (obManager_ && e.payload && e.payload->IsObject()) {
+          auto& alloc = e.payload->GetAllocator();
+          if (!e.payload->HasMember("bid")) {
+            if (auto b = obManager_->bestBid(e.symbol); b.has_value()) {
+              e.payload->AddMember("bid", *b, alloc);
+            }
+          }
+          if (!e.payload->HasMember("ask")) {
+            if (auto a = obManager_->bestAsk(e.symbol); a.has_value()) {
+              e.payload->AddMember("ask", *a, alloc);
+            }
+          }
+        }
+
         Event tick;
-        tick.symbol  = std::move(e.symbol);
-        tick.payload = std::move(e.payload);
+        // NOTE: e.symbol is read above, before this move.
+        tick.symbol      = std::move(e.symbol);
+        tick.payload     = std::move(e.payload);
+        // ENC-1028: this used to be dropped on the floor. TickEvent has carried
+        // a timestampNs since the feed layer was written and nothing ever read
+        // it, because gma::Event had nowhere to put it — so the one timestamp
+        // ITCH does supply died here, two lines from its consumer.
+        tick.timestampNs = e.timestampNs;
         dispatcher_->onTick(tick);
       }
     }
