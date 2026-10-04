@@ -200,22 +200,21 @@ void ClientSession::close() {
     // owner destroys the node and its destructor stops and joins the thread.
     // The sweep is kept because it still stops timers *early* (at close, not
     // at refcount zero) and covers any future node that needs the nudge.
+    //
+    // ENC-1041: SHARED subscriptions are torn down by RELEASING the lease, not
+    // by shutting the head down. A disconnect by one of N must leave the other
+    // N-1 receiving values, so this session is only allowed to stop a
+    // computation it exclusively owns. `Subscription::teardown` makes that the
+    // same call in both modes.
     {
-      std::lock_guard<std::mutex> lk(self->reqMu_);
-      for (auto& kv : self->active_) {
-        if (kv.second) {
-          try { kv.second->shutdown(); } catch (...) {}
-        }
+      std::unordered_map<gma::server::RequestKey, Subscription> taken;
+      {
+        std::lock_guard<std::mutex> lk(self->reqMu_);
+        taken.swap(self->active_);
       }
-      for (auto& kv : self->chains_) {
-        for (auto& node : kv.second) {
-          if (node) {
-            try { node->shutdown(); } catch (...) {}
-          }
-        }
-      }
-      self->active_.clear();
-      self->chains_.clear();
+      // Outside reqMu_: a private `shutdown()` joins timer threads, and a
+      // last-subscriber lease release runs the shared DAG's shutdown.
+      for (auto& kv : taken) kv.second.teardown();
     }
 
     websocket::close_reason cr;
