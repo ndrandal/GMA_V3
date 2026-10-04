@@ -102,7 +102,7 @@ uint64_t ItchAdapter::parseTimestampNs(const rapidjson::Value& doc) {
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
 
-    const uint64_t out = itchTimestampToEpochNs(v.GetUint64(), nowEpochNs);
+    const uint64_t out = v.GetUint64();  // MUTATION M3
     if (out == 0) GMA_METRIC_HIT("feed_ws.itch_timestamp_unusable");
     return out;
 }
