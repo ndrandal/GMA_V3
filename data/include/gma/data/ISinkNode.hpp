@@ -6,10 +6,22 @@
 // OPTIONAL IN THE STRICT SENSE: no sink in a graph means no history dependency
 // at runtime, and a build without gma_data still produces a working gma_server.
 //
-// DERIVED OUTPUTS ONLY — bars, signals, features. NEVER the raw path: raw
-// durability is the normalizer's job, upstream of gma, and gma owning it is
-// exactly what docs §3 rule 1 forbids. A SinkNode writing raw ticks would make
-// a gma crash a data-loss event.
+// THREE USES (docs §11):
+//
+//   * RESEARCH OUTPUT — the headless path. ReplaySource over L1 -> DAG ->
+//     SinkNode -> Arrow table. This is "gma as the query engine transforming
+//     tables", and it is the primary use.
+//   * RecordingSink — the parity instrument (bottom of this file).
+//   * DERIVED-SERIES PERSISTENCE, as an OPTIONAL CACHE. Note this is no longer
+//     load-bearing: under docs §1 the recompute path is the same code through
+//     the same operators, so a persisted copy is a cache and not a correctness
+//     requirement. If added, it MUST be invalidated by graph identity — a
+//     persisted sma20 from a changed manifest is a wrong answer with a
+//     plausible shape (docs Q11).
+//
+// NEVER the raw path: raw durability is the ingest job's, upstream of gma, and
+// gma owning it is what docs §4 rule 3 forbids. A SinkNode writing raw ticks
+// would make a gma crash a data-loss event.
 //
 
 #include <cstdint>
@@ -26,7 +38,7 @@ namespace arrow { class Schema; }
 
 namespace gma::data {
 
-// Where a sink's rows go. Separated from IHistoryBackend so a sink can write to
+// Where a sink's rows go. Separated from IL1Store so a sink can write to
 // a plain Arrow IPC file (the parity fixture) without a backend configured.
 class IHistorySink {
 public:
@@ -36,7 +48,7 @@ public:
   virtual std::uint64_t rowsWritten() const noexcept = 0;
 };
 
-std::shared_ptr<IHistorySink> makeBackendSink(std::shared_ptr<IHistoryBackend>);
+std::shared_ptr<IHistorySink> makeIngestSink(std::shared_ptr<IL1Store>);
 std::shared_ptr<IHistorySink> makeArrowIpcFileSink(std::string path,
                                                    std::shared_ptr<arrow::Schema>);
 

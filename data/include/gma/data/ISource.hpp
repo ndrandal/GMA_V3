@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "gma/data/IHistoryBackend.hpp"
+#include "gma/data/Shim.hpp"
 #include "gma/data/IProviderAdapter.hpp"
 #include "gma/data/Schema.hpp"
 #include "gma/engine/IngressRegistry.hpp"
@@ -197,19 +198,26 @@ private:
 class ReplaySource final : public ISource {
 public:
   struct Config {
+    // The SAME JSON node graph TreeBuilder consumes. Passed to data::Planner,
+    // which derives symbols, columns, record kinds, shards AND THE WARM-UP
+    // DEPTH from it (docs §5.1). There is deliberately no `lookbackNs` here:
+    // a human setting warm-up per request gets it wrong silently, and in the
+    // direction of too little, producing output that looks plausible and is
+    // warm-up garbage.
+    std::string manifestJson;
     std::vector<std::string> symbols;
     TimeRange   window;                            // half-open [from, to)
     ReplayMode  mode = ReplayMode::Emit;
-    bool        wantL2 = false;
-    // Seek the nearest persisted book snapshot at or before window.fromNs and
-    // apply it before any delta (docs §4.6 step 1). Without it an L2 replay
-    // starts from an empty book and every early depth read is wrong.
+    // Seek the nearest persisted book snapshot at or before the effective
+    // window start and apply it before any delta (docs §9.5, §8.5). Without it
+    // an L2 replay starts from an empty book and every early depth read is
+    // wrong.
     bool        seedFromSnapshot = true;
-    std::size_t batchRows = 0;                     // 0 == backend default
+    ShimConfig  shim{};
   };
 
   ReplaySource(Config cfg,
-               std::shared_ptr<IHistoryBackend> history,
+               std::shared_ptr<IL1Store> store,
                SourceTargets targets);
   ~ReplaySource() override;
 
@@ -241,11 +249,11 @@ struct SpliceConfig {
   std::vector<std::string> symbols;
   bool  wantL2 = false;
 
-  // Warm-up depth, backwards from the splice point. Expressed in event time
-  // rather than in rows because the thing being warmed is a period-N
-  // indicator over an event-time window, and an OTC symbol's row count over an
-  // hour is not predictable.
-  std::int64_t lookbackNs = 0;
+  // The manifest, for the same reason ReplaySource::Config carries one: the
+  // warm-up depth is DERIVED from the graph by data::Planner, not configured
+  // (docs §5.1). A period-200 indicator needs 200 bars of input before the
+  // window start and only the graph knows that.
+  std::string manifestJson;
 
   // Default Suppress: a live subscription should not emit its warm-up
   // (docs C4, Q3).
@@ -269,7 +277,15 @@ struct SpliceConfig {
   bool          seedFromSnapshot = true;
 };
 
-// The deliverable: subscribe-and-buffer, backfill, replay, drain, pass through.
+// DEMOTED, DELIBERATELY (docs/data-layer.md §9). Databento Plus is not
+// affordable, so there is no live Databento feed, so nothing in the research or
+// chart-fill path splices. The only thing exercising this is feed-simulator.
+// It stays designed because chart-attach-then-live needs it and live arrives
+// when the plan tier does — but it is NOT on the critical path and must not
+// lead the ticket order. Named risk: it will ship exercised only against a
+// simulator.
+//
+// Subscribe-and-buffer, backfill, replay, drain, pass through.
 //
 // PER-SYMBOL STATE, NOT PER-SOURCE (docs §4.2). AAPL may be Live while MSFT is
 // still Backfilling, because history returns at different depths and first
@@ -302,7 +318,7 @@ public:
   SplicedSource(SpliceConfig cfg,
                 std::shared_ptr<IProviderAdapter> adapter,
                 std::shared_ptr<INormalizer> normalizer,
-                std::shared_ptr<IHistoryBackend> history,
+                std::shared_ptr<IL1Store> store,
                 SourceTargets targets);
   ~SplicedSource() override;
 

@@ -140,11 +140,17 @@ struct RecordHeader {
   std::int64_t  tsRecvNs    = 0;        // diagnostics only.
   std::uint64_t providerSeq = 0;
   std::uint32_t sessionId   = 0;
-  // Borrowed from the batch's dictionary; valid only for the duration of the
-  // onRecord call. A node that needs to retain it copies it — the same contract
-  // StreamValue::symbol already has.
-  std::string_view symbol;
-  std::string_view venue;
+
+  // INTERNED IDS, NOT STRINGS (docs/data-layer.md §5.3, §6).
+  //
+  // StreamValue carries `std::string symbol`, so today a symbol is HEAP-COPIED
+  // into every value on every edge of every DAG. For a chart tick that is
+  // irrelevant; for a research scan over a month of raw L1 that single copy is
+  // a measurable fraction of total cost. The shim's decode interns once per
+  // distinct symbol (data::SymbolTable) and everything downstream carries the
+  // id. Resolve back to text only at an output boundary.
+  std::uint32_t symbolId    = 0;
+  std::uint32_t venueId     = 0;
 };
 
 // A trade or an L1 quote, flattened. One struct for both because the engine

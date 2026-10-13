@@ -1,18 +1,56 @@
 #pragma once
 //
-// History backend — design sketch (ENC-1478, docs/data-layer.md §6).
+// L1 row source — design sketch (ENC-1478, docs/data-layer.md §1, §8).
 // NOT IN THE BUILD. See data/README.md.
 //
-// FOUR OPERATIONS AND NOTHING ELSE. The interface is narrow on purpose: it is
-// the contract that lets a deployment swap Parquet-on-disk for a shared
-// ClickHouse cluster with NO gma code change, and every member added to it is
-// another thing both backends have to mean the same way.
+// ============================================================================
+// THIS INTERFACE SELECTS ROWS. IT DOES NOT COMPUTE VALUES.
+// ============================================================================
 //
-// gma code does not branch on which backend it has. capabilities() exists for
-// OPERATOR-FACING STARTUP VALIDATION only — the two backends genuinely differ
-// on concurrent writers and retention, and the alternative to reporting the
-// difference is pretending it away and having the splice behave differently per
-// deployment.
+// docs/data-layer.md §1 is the governing decision: ClickHouse is indexed,
+// compressed, columnar STORAGE AND SELECTION, and gma performs 100% of the
+// computation through one implementation of every operator.
+//
+// The reason is not architectural taste. A transpiler that reimplemented gma's
+// math in SQL would produce small numerical differences — float accumulation
+// order, bucket edge inclusivity, EMA seeding, gap handling — and this system
+// exists to read differences of that size as signal. A discrepancy
+// manufactured by the storage layer is indistinguishable from an indication,
+// so there is no tolerance at which a second implementation is safe.
+//
+// Therefore the ONLY operations this interface may push into the store are
+// lossless by construction — a row either satisfies a predicate or it does
+// not, and no arithmetic happens on the way:
+//
+//     permitted : WHERE on symbol / ts_event / provider_seq
+//                 partition pruning
+//                 column projection
+//                 ORDER BY matching the physical primary key
+//                 LIMIT, AT THE QUERY-LAYER BOUNDARY ONLY (see below)
+//
+//     FORBIDDEN : any aggregate function    (avg, sum, min, max, count, argMin)
+//                 any window function       (OVER, LAST_VALUE, exponentialMovingAverage)
+//                 any expression in the projection list
+//                 GROUP BY of any kind
+//                 time bucketing            (toStartOfMinute, intDiv(ts, N))
+//
+// LIMIT HAZARD. A LIMIT is safe as a page cap on a RAW row request. It is NOT
+// safe as a bound on a graph's input: it truncates the warm-up region and so
+// changes every value the graph emits. The planner emits LIMIT only for a raw
+// page, never for a computation feed.
+//
+// Enforcement is a LINT on the generated SQL (Shim.hpp, docs §5.4), not a
+// parity diff. A lint fails at build time on the SHAPE of the query; a diff
+// can only detect a numerical divergence after it has shipped, and across two
+// engines it would need a tolerance — which is the noise floor we cannot
+// accept.
+//
+// NO DERIVED LAYERS (docs §8.1). There is no L2, no rollup, no materialized
+// bar table, no feature store. Research is ad hoc with no stable access
+// pattern, so a derived layer is a bet on queries nobody has written; and
+// under §1 any COMPUTED layer would be a second implementation besides.
+// ClickHouse PROJECTIONS are allowed and are not a layer — same data, same
+// columns, no new semantics, just a second physical sort order (docs §8.2).
 //
 
 #include <cstdint>
@@ -21,8 +59,8 @@
 #include <optional>
 #include <span>
 #include <string>
-#include <unordered_map>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "gma/data/Schema.hpp"
@@ -37,169 +75,149 @@ struct CanonicalBatch;     // IProviderAdapter.hpp
 // ---------------------------------------------------------------------------
 
 struct BackendCapabilities {
-  bool concurrentWriters   = false;  // Parquet: false. ClickHouse: true.
-  bool serverSidePredicate = false;  // pushdown beyond partition pruning
-  bool retentionPolicy     = false;  // TTL managed by the store
-  bool snapshots           = false;  // serves latestSnapshotAtOrBefore
-  bool transactional       = false;  // an append is all-or-nothing
-  std::string describe;              // one line, for the startup log
+  bool concurrentWriters = false;
+  bool projections       = false;  // a second physical sort order (docs §8.2)
+  bool skipIndexes       = false;
+  bool snapshots         = false;  // serves latestSnapshotAtOrBefore (docs §8.5, Q9)
+  bool idempotentReIngest= false;  // ReplacingMergeTree on a UNIQUE sort key (docs §8.6, C12)
+  std::string describe;            // one line, for the startup log
 };
 
-// A pull-based batch stream. Pull rather than a callback because a ReplaySource
-// must control the rate at which it feeds the engine — a push stream from
-// DuckDB would deliver the whole window as fast as it can read, and the
-// deterministic replay (one ingress thread, drain at the end) needs to consume
-// at its own pace.
-class IBatchStream {
+// A PULL-based block stream, and pull is the point: gma computes slower than
+// ClickHouse reads, so a push stream would deliver the whole window as fast as
+// the wire allows and buffer a month in RAM. The consumer sets the pace
+// (docs §5.2 requirement 3).
+class IBlockStream {
 public:
-  virtual ~IBatchStream() = default;
-  // Returns nullptr-batch when exhausted.
+  virtual ~IBlockStream() = default;
+  // std::nullopt when exhausted.
   virtual std::optional<CanonicalBatch> next() = 0;
   virtual void cancel() noexcept = 0;
 };
 
-// ---------------------------------------------------------------------------
+// What rows to select. Deliberately NOT a query string and NOT an interval:
+// there is no `interval` parameter anywhere in this interface, because an
+// interval implies bucketing and bucketing is computation. Bars are produced
+// by gma's TumblingWindow / BucketTime, from the rows this returns.
+struct Selection {
+  std::span<const std::string> symbols;
+  TimeRange                    range;        // half-open [fromNs, toNs) on ts_event
+  RecordKind                   kind = RecordKind::Trade;
 
-class IHistoryBackend {
+  // Column projection, derived by the planner from the fields the manifest
+  // actually reads (docs §5.1). Empty means every column of `kind`'s schema,
+  // which on a column store is the expensive default and should be rare.
+  std::span<const std::string> columns;
+
+  // Raw-page cap only. MUST be nullopt for a computation feed — see the LIMIT
+  // hazard above.
+  std::optional<std::uint64_t> rawPageLimit;
+
+  // Cursor for backward pagination of a raw page (the chart scroll-back
+  // shape; feed-simulator's `before` parameter is the prior art).
+  std::optional<std::int64_t>  beforeNs;
+};
+
+class IL1Store {
 public:
-  virtual ~IHistoryBackend() = default;
+  virtual ~IL1Store() = default;
 
   virtual std::string_view name() const noexcept = 0;
   virtual BackendCapabilities capabilities() const noexcept = 0;
 
-  // READ. Half-open [range.fromNs, range.toNs) on ts_event, ordered by
-  // (symbol, ts_event, provider_seq) — the same order the ClickHouse MergeTree
-  // key and the Parquet within-file sort use, so neither backend has to sort to
-  // answer.
-  //
-  // Half-open is not a detail: a closed upper bound re-delivers the boundary
-  // record on a splice, which is the duplicate-bar bug the seq dedup exists to
-  // catch rather than to need.
-  virtual std::unique_ptr<IBatchStream> query(
-      std::span<const std::string> symbols,
-      TimeRange range,
-      RecordKind kind) = 0;
+  // READ. Rows ordered by (symbol, ts_event, provider_seq) — the physical
+  // primary key, so no sort executes. Half-open on ts_event: a closed upper
+  // bound re-delivers the boundary record at a splice, which is the
+  // duplicate-bar bug the seq dedup exists to catch rather than to need.
+  virtual std::unique_ptr<IBlockStream> select(const Selection& sel) = 0;
 
   // READ, the book case. The newest persisted snapshot at or before tsNs.
+  // Only when capabilities().snapshots.
   //
-  // This is what makes an arbitrary-window L2 replay affordable: without it,
-  // seeding a book means replaying every delta from session open, O(session)
-  // per backtest (docs §4.6, Q6 on cadence).
+  // This is the one piece of materialized derived state in the design and it
+  // is argued rather than assumed (docs §8.5, Q9): without it, seeding a book
+  // for an arbitrary window means replaying every delta from session open —
+  // O(session) PER RESEARCH RUN. The argument for it is that a book snapshot
+  // is raw book STATE, not an aggregate, and OrderBookManager is the single
+  // implementation of applying deltas either way.
   virtual std::optional<CanonicalBatch> latestSnapshotAtOrBefore(
       std::string_view symbol, std::int64_t tsNs) = 0;
 
-  // WRITE. Batched; the caller decides the batch size. A backend that cannot
-  // accept concurrent appends says so in capabilities() and the normalizer
-  // serialises.
-  virtual void append(const CanonicalBatch& batch) = 0;
+  // INGEST COMPLETENESS (docs §12.3). Returns true iff [fromNs, toNs) has been
+  // fully ingested for this symbol.
+  //
+  // This exists because the three cases below are INDISTINGUISHABLE in a plain
+  // SELECT, and the third silently returns a flat market:
+  //     the market was quiet          -> no seq discontinuity; this is data
+  //     the provider has a hole       -> seq discontinuity; a `gaps` row
+  //     WE HAVE NOT INGESTED IT YET   -> nothing at all
+  // A query over a window that is not complete must FAIL, not return a short
+  // answer.
+  virtual bool isComplete(std::string_view symbol, TimeRange range) const = 0;
 
-  // Durability barrier. Returns once everything appended so far is readable by
-  // a subsequent query() — which is precisely what
-  // INormalizer::flushedThroughNs is reporting on, and what a splice waits for
-  // rather than reading a short window as an empty one (docs §8.1).
+  // WRITE (ingest side only; gma never writes the raw path). Insert
+  // symbol-sorted batches per day partition: the sort key leads with symbol,
+  // so raw DBN file order forces a per-part re-sort (docs §8.6).
+  virtual void insert(const CanonicalBatch& batch) = 0;
+
+  // Durability barrier: returns once everything inserted is visible to a
+  // subsequent select().
   virtual void flush() = 0;
 };
 
 // ---------------------------------------------------------------------------
-// Default backend: Parquet on disk, queried through embedded DuckDB
+// ClickHouse L1 — THE store, not an optional backend
 // ---------------------------------------------------------------------------
 //
-// THE DEFAULT, and the reason "no new required services in the default
-// deployment" holds: no server, no daemon, no port. DuckDB reads Parquet
-// natively and returns Arrow, so the read path has no row-by-row conversion
-// either.
+// docs/data-layer.md C10: with L1 in ClickHouse, history requires a service,
+// which contradicts the brief's original "no new required services". Resolved
+// as TWO DEPLOYMENT PROFILES rather than one compromise —
+//     research / ingest : ClickHouse L1 is a required service, by design
+//     client            : live-only, or reads a central L1 over the wire;
+//                         no local store at all
+// — and the dependency budget IMPROVES, because with no Parquet store there is
+// no DuckDB (docs §15). Parquet and DuckDB are dropped from the design
+// entirely; this file previously declared a ParquetHistoryBackend as the
+// default and that is gone.
 //
-// Layout mirrors the ClickHouse ORDER BY so the two answer the same query the
-// same way:
-//     <root>/<kind>/symbol=<SYM>/date=<YYYY-MM-DD>/<session>-<seq>.parquet
-// with rows sorted by (ts_event, provider_seq) inside each file, so DuckDB
-// prunes on the path AND on the row group.
+// DDL: data/schema/clickhouse.sql.
 //
-// OPEN: whether DuckDB is justified at all. It is the largest single dependency
-// in the default deployment, and Arrow's own Dataset API may cover the
-// predicate pushdown this interface needs. Measure before vendoring —
-// docs/data-layer.md §11, Q14.
-class ParquetHistoryBackend final : public IHistoryBackend {
-public:
-  struct Config {
-    std::string  root;                      // directory; created if absent
-    std::string  compression = "zstd";
-    std::int32_t compressionLevel = 3;
-    std::size_t  rowGroupRows = 0;          // 0 == Arrow default
-    // Sort each batch by symbol before writing. Keeps one file per
-    // (symbol, date) rather than a file per batch per symbol, which is the
-    // difference between pruning and a full scan.
-    bool         sortBySymbolOnAppend = true;
-  };
-
-  explicit ParquetHistoryBackend(Config cfg);
-  ~ParquetHistoryBackend() override;
-
-  std::string_view name() const noexcept override;        // "parquet+duckdb"
-  BackendCapabilities capabilities() const noexcept override;
-
-  std::unique_ptr<IBatchStream> query(std::span<const std::string> symbols,
-                                      TimeRange range,
-                                      RecordKind kind) override;
-  std::optional<CanonicalBatch> latestSnapshotAtOrBefore(
-      std::string_view symbol, std::int64_t tsNs) override;
-  void append(const CanonicalBatch& batch) override;
-  void flush() override;
-
-private:
-  struct Impl;
-  std::unique_ptr<Impl> impl_;
-};
-
-// ---------------------------------------------------------------------------
-// Optional backend: clickhouse-server
-// ---------------------------------------------------------------------------
-//
-// STUB. For deployments needing a shared, concurrent, TB-scale store. NOT in
-// the default deployment and not a required service.
-//
-// DDL: data/schema/clickhouse.sql — MergeTree, PARTITION BY
-// toYYYYMMDD(ts_event), ORDER BY (symbol, ts_event, provider_seq),
-// DateTime64(9,'UTC'), DoubleDelta on ts/seq, Delta+ZSTD on prices.
-//
-// TRANSPORT IS UNDECIDED (docs Q7): clickhouse-cpp native, or HTTP with
-// FORMAT ArrowStream. HTTP costs some throughput and saves a dependency; given
-// the backend is optional, HTTP is the leaning. The enum below exists so the
-// decision is visible rather than buried in a constructor.
-//
-// NOT a streaming tail. ClickHouse is a store, not a bus — the live path is
-// always the normalizer's Arrow IPC tail (docs §9, deferred).
-class ClickHouseHistoryBackend final : public IHistoryBackend {
+// TRANSPORT IS UNDECIDED AND IS BENCHMARK B1 (docs §5.2, §14.3). Native
+// protocol speaks column blocks; HTTP speaks `FORMAT ArrowStream`. Either
+// avoids row materialization and which is faster is unmeasured. This reverses
+// an earlier lean toward HTTP: that was right when the backend was optional,
+// and the shim's throughput is now the entire performance story.
+class ClickHouseL1Store final : public IL1Store {
 public:
   enum class Transport : std::uint8_t { Native = 0, HttpArrowStream = 1 };
 
   struct Config {
-    std::string  endpoint;                  // host:port or URL
+    std::string  endpoint;
     std::string  database = "gma";
     std::string  user;
-    std::string  password;                  // from env; never from an INI file
-    Transport    transport = Transport::HttpArrowStream;
+    std::string  password;             // from env; never from an INI file
+    Transport    transport = Transport::Native;   // pending B1
     bool         tls = false;
     std::size_t  insertBatchRows = 0;
+    std::size_t  selectBlockRows = 0;  // tuned to cache, not convenience
     std::int32_t queryTimeoutMs = 0;
   };
 
-  explicit ClickHouseHistoryBackend(Config cfg);
-  ~ClickHouseHistoryBackend() override;
+  explicit ClickHouseL1Store(Config cfg);
+  ~ClickHouseL1Store() override;
 
-  std::string_view name() const noexcept override;        // "clickhouse"
+  std::string_view name() const noexcept override;      // "clickhouse-l1"
   BackendCapabilities capabilities() const noexcept override;
 
-  std::unique_ptr<IBatchStream> query(std::span<const std::string> symbols,
-                                      TimeRange range,
-                                      RecordKind kind) override;
+  std::unique_ptr<IBlockStream> select(const Selection& sel) override;
   std::optional<CanonicalBatch> latestSnapshotAtOrBefore(
       std::string_view symbol, std::int64_t tsNs) override;
-  void append(const CanonicalBatch& batch) override;
+  bool isComplete(std::string_view symbol, TimeRange range) const override;
+  void insert(const CanonicalBatch& batch) override;
   void flush() override;
 
   // Applies data/schema/clickhouse.sql. Idempotent (every statement is
-  // IF NOT EXISTS). Startup-time only; gma never issues DDL on a hot path.
+  // IF NOT EXISTS). Startup only; gma never issues DDL on a hot path.
   void ensureSchema();
 
 private:
@@ -209,11 +227,33 @@ private:
 
 // ---------------------------------------------------------------------------
 
-// Factory from config, so the backend choice is an INI key and nothing more.
-// Unknown kind is an error at startup, not a silent fallback to the default —
-// a deployment that asked for the shared store and quietly got a local
-// directory is worse than one that refuses to boot.
-std::shared_ptr<IHistoryBackend> makeHistoryBackend(
+// A fixture-backed store for CI: the replay-parity gate (docs §14.2) must run
+// with no service. Reads the same canonical batches out of Arrow IPC files and
+// honours the same Selection contract, including isComplete().
+class FixtureL1Store final : public IL1Store {
+public:
+  explicit FixtureL1Store(std::string dir);
+  ~FixtureL1Store() override;
+
+  std::string_view name() const noexcept override;      // "fixture-l1"
+  BackendCapabilities capabilities() const noexcept override;
+
+  std::unique_ptr<IBlockStream> select(const Selection& sel) override;
+  std::optional<CanonicalBatch> latestSnapshotAtOrBefore(
+      std::string_view symbol, std::int64_t tsNs) override;
+  bool isComplete(std::string_view symbol, TimeRange range) const override;
+  void insert(const CanonicalBatch& batch) override;
+  void flush() override;
+
+private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+// Unknown kind is an error at startup, never a silent fallback: a deployment
+// that asked for the shared store and quietly got a fixture directory is worse
+// than one that refuses to boot.
+std::shared_ptr<IL1Store> makeL1Store(
     std::string_view kind,
     const std::unordered_map<std::string, std::string>& params);
 

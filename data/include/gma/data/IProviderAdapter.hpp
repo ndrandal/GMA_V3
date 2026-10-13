@@ -108,7 +108,7 @@ public:
   // capabilities().bookSnapshots. This is the LIVE half of the gap-recovery
   // callback the data layer installs on
   // OrderBookManager::requestSnapshotFn (docs §4.6 step 3); the replay half
-  // reads IHistoryBackend::latestSnapshotAtOrBefore instead.
+  // reads IL1Store::latestSnapshotAtOrBefore instead.
   virtual std::vector<std::byte> snapshotRequestFrame(std::string_view symbol) = 0;
 
   // Historical fetch, when the provider serves one. Providers that do not
