@@ -64,18 +64,40 @@
 //  1. A PRINT NEVER CONSUMES RESTING LIQUIDITY. `ItchAdapter` sets
 //     `ObTradeEvent::bookNeutral` at both of its emission sites
 //     (`ItchAdapter.cpp:185`, `:317`) and `WsFeedClient.cpp:382-386` honours
-//     it. Every `ObTradeEvent` in this repo is book-neutral — there is no
-//     site that emits one with the flag clear — and DBN agrees from the other
-//     side: its own documentation for `Action::Trade` and `Action::Fill` is
-//     "Does not affect the book." So `BookAction::Trade` rows in
-//     `book_events` are **unconditionally** book-neutral, which is why
-//     `gma.book_events` has no `book_neutral` column: the value is a
-//     constant, not a field. `TickRecord::bookNeutral` is set on every
-//     `trades` row for the same reason (SPEC D12, docs C13).
-//  2. `epoch` IS BUMPED BY A CLEAR, and every record after one carries the new
-//     epoch. `OrderKey` carries it so a pre-reset order cannot be matched by a
-//     post-reset message. The Clear row itself carries the NEW epoch, matching
-//     `OrderBookManager::onReset(symbol, newEpoch)`.
+//     it. DBN agrees from the other side: its own documentation for
+//     `Action::Trade` and `Action::Fill` is "Does not affect the book."
+//
+//     So `BookAction::Trade` rows produced BY THIS ADAPTER are
+//     unconditionally book-neutral, and that is why `gma.book_events` needs
+//     no `book_neutral` column — for a DBN-fed table the value is a constant.
+//
+//     Say that precisely, because the loose version of it is false and the
+//     difference decides whether a future provider may break it silently.
+//     `bookNeutral` is NOT a repo-wide invariant: `FeedEvent.hpp:64` defaults
+//     it to `false`, four test sites in `tests/feed/FeedEventDispatchTest.cpp`
+//     construct an `ObTradeEvent` without setting it, and
+//     `WsFeedClient.cpp:385-387` has a live `!e.bookNeutral` branch that DOES
+//     call `obManager_->onTrade`. A non-neutral trade is representable and is
+//     what a feed whose print *is* the book mutation would legitimately use.
+//     What holds is narrower and sufficient: both of `ItchAdapter`'s
+//     production emission sites set it, and DBN's contract makes it true of
+//     every row this adapter emits. A provider that is not DBN must state its
+//     own answer rather than inherit this one. `TickRecord::bookNeutral` is
+//     set on every `trades` row on the same basis (SPEC D12, docs C13).
+//  2. `epoch` IS BUMPED BY A CLEAR, per instrument, and every record after one
+//     carries the new epoch. The Clear row itself carries the NEW epoch,
+//     matching `OrderBookManager::onReset(symbol, newEpoch)`.
+//
+//     WHAT ACTUALLY STOPS A PRE-RESET ORDER BEING MATCHED BY A POST-RESET
+//     MESSAGE, here, is the erase loop in the `Clear` case: it drops every
+//     tracked order for that instrument, so a later Cancel for a pre-reset
+//     `order_id` finds nothing and resolves as an unknown-order Delete rather
+//     than against a stale resting size. (`gma::OrderKey` in
+//     `connectors/market/include/gma/book/OrderBook.hpp` carries an epoch and
+//     is what protects the BOOK downstream; this adapter's own private
+//     `OrderKey` is `{instrumentId, orderId}` and carries no epoch — it does
+//     not need one, because the map is emptied instead.) Removing that erase
+//     loop is caught by `ClearBumpsTheEpochAndDropsTrackedOrders`.
 //  3. CANCEL IS A DELTA, so it needs the resting size. DBN's `Cancel` `size`
 //     is the quantity *removed*, exactly like ITCH's partial cancel — which
 //     is why `ItchAdapter` keeps `orders_` and resolves cancel-of-N into
@@ -414,9 +436,18 @@ class DatabentoAdapter {
     // Bound on the resting-order map, with the same justification as
     // `ItchAdapter::kMaxTrackedOrders`: entries are erased on
     // delete/full-cancel/clear, but a stream of orders never subsequently
-    // removed would grow it without limit. At the cap the oldest bucket entry
-    // is evicted, which forfeits delta resolution for that (pathologically
-    // old) order and keeps memory bounded.
+    // removed would grow it without limit. At the cap AN ARBITRARY entry is
+    // evicted, which forfeits delta resolution for that one order and keeps
+    // the map at or below the cap.
+    //
+    // "Arbitrary", not "oldest": the eviction is `orders_.erase(begin())` and
+    // `std::unordered_map::begin()` is whatever bucket order puts first, which
+    // the container does not relate to insertion order. `ItchAdapter`'s own
+    // comment at the equivalent site calls it "the oldest bucket entry" and
+    // that is not a promise the container makes. Nothing here depends on
+    // which entry goes — a stream that hits this cap has already lost delta
+    // resolution somewhere — but the comment should not claim an ordering the
+    // code cannot keep.
     std::size_t maxTrackedOrders = 1u << 20;
 
     // THE ONE POLICY SWITCH, AND IT IS A MEASUREMENT HOOK, NOT A PREFERENCE.
@@ -481,6 +512,29 @@ class DatabentoAdapter {
   const std::optional<dbn::Metadata>& metadata() const noexcept { return meta_; }
   const Stats& stats() const noexcept { return stats_; }
 
+  // The gateway diagnostics DBN carries that no canonical column holds.
+  // SURFACED RATHER THAN DECODED AND DROPPED, for two reasons.
+  //
+  // `channel_id` is the scope within which DBN's `sequence` — which becomes
+  // our `provider_seq` — is monotonic. D6's dedup key is
+  // `(session_id, provider_seq)` and `book_events`' sort key ends in it, so a
+  // stream that mixes channels is a stream where that is not a per-symbol
+  // total order. `IProviderAdapter::ProviderCapabilities::seqIsGlobal` exists
+  // for exactly this distinction, and ENC-1483/T6 has to check it against a
+  // real 7-day file; `minChannelId != maxChannelId` is the two-byte answer.
+  //
+  // And a field that is decoded but unreadable is a field no test can gate,
+  // which is how a wrong byte offset survives a green suite. `ts_in_delta` is
+  // the only signed-32 field in either record, so this accessor is what makes
+  // that load path reachable at all.
+  struct Gateway {
+    std::uint8_t channelId    = 0;      // most recent record (MboMsg only)
+    std::int32_t tsInDelta    = 0;      // most recent record: ts_recv - ts_event, ns
+    std::uint8_t minChannelId = 0xFF;   // over the whole stream
+    std::uint8_t maxChannelId = 0;
+  };
+  const Gateway& gateway() const noexcept { return gw_; }
+
   const std::vector<TickRecord>& trades() const noexcept { return ticks_; }
   const std::vector<BookRecord>& bookEvents() const noexcept { return book_; }
 
@@ -501,6 +555,11 @@ class DatabentoAdapter {
   // Resting size this adapter believes an order holds, or nullopt if untracked.
   std::optional<std::uint64_t> restingSize(std::uint32_t instrumentId,
                                            std::uint64_t orderId) const;
+  // How many orders are tracked right now. Exists so a test can assert the
+  // INVARIANT (`<= Config::maxTrackedOrders`) rather than the eviction
+  // counter: a no-op eviction that still bumps `Stats::evictedOrders` passes
+  // a counter check and fails this one.
+  std::size_t trackedOrders() const noexcept { return orders_.size(); }
 
  private:
   struct OrderKey {
@@ -555,6 +614,7 @@ class DatabentoAdapter {
 
   std::unordered_map<OrderKey, std::uint64_t, OrderKeyHash> orders_;
   std::unordered_map<std::uint32_t, std::uint32_t>          epochs_;
+  Gateway                                                   gw_;
 
   std::vector<TickRecord> ticks_;
   std::vector<BookRecord> book_;
