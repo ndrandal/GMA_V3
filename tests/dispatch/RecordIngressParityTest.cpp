@@ -63,6 +63,7 @@
 #include "gma/data/SymbolTable.hpp"
 #include "gma/engine/FieldSource.hpp"
 #include "gma/engine/IEventComputer.hpp"
+#include "gma/engine/JsonFieldSource.hpp"
 #include "gma/engine/RecordFieldSource.hpp"
 #include "gma/nodes/INode.hpp"
 #include "gma/rt/ThreadPool.hpp"
@@ -482,19 +483,48 @@ TEST(RecordIngressParityTest, RecordsRouteToTheTickComputerSet) {
   EXPECT_EQ(Dispatcher::recordEventType(), "tick");
 }
 
-TEST(RecordIngressParityTest, ParityHoldsWithATimestampFieldConfigured) {
-  // The one place the two FieldSources could legitimately have disagreed:
-  // `MarketTickComputer` reads `timestampField` as an exact u64, and
-  // rapidjson's `IsUint64()` is false for a double. `RecordFieldSource`
-  // refuses `tryGetUint64` for every field so the two agree for EVERY field
-  // map, not only the default one. Drive a map that names a field the record
-  // path does emit.
-  auto cfg = defaultCfg();
-  cfg.sourceProfileName = "parity";   // no-op for the engine; documents intent
-  const Observed json = drive(Path::Json, cfg);
-  const Observed rec  = drive(Path::Record, cfg);
-  EXPECT_EQ(json.store, rec.store);
-  EXPECT_EQ(json.deliveries, rec.deliveries);
+TEST(RecordIngressParityTest, NoFieldAnswersTryGetUint64OnEitherPath) {
+  // The ONE place the two FieldSources could legitimately have disagreed, and
+  // it is reachable from a config file rather than from code.
+  //
+  // `MarketTickComputer` reads `MarketFieldMap::timestampField` as an exact
+  // `u64`, because a nanosecond epoch does not survive a `double`. rapidjson
+  // answers `IsUint64()` only for a value STORED as an integer, so a field map
+  // naming a size column (`market.source.timestampField = size`) would read a
+  // timestamp on whichever path happened to carry exact integers and not on
+  // the other. `RecordFieldSource::tryGetUint64` therefore refuses every
+  // field, which makes the two paths identical for EVERY field map instead of
+  // only the default one.
+  //
+  // Asserted at the FieldSource level rather than by driving a Dispatcher,
+  // because the field map belongs to the connector's registry factory and
+  // rewriting it would mean writing a process-global registry (ENC-1102).
+  const data::TickRecord rec = makeRecord(1, 100.25, 10, 100.20, 100.30);
+  const engine::RecordFieldSource recFields(rec);
+  const Event ev = equivalentEvent(kTicker, rec);
+  const engine::JsonFieldSource jsonFields(ev.payload.get());
+
+  std::vector<std::string> names;
+  {
+    struct Collect final : engine::NumericFieldSink {
+      std::vector<std::string>* out;
+      void field(const std::string& name, double) override { out->push_back(name); }
+    } collect;
+    collect.out = &names;
+    recFields.forEachNumber(collect);
+  }
+  ASSERT_FALSE(names.empty()) << "the record emitted no field — vacuous";
+
+  for (const auto& n : names) {
+    std::uint64_t a = 1, b = 1;
+    EXPECT_FALSE(recFields.tryGetUint64(n, a)) << n;
+    EXPECT_FALSE(jsonFields.tryGetUint64(n, b)) << n;
+    // And both still read as numbers, so nothing is simply missing.
+    double da = 0.0, db = 0.0;
+    EXPECT_TRUE(recFields.tryGetNumber(n, da)) << n;
+    EXPECT_TRUE(jsonFields.tryGetNumber(n, db)) << n;
+    EXPECT_EQ(describeDouble(da), describeDouble(db)) << n;
+  }
 }
 
 // ===========================================================================
