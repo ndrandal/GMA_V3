@@ -179,9 +179,14 @@ def cmd_apply(args):
     if not statements:
         print("could not run: 0 statements parsed from %s" % SCHEMA, file=sys.stderr)
         return 2
+    print("  " + describe_target(args.url, args.how, args.offset))
     print("server:  %s" % ch("SELECT version() FORMAT TSVRaw", args.url).strip())
     if args.fresh:
-        print("--fresh: DROP DATABASE gma  (destroys every L1 row)")
+        guard_fresh(args.url, args.how, args.offset, args.offset_was_set,
+                    args.explicit)
+        guard_fresh_rows(args.url, args.yes_destroy_rows)
+        print("--fresh: DROP DATABASE gma on %s  (destroys every L1 row)"
+              % args.url)
         ch("DROP DATABASE IF EXISTS gma SYNC", args.url)
     print("applying %s — %d statements" % (os.path.relpath(SCHEMA), len(statements)))
     for i, stmt in enumerate(statements, 1):
@@ -274,6 +279,20 @@ def _diff_table(name, want, got):
     return out
 
 
+def _bare_name(qualified):
+    """`gma.trades` -> `trades`. Raises CouldNotRun rather than IndexError on a
+    `CREATE TABLE` with no database prefix — an unqualified name means the
+    statement depends on the connection's current database, which is not
+    something this tool should guess at while comparing a schema."""
+    if "." not in qualified:
+        raise CouldNotRun(
+            "CREATE TABLE %s has no database prefix. Qualify it (gma.%s) — an "
+            "unqualified name resolves against the session's current database, "
+            "so the file would not say which server-side table it describes."
+            % (qualified, qualified))
+    return qualified.split(".", 1)[1]
+
+
 def cmd_verify(args):
     statements, _ = ddl.read_statements(SCHEMA)
     wanted = {}
@@ -288,6 +307,7 @@ def cmd_verify(args):
 
     print("verify: %d table(s) from %s against %s"
           % (len(wanted), os.path.relpath(SCHEMA), args.url))
+    print("  " + describe_target(args.url, args.how, args.offset))
     diffs = []
     for name in wanted:
         shown = ch("SHOW CREATE TABLE %s FORMAT TSVRaw" % name, args.url).strip()
@@ -305,7 +325,7 @@ def cmd_verify(args):
     # "the market had no quotes" — docs §8.8's failure.
     live = set(ch("SELECT name FROM system.tables WHERE database = 'gma' "
                   "ORDER BY name FORMAT TSVRaw", args.url).split())
-    extra = sorted(live - {t.split(".", 1)[1] for t in wanted})
+    extra = sorted(live - {_bare_name(t) for t in wanted})
     if extra:
         diffs.append("gma holds table(s) the file does not create: %s"
                      % ", ".join(extra))
@@ -405,25 +425,54 @@ def cmd_prove_verify(args):
         ch("DROP DATABASE IF EXISTS %s SYNC" % PROBE_DB, args.url)
 
 
+def cmd_resolve_target(args):
+    print(describe_target(args.url, args.how, args.offset))
+    print("explicit: %s   (an explicit target is what `apply --fresh` requires "
+          "at a non-zero offset)" % ("yes" if args.explicit else "no"))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("apply")
-    p.add_argument("--url", default=DEFAULT_URL)
-    p.add_argument("--fresh", action="store_true",
-                   help="DROP DATABASE gma first — DESTRUCTIVE")
-    p = sub.add_parser("verify")
-    p.add_argument("--url", default=DEFAULT_URL)
-    p = sub.add_parser("prove-verify")
-    p.add_argument("--url", default=DEFAULT_URL)
+    # --url defaults to None, not to a resolved string, so that "the operator
+    # named a target" is distinguishable from "the tool picked one".
+    for cmd in ("apply", "verify", "prove-verify", "resolve-target"):
+        p = sub.add_parser(cmd)
+        p.add_argument("--url", default=None,
+                       help="explicit ClickHouse HTTP endpoint; overrides "
+                            "CH_HTTP_URL, CH_HTTP_PORT and STACK_PORT_OFFSET")
+        if cmd == "apply":
+            p.add_argument("--fresh", action="store_true",
+                           help="DROP DATABASE gma first — DESTRUCTIVE")
+            p.add_argument("--yes-destroy-rows", action="store_true",
+                           help="allow --fresh to drop a gma that holds rows")
     sub.add_parser("emit")
+    sub.add_parser("self-test")
     args = ap.parse_args(argv)
+
     try:
+        if args.cmd not in ("emit", "self-test"):
+            (args.url, args.how, args.offset, args.offset_was_set,
+             args.explicit) = resolve_target(args.url)
         return {"apply": cmd_apply, "verify": cmd_verify,
                 "prove-verify": cmd_prove_verify,
+                "resolve-target": cmd_resolve_target,
+                "self-test": cmd_self_test,
                 "emit": cmd_emit}[args.cmd](args)
+    except CouldNotRun as exc:
+        print("could not run: %s" % exc, file=sys.stderr)
+        return 2
     except RuntimeError as exc:
         print("FAILED: %s" % exc, file=sys.stderr)
+        return 2
+    except (ValueError, IndexError, KeyError, OSError) as exc:
+        # ddl.parse_create_table raises ValueError BY DESIGN on anything outside
+        # the subset it understands, so a server rendering an unhandled
+        # construct used to give a traceback and exit 1 — the colour reserved
+        # for "a difference was found". A broken instrument is exit 2.
+        print("could not run: %s: %s" % (type(exc).__name__, exc),
+              file=sys.stderr)
         return 2
 
 
