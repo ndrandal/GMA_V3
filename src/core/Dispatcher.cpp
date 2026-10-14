@@ -140,6 +140,19 @@ void Dispatcher::ingest(const std::string& symbol,
   // maxFieldsPerSymbol, applied in main.cpp), which drop only NEW keys past
   // the cap and always update existing ones — so an unbounded stream of novel
   // field names cannot grow the store without limit.
+  //
+  // ENC-1486, found by an adversarial pass and recorded because it is on the
+  // high-cardinality path now: A FIELDLESS TICK STILL BURNS A `_rawAdmitted`
+  // SYMBOL SLOT. The ledger entry is created before anything is known about
+  // how many fields will be admitted, so an all-`kNoPrice`/zero-size
+  // `TickRecord` — which emits nothing — consumes one of `maxSymbols` and can
+  // block raw admission for a later symbol. This is NOT a parity break: a
+  // JSON `{}` payload, which is that record's equivalent tick, does exactly
+  // the same, and `IdenticalForAFieldlessTick` pins that. It is a resource
+  // quirk of the shared body, pre-existing on the JSON path and inherited
+  // rather than introduced. Fixing it means deferring the ledger insert until
+  // the first admitted field, which changes the JSON path's cap accounting and
+  // therefore needs its own ticket.
   if (_store && fields.isObject()) {
     std::vector<std::pair<std::string, ArgType>> raw;
     {

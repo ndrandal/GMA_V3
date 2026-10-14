@@ -13,9 +13,9 @@
 // tests/dispatch/RecordIngressParityTest.cpp, which reads this file and
 // `src/core/Dispatcher.cpp` off disk and asserts:
 //
-//   * this file names none of `rapidjson`, `Document`, `payload`,
-//     `HasMember`, `MemberBegin`, `GetDouble`, `JsonFieldSource`, `const
-//     Event&`;
+//   * this file names none of the ~21 JSON-shaped identifiers in
+//     `jsonTokens()` — `rapidjson`, `Document`, `payload`, `Event`, the
+//     `*Member` family, the `Get*`/`Is*` accessors, `JsonFieldSource`;
 //   * `Dispatcher::ingest` — the body both entry points share — names none of
 //     them either;
 //   * and, as its POSITIVE CONTROL, that `Dispatcher::onTick` DOES. Same
@@ -90,9 +90,18 @@ void Dispatcher::onRecord(const data::TickRecord& rec) {
   // without ENC-1487's numbers in hand.
   const std::string symbol = symbols->name(rec.header.symbolId);
   if (symbol.empty()) {
-    // Either kInvalidSymbolId (a record that names no symbol) or an id this
-    // table never issued. `onTick` has always dropped an empty stream key;
-    // this is the same rule reached from the other side.
+    // THREE ways in, not two — the third was found by an adversarial pass and
+    // is the one a reader would miss:
+    //   1. kInvalidSymbolId — a record that names no symbol.
+    //   2. an id this table never issued.
+    //   3. an id the table DID issue for the empty string. `SymbolTable`
+    //      deliberately does not special-case `intern("")` (an empty ticker is
+    //      a provider bug and folding it onto kInvalidSymbolId would hide it),
+    //      so a real id can resolve to "". `name()` flattens all three to the
+    //      same answer, which is why one branch is correct here even though
+    //      the causes differ.
+    // `onTick` has always dropped an empty stream key; this is the same rule
+    // reached from the other side.
     //
     // Said out loud, once, because the failure is total and otherwise
     // invisible: a normalizer interning into a different table than the one
