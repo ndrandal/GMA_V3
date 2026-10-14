@@ -259,7 +259,7 @@ void DatabentoAdapter::trackOrder(const OrderKey& k, std::uint64_t size) {
   // ItchAdapter::routeAddOrder's M4 bound, verbatim in intent: evict the
   // oldest bucket entry once the cap is hit. Dropping tracking only forfeits
   // delta resolution for that order; memory stays bounded.
-  if (false) {
+  if (orders_.size() >= cfg_.maxTrackedOrders && orders_.find(k) == orders_.end()) {
     orders_.erase(orders_.begin());
     ++stats_.evictedOrders;
   }
