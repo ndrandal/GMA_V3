@@ -181,6 +181,59 @@ def scan(path, schema_decisions=True, aggregates_path=AGGREGATES):
                 "symbol (ts_event, symbol) and (symbol, ts_event, …) are the "
                 "same order, so it buys nothing and costs write amplification "
                 "on the table B1/B2 measure.")
+        # SPEC D5: plain MergeTree on every event table. Its dedup is exact
+        # only on a unique sort key, and book_events is not unique (one DBN
+        # message yields a book mutation AND a print), so a background merge
+        # could silently delete a real row in a way indistinguishable from a
+        # provider gap.
+        for name in ("gma.trades", "gma.book_events", "gma.book_snapshots",
+                     "gma.gaps"):
+            t = tables.get(name)
+            if t is not None and t["clauses"].get("ENGINE") != "MergeTree":
+                findings.append(
+                    "ENC-1480: %s uses ENGINE %s. SPEC D5 requires plain "
+                    "MergeTree on the event tables." % (name,
+                                                        t["clauses"].get("ENGINE")))
+
+        # gma.symbology is the ONE exception, and its version column must stay a
+        # WRITE clock. ingest_windows was the second exception and is not any
+        # more: ReplacingMergeTree(completed_at) resolves a re-ingest to the
+        # stale complete row and deletes the in-flight one at merge time, which
+        # makes an incomplete window read as complete — measured under
+        # ENC-1480, see the table's comment. Re-adding it reintroduces exactly
+        # the D11 failure.
+        sym = tables.get("gma.symbology")
+        if sym is not None and \
+                sym["clauses"].get("ENGINE") != "ReplacingMergeTree(ingested_at)":
+            findings.append(
+                "ENC-1480: gma.symbology ENGINE is %s, expected "
+                "ReplacingMergeTree(ingested_at) — the version column has to be "
+                "a write clock or closing a half-open interval resolves "
+                "arbitrarily (SPEC D7)." % sym["clauses"].get("ENGINE"))
+        iw = tables.get("gma.ingest_windows")
+        if iw is not None:
+            if iw["clauses"].get("ENGINE") != "MergeTree":
+                findings.append(
+                    "ENC-1480: gma.ingest_windows ENGINE is %s. It is a plain "
+                    "MergeTree append-only transition log: a Replacing engine "
+                    "resolves a re-ingest to the stale state=1 row and then "
+                    "deletes the in-flight one, so an incomplete window reads "
+                    "as complete (SPEC D11, measured)."
+                    % iw["clauses"].get("ENGINE"))
+            if not iw["clauses"].get("ORDER BY", "").endswith("updated_at)"):
+                findings.append(
+                    "ENC-1480: gma.ingest_windows ORDER BY is %s — it must end "
+                    "with updated_at, so 'the newest row for this window' is a "
+                    "key-prefix tail rather than a scan."
+                    % iw["clauses"].get("ORDER BY"))
+        replacing = sorted(n for n, t in tables.items()
+                           if "Replacing" in (t["clauses"].get("ENGINE") or ""))
+        if replacing != ["gma.symbology"]:
+            findings.append(
+                "ENC-1480: the Replacing-engine tables are %s; exactly one "
+                "(gma.symbology) is permitted — SPEC D5 is plain MergeTree and "
+                "each exception has to earn itself in the file." % replacing)
+
         be = tables.get("gma.book_events")
         if be is not None:
             got = be["clauses"].get("ORDER BY", "")
