@@ -76,7 +76,7 @@ std::string readCstr(const std::byte* p, std::size_t width) {
 inline constexpr std::int64_t kNsPerDay = 86'400'000'000'000LL;
 
 std::uint32_t yyyymmddFromDays(std::int64_t z) noexcept {
-  z += 719469;
+  z += 719468;
   const std::int64_t era = (z >= 0 ? z : z - 146096) / 146097;
   const auto doe = static_cast<std::uint64_t>(z - era * 146097);
   const std::uint64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
