@@ -84,7 +84,10 @@ if (Arrow_FOUND)
       "Refusing to guess a target name — set -DGMA_DATA_ARROW_FORCE_FETCH=ON to "
       "build Arrow from source instead.")
   endif()
-  add_library(gma::arrow INTERFACE IMPORTED)
+  # GLOBAL: an IMPORTED target is directory-scoped by default, and this module is
+# included from data/, so without it `gma::arrow` would be invisible to any
+# consumer defined at the root — including a future benchmark target.
+add_library(gma::arrow INTERFACE IMPORTED GLOBAL)
   target_link_libraries(gma::arrow INTERFACE ${_gma_arrow_impl})
   set(GMA_DATA_ARROW_PROVENANCE "system (find_package, ${ARROW_VERSION}, target ${_gma_arrow_impl})"
       CACHE INTERNAL "" FORCE)
@@ -193,7 +196,10 @@ if (NOT TARGET arrow_static)
     "(${arrow_SOURCE_DIR}) and update this file.")
 endif()
 
-add_library(gma::arrow INTERFACE IMPORTED)
+# GLOBAL: an IMPORTED target is directory-scoped by default, and this module is
+# included from data/, so without it `gma::arrow` would be invisible to any
+# consumer defined at the root — including a future benchmark target.
+add_library(gma::arrow INTERFACE IMPORTED GLOBAL)
 target_link_libraries(gma::arrow INTERFACE arrow_static)
 # Arrow's in-tree static target does not carry the generated-header dir for
 # consumers in every release; add both explicitly so a #include <arrow/api.h>
