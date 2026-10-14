@@ -83,7 +83,7 @@
 --
 --   PARTITION BY toYYYYMMDD(ts_event) — day partitions, because the re-ingest
 --   mechanism is DROP PARTITION (see below) and a trading day is the unit a
---   provider pull comes in. The three metadata tables (symbology,
+--   provider pull comes in. The two metadata tables (symbology and
 --   ingest_windows) are unpartitioned: they are tiny and have no event time,
 --   and gaps partitions on ts_detected because that is the only time it has.
 --
