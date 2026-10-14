@@ -1,0 +1,3 @@
+# Byte-compiled output of the schema tools in this directory.
+__pycache__/
+*.pyc
