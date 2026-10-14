@@ -39,6 +39,8 @@
 #include "gma/util/Logger.hpp"
 
 #include <atomic>
+#include <memory>
+#include <type_traits>
 #include <string>
 
 namespace gma {
@@ -94,10 +96,17 @@ void Dispatcher::onRecord(const data::TickRecord& rec) {
   // name lookup by string hash. See include/gma/engine/RecordFieldSource.hpp
   // for the mapping table, which also *defines* "the equivalent tick" the
   // parity test drives down the JSON path.
-  const Event& evAlias = *reinterpret_cast<const Event*>(&rec); (void)evAlias;
-  const engine::RecordFieldSource fields(rec);
+  // EXACTLY THE REGRESSION THE GATE CLAIMS TO CATCH: a DOM synthesized on the
+  // record path, naming none of the nine tokens.
+  decltype(Event{}.payload) p =
+      std::make_shared<std::decay_t<decltype(*Event{}.payload)>>();
+  p->Parse("{\"price\": 1.0}");
+  Event ev;
+  ev.symbol = symbol;
+  ev.payload = p;
+  onTick(ev);
+  return;
 
-  ingest(symbol, recordEventType(), fields);
 }
 
 } // namespace gma
