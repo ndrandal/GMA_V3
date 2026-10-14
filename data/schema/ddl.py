@@ -242,11 +242,12 @@ def parse_create_table(stmt: str) -> dict:
         clauses[kw] = norm(value)
 
     if "SETTINGS" in clauses:
-        settings = dict(
-            tuple(norm(p).split("=", 1))
-            for p in _split_top_level(clauses["SETTINGS"])
-            if "=" in p
-        )
+        settings = {}
+        for part in _split_top_level(clauses["SETTINGS"]):
+            if "=" not in part:
+                continue
+            k, v = norm(part).split("=", 1)
+            settings[k.strip()] = v.strip()
         clauses["SETTINGS"] = settings
 
     return {"table": table, "columns": columns, "indexes": indexes,
