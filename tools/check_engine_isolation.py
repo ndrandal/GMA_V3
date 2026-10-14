@@ -33,7 +33,9 @@ FOUR CHECKS, each closing a different route in:
                ClickHouse / DuckDB header, nor a header that exists only under
                `data/include` or `connectors/*/include`.
   B  include   gma_engine's include directories, restricted to paths inside
-               the repo, are exactly {<root>/include}.
+               the repo, are `<root>/include` or a VENDORED THIRD-PARTY tree
+               under `<root>/third_party` whose name is not itself a forbidden
+               dependency.  See CHECK B IS THE WEAKEST OF THE FOUR below.
   C  link      nothing matching gma_data / arrow / parquet / clickhouse is
                reachable from gma_engine's link libraries — TRANSITIVELY.
   D  profile   nothing matching them is reachable from gma_server's either,
@@ -44,6 +46,52 @@ FOUR CHECKS, each closing a different route in:
                against an Arrow-free include path" as the thing being
                protected, and a prose claim with no check behind it is what
                this whole file is a reaction to.
+
+CHECK B IS THE WEAKEST OF THE FOUR, AND ITS HOLE IS DELIBERATE.  (ENC-1497)
+Its rule used to be "any in-repo include dir that is not `<root>/include`",
+which is an over-approximation of the invariant: a vendored third-party include
+tree is not Arrow, not the ClickHouse client and not gma_data, and rapidjson is
+a long-standing *engine* dependency -- `gma::Event` holds a
+`shared_ptr<rapidjson::Document>` and `src/core/Dispatcher.cpp` has always
+walked a DOM.  `/third_party/` is gitignored, so it is populated in the shared
+checkout and absent in a fresh `git worktree`; CMake's `find_path` therefore
+resolves RapidJSON to `<root>/third_party/rapidjson` in one and to
+`/usr/include` in the other, and THE SAME COMMIT FAILED FROM ONE CHECKOUT AND
+PASSED FROM THE OTHER.  The over-approximation was never exercised because this
+gate was authored in a worktree where `third_party/` happened to be empty.
+
+A false positive costs as much as a false negative here: a gate that reddens on
+a legitimate configuration gets routed around, and this one guards a decision
+(D14's live-only client profile) that nothing else checks.  So B accepts both
+resolutions -- but the exemption is BOUNDED, because an exemption with no
+stated bound is how this comes back:
+
+  * only `<root>/third_party/...` is exempt, and only after `os.path.realpath`,
+    so `data/include` symlinked under `third_party/` resolves back out of the
+    exemption and still fails;
+  * a vendored tree whose path names a forbidden dependency -- arrow, parquet,
+    gandiva, clickhouse, duckdb, gma_data -- still FAILS, so the hole cannot be
+    used to put Arrow on the engine's include path;
+  * `data/include` and both connector include roots still fail, which is check
+    B's actual job.
+
+What B is NOT is the load-bearing check.  Vendoring Arrow under some
+unrecognised name would get past it; it would not get past A (no engine
+translation unit may include an Arrow/Parquet/ClickHouse/DuckDB header, matched
+on the include text, not on a directory name) or C/D (nothing matching those
+names anywhere in the TRANSITIVE link closure of gma_engine, gma_server or
+gma_tests).  B is a cheap structural sanity check on one target property; A and
+C/D carry the invariant.  Read a B failure as "the engine's include path grew
+something it should not have", never as the only thing standing between the
+engine and Arrow.
+
+WHY THE RESOLVED RAPIDJSON PATH IS REPORTED.  The underlying defect was not
+that one verdict was wrong -- it was that two checkouts produced DIFFERENT
+verdicts with nothing in the output to explain why.  So the manifest carries
+`rapidjson_include_dir` (CMake already `message(STATUS ...)`s it) and the
+summary prints it with whether it is in-repo, vendored or external.  A
+differing verdict between two checkouts of the same commit must be explicable
+from the gate's own output.
 
 C AND D WALK THE CLOSURE, AND HAVE TO.  They read a *link graph* out of the
 manifest, not one target's own property, because the direct property is the
@@ -123,6 +171,21 @@ FORBIDDEN_LINK_PATTERNS = (
 )
 
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]')
+
+# The one subtree of the repo whose include dirs check B permits on
+# gma_engine's include path, and the names that are still refused inside it.
+# (ENC-1497 -- see CHECK B IS THE WEAKEST OF THE FOUR in the docstring.)
+#
+# Matched with `search` against the path RELATIVE TO third_party/, so a release
+# tarball directory (`apache-arrow-18.0.0/cpp/src`) is caught as well as a bare
+# `arrow`.  Same vocabulary as FORBIDDEN_INCLUDE_PREFIXES and
+# FORBIDDEN_LINK_PATTERNS; it is spelled out separately rather than derived
+# because those two match a quoted include path and a library name
+# respectively, and a directory name is neither.  ADD A NEW FORBIDDEN
+# DEPENDENCY TO ALL THREE.
+VENDOR_SUBDIR = "third_party"
+FORBIDDEN_VENDOR_RE = re.compile(
+    r"arrow|parquet|gandiva|clickhouse|duckdb|gma_data", re.IGNORECASE)
 
 # Floors for the anti-vacuity assertions.  The margin has to be real, not
 # claimed: the engine is **99** source/header files once src/main.cpp is
