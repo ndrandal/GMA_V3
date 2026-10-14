@@ -448,16 +448,51 @@ TEST(RecordIngressParityTest, AtomicStoreContentsAreIdentical) {
   const Observed json = drive(Path::Json, cfg);
   const Observed rec  = drive(Path::Record, cfg);
 
-  ASSERT_FALSE(json.store.empty())
-      << "the JSON path wrote no atomic — the comparison below is vacuous";
-  // Enough keys to be a real comparison: the raw fields, the subscribed
-  // builtins, and the whole TA suite MarketTickComputer writes. This is now a
-  // TOTAL enumeration, so the floor is a statement about the rig rather than
-  // about which names the test remembered to ask for.
-  ASSERT_GT(json.store.size(), 10u);
+  // ANTI-VACUITY ON THE KEY SET, BY NAME — not on its size.
+  //
+  // `ASSERT_GT(size, 10u)` was the first version and it is the wrong shape: a
+  // comparison that has silently stopped covering a key still has eleven of
+  // them, so the floor is cleared by a run that proves nothing. (Same defect
+  // as ENC-1480's order-map test asserting a counter the mutation kept
+  // feeding, and ENC-1481's floor that a dead walk cleared.) So name the keys
+  // the three delivery routes must each have produced, and fail on the one
+  // that is missing rather than on a total.
+  const auto storeHas = [](const std::vector<std::string>& rows,
+                           const std::string& key) {
+    for (const auto& r : rows) {
+      if (r == std::string(kTicker) + " / " + key ||
+          r.rfind(std::string(kTicker) + " / " + key + " = ", 0) == 0) return true;
+    }
+    return false;
+  };
+  for (const char* required : {
+           "price",      // raw admission, record-mapped field
+           "size",       // raw admission, the second mapped field
+           "mean",       // Dispatcher::computeAndStoreAtomics (subscribed builtin)
+           "sum",        //   "
+           "stddev",     //   "
+           "lastPrice",  // MarketTickComputer's TA suite
+           "sma_5",      //   "
+       }) {
+    EXPECT_TRUE(storeHas(json.store, required))
+        << "JSON path wrote no `" << required << "` — this comparison is no "
+           "longer covering the route that key represents, so an equality "
+           "against the record path proves less than it claims";
+    EXPECT_TRUE(storeHas(rec.store, required))
+        << "record path wrote no `" << required << "`";
+  }
+
   EXPECT_EQ(json.store, rec.store);
 }
 
+// READ THE SCOPE OF THIS ONE NARROWLY. It covers what a computer is HANDED —
+// the symbol, the field set and the ComputeContext — and nothing about how the
+// field set answers queries, because `ComputerProbe` only ever calls
+// `forEachNumber`. Measured: perturbing `RecordFieldSource::has()` to return
+// false reddened `DeliveriesAreIdenticalInOrder`,
+// `AtomicStoreContentsAreIdentical`, `LookupAgreesWithEmission` and
+// `UnresolvableSymbolDeliversNothing` — and left THIS test green, because no
+// computer in the repo calls `has()`. Do not read it as covering lookup.
 TEST(RecordIngressParityTest, ComputerInvocationsAreIdentical) {
   const auto cfg = defaultCfg();
   const Observed json = drive(Path::Json, cfg);
