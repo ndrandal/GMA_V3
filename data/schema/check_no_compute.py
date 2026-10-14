@@ -141,8 +141,15 @@ def _line_of(text, pos):
     return text.count("\n", 0, pos) + 1
 
 
-def scan(path, schema_decisions=True, aggregates_path=AGGREGATES):
-    """-> (findings, facts). findings empty == pass."""
+def scan(path, schema_decisions=True, aggregates_path=None):
+    """-> (findings, facts). findings empty == pass.
+
+    `aggregates_path` is resolved at CALL time, not bound as a default: a
+    default captured at def time cannot be redirected, which would make the
+    could-not-run path untestable — and an untestable error path is how "could
+    not run" ends up wearing the same colour as "clean"."""
+    if aggregates_path is None:
+        aggregates_path = AGGREGATES
     with open(path, "r", encoding="utf-8") as fh:
         raw = fh.read()
     stripped = ddl.strip_comments(raw)
@@ -373,8 +380,8 @@ SELF_TESTS = [
 # gate.
 MUTANTS = [
     ("ingest_windows back to ReplacingMergeTree(completed_at)",
-     ("ENGINE = MergeTree\nORDER BY (symbol, kind, from_ts, session_id, updated_at)",
-      "ENGINE = ReplacingMergeTree(completed_at)\nORDER BY (symbol, kind, from_ts, session_id)"),
+     ("ENGINE = MergeTree\nORDER BY (symbol, kind, from_ts, to_ts, updated_at)",
+      "ENGINE = ReplacingMergeTree(completed_at)\nORDER BY (symbol, kind, from_ts, to_ts)"),
      "ingest_windows ENGINE"),
     ("book_events sort key with the action/order_id discriminator",
      ("CREATE TABLE IF NOT EXISTS gma.book_events", "CREATE TABLE IF NOT EXISTS gma.book_events"),
@@ -508,6 +515,9 @@ def main(argv=None):
                         help="also ask the server for its aggregate list and "
                              "fail if the committed snapshot no longer covers it")
     p_lint.add_argument("--url", default=DEFAULT_URL)
+    p_lint.add_argument("--aggregates", default=None,
+                        help="override the aggregate vocabulary file (exists so "
+                             "the could-not-run path is testable)")
 
     sub.add_parser("self-test", help="prove the check rejects real violations "
                                      "and accepts comment-only mentions")
@@ -562,7 +572,8 @@ def _run(args):
         return 0
 
     findings, facts = scan(args.file,
-                           schema_decisions=not args.no_schema_decisions)
+                           schema_decisions=not args.no_schema_decisions,
+                           aggregates_path=args.aggregates)
 
     if args.cross_check_aggregates:
         try:
@@ -570,7 +581,7 @@ def _run(args):
         except Exception as exc:                     # noqa: BLE001
             print("could not run cross-check: %s" % exc, file=sys.stderr)
             return 2
-        missing = sorted(live - set(load_aggregates()))
+        missing = sorted(live - set(load_aggregates(args.aggregates or AGGREGATES)))
         if missing:
             findings.append(
                 "VOCABULARY: the server knows %d aggregate function(s) the "
