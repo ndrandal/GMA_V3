@@ -1,4 +1,5 @@
 #include "gma/Dispatcher.hpp"
+#include "gma/engine/JsonFieldSource.hpp"
 #include "gma/util/Logger.hpp"
 
 #include <algorithm>
@@ -78,9 +79,34 @@ Dispatcher::listenersFor(const std::string& symbol,
   return fit->second;
 }
 
+// ENC-1486. An ADAPTER, nothing more: wrap the DOM and hand it to `ingest`.
+// Everything this method used to do below `if (tick.symbol.empty())` now lives
+// in `ingest`, verbatim, with each JSON read replaced by the equivalent
+// `FieldSource` call. See `Dispatcher::onRecord` (src/core/DispatcherRecord.cpp)
+// for the other adapter and `include/gma/Dispatcher.hpp` for why there is only
+// one body.
 void Dispatcher::onTick(const Event& tick) {
   if (tick.symbol.empty() || !tick.payload) return;
+  const engine::JsonFieldSource fields(*tick.payload);
+  ingest(tick.symbol, tick.type, fields);
+}
 
+// ENC-1486 — THE ingress body, shared by `onTick` and `onRecord`.
+//
+// This is the pre-ENC-1486 tail of `onTick` with three substitutions and no
+// other change:
+//
+//   payload->IsObject()                       -> fields.isObject()
+//   MemberBegin()..MemberEnd() + IsNumber     -> fields.forEachNumber(sink)
+//   HasMember(f) / (*payload)[f].GetDouble()  -> fields.has(f) / tryGetNumber
+//
+// The `try`/`catch` that used to wrap the value read is gone. rapidjson's
+// `operator[]` does not throw — it asserts — so the catch was unreachable and
+// its warning log had never fired; the two reachable outcomes (absent field,
+// present non-numeric field) were both a silent `continue` and still are.
+void Dispatcher::ingest(const std::string& symbol,
+                        const std::string& eventType,
+                        const engine::FieldSource& fields) {
   // ENC-1007: publish the RAW injected fields into the AtomicStore before
   // anything derived runs.
   //
@@ -114,7 +140,7 @@ void Dispatcher::onTick(const Event& tick) {
   // maxFieldsPerSymbol, applied in main.cpp), which drop only NEW keys past
   // the cap and always update existing ones — so an unbounded stream of novel
   // field names cannot grow the store without limit.
-  if (_store && tick.payload->IsObject()) {
+  if (_store && fields.isObject()) {
     std::vector<std::pair<std::string, ArgType>> raw;
     {
       // Admission is bounded by the SAME maxSymbols / maxFieldsPerSymbol
@@ -123,32 +149,39 @@ void Dispatcher::onTick(const Event& tick) {
       // AtomicStore's own caps because an embedder may construct a capped
       // Dispatcher over an uncapped store (main.cpp caps both; tests do not).
       std::unique_lock<std::shared_mutex> lock(_rawMutex);
-      auto sit = _rawAdmitted.find(tick.symbol);
+      auto sit = _rawAdmitted.find(symbol);
       if (sit == _rawAdmitted.end()) {
         if (_rawAdmitted.size() >= _maxSymbols) {
           sit = _rawAdmitted.end();  // symbol cap reached — reject wholesale
         } else {
-          sit = _rawAdmitted.emplace(tick.symbol,
+          sit = _rawAdmitted.emplace(symbol,
                                      std::unordered_set<std::string>{}).first;
         }
       }
       if (sit != _rawAdmitted.end()) {
-        auto& admitted = sit->second;
-        raw.reserve(tick.payload->MemberCount());
-        for (auto it = tick.payload->MemberBegin();
-             it != tick.payload->MemberEnd(); ++it) {
-          if (!it->name.IsString() || !it->value.IsNumber()) continue;
-          std::string name(it->name.GetString(), it->name.GetStringLength());
-          if (admitted.find(name) == admitted.end()) {
-            if (admitted.size() >= _maxFieldsPerSymbol) continue;
-            admitted.insert(name);
+        // The admission filter, unchanged, expressed as a sink so one copy of
+        // it serves both ingress shapes. An abstract sink and not a
+        // `std::function`: this captures three pointers, past libstdc++'s
+        // small-object buffer, so a `std::function` would heap-allocate once
+        // per tick on the path built to remove an allocation per tick.
+        struct Admit final : engine::NumericFieldSink {
+          std::unordered_set<std::string>*                     admitted;
+          std::vector<std::pair<std::string, ArgType>>*        out;
+          std::size_t                                          cap;
+          void field(const std::string& name, double value) override {
+            if (admitted->find(name) == admitted->end()) {
+              if (admitted->size() >= cap) return;
+              admitted->insert(name);
+            }
+            out->emplace_back(name, ArgType{ value });
           }
-          raw.emplace_back(std::move(name), ArgType{ it->value.GetDouble() });
-        }
+        } admit{ &sit->second, &raw, _maxFieldsPerSymbol };
+        raw.reserve(fields.fieldCountHint());
+        fields.forEachNumber(admit);
       }
     }
     if (!raw.empty()) {
-      _store->setBatch(tick.symbol, raw);
+      _store->setBatch(symbol, raw);
     }
   }
 
@@ -161,10 +194,10 @@ void Dispatcher::onTick(const Event& tick) {
   std::vector<engine::IEventComputer*> typedComputers;
   {
     std::lock_guard<std::mutex> lk(_computerCacheMx);
-    auto it = _computersByType.find(tick.type);
+    auto it = _computersByType.find(eventType);
     if (it == _computersByType.end()) {
-      auto fresh = engine::EventComputerRegistry::createAll(tick.type, _cfg);
-      it = _computersByType.emplace(tick.type, std::move(fresh)).first;
+      auto fresh = engine::EventComputerRegistry::createAll(eventType, _cfg);
+      it = _computersByType.emplace(eventType, std::move(fresh)).first;
     }
     typedComputers.reserve(it->second.size());
     for (auto& c : it->second) typedComputers.push_back(c.get());
@@ -174,7 +207,7 @@ void Dispatcher::onTick(const Event& tick) {
   // IEventComputer implementations must be concurrency-safe — see the contract
   // on Dispatcher::onTick() in the header.
   for (auto* c : typedComputers) {
-    if (c) c->compute(tick, ctx);
+    if (c) c->compute(symbol, fields, ctx);
   }
 
   // Computers added directly via addComputer() — kept for tests and code
@@ -187,23 +220,23 @@ void Dispatcher::onTick(const Event& tick) {
     std::shared_lock<std::shared_mutex> lock(_computersMutex);
     directComputers.reserve(_computers.size());
     for (auto& c : _computers) {
-      if (c && c->eventType() == tick.type) directComputers.push_back(c.get());
+      if (c && c->eventType() == eventType) directComputers.push_back(c.get());
     }
   }
   for (auto* c : directComputers) {
-    c->compute(tick, ctx);
+    c->compute(symbol, fields, ctx);
   }
 
   // Collect (field, listener) pairs for this symbol under the listener lock.
   std::vector<std::pair<std::string, std::shared_ptr<INode>>> toNotify;
   {
     std::shared_lock<std::shared_mutex> lock(_listenerMutex);
-    auto lit = _listeners.find(tick.symbol);
+    auto lit = _listeners.find(symbol);
     if (lit != _listeners.end()) {
       for (auto& kv : lit->second) {
         const std::string& field = kv.first;
         for (auto& sp : kv.second) {
-          if (tick.payload->HasMember(field.c_str())) {
+          if (fields.has(field)) {
             toNotify.emplace_back(field, sp);
           }
         }
@@ -213,26 +246,16 @@ void Dispatcher::onTick(const Event& tick) {
 
   for (auto& [field, node] : toNotify) {
     double raw = 0.0;
-    try {
-      const auto& v = (*tick.payload)[field.c_str()];
-      if (!v.IsNumber()) continue;
-      raw = v.GetDouble();
-    } catch (const std::exception& ex) {
-      gma::util::logger().log(gma::util::LogLevel::Warn,
-                              "Dispatcher: tick field read error",
-                              { {"symbol", tick.symbol}, {"field", field},
-                                {"err", ex.what()} });
-      continue;
-    }
+    if (!fields.tryGetNumber(field, raw)) continue;
 
     std::vector<double> histVec;
     {
       std::unique_lock<std::shared_mutex> lock(_histMutex);
-      if (_histories.find(tick.symbol) == _histories.end() &&
+      if (_histories.find(symbol) == _histories.end() &&
           _histories.size() >= _maxSymbols) {
         continue;
       }
-      auto& symFields = _histories[tick.symbol];
+      auto& symFields = _histories[symbol];
       if (symFields.find(field) == symFields.end() &&
           symFields.size() >= _maxFieldsPerSymbol) {
         continue;
@@ -243,9 +266,9 @@ void Dispatcher::onTick(const Event& tick) {
       histVec.assign(hist.begin(), hist.end());
     }
 
-    computeAndStoreAtomics(tick.symbol, field, histVec);
+    computeAndStoreAtomics(symbol, field, histVec);
 
-    StreamValue out{ tick.symbol, raw };
+    StreamValue out{ symbol, raw };
     deliver(node, out);
   }
 }
