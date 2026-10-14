@@ -34,28 +34,11 @@
 //   bidSz               "bidSize"      bidPx != kNoPrice && bidSz != 0
 //   askSz               "askSize"      askPx != kNoPrice && askSz != 0
 //
-// Emission order is the order above, and it is OBSERVABLE IN TWO PLACES. An
-// earlier revision of this comment claimed one; an adversarial probe found the
-// second, which is the one that matters:
-//
-//   1. The order of the `AtomicStore::setBatch` the raw-admission ledger
-//      produces. Benign on its own — the store is latest-value-wins, so a
-//      permutation of one batch leaves identical contents.
-//   2. WHICH FIELDS SURVIVE `maxFieldsPerSymbol`. Past the cap the admission
-//      ledger refuses NEW fields and the history map refuses new ones, so the
-//      surviving set is a prefix of the arrival order. A capped Dispatcher
-//      therefore keeps a DIFFERENT set of fields for two tick shapes that
-//      differ only in field order — which means "the equivalent tick" is not
-//      merely the right names and values, it is the right names and values
-//      IN THIS ORDER. Pinned by
-//      RecordIngressParityTest.IdenticalWhenTheFieldCapTruncatesAdmission,
-//      which also asserts the reverse-order JSON tick does NOT match, so the
-//      claim is measured rather than asserted.
-//
-// Listener fan-out is NOT one of the two: it is ordered by the
-// `std::map<field, …>` the Dispatcher keys subscriptions on, so `ask` precedes
-// `bid` on both paths regardless of this order, per Dispatcher.hpp's ordering
-// contract.
+// Emission order is the order above. It is observable in exactly one place —
+// the order of the `AtomicStore::setBatch` the raw-admission ledger produces
+// — because listener fan-out is ordered by the `std::map<field, …>` the
+// Dispatcher keys subscriptions on (so `ask` precedes `bid` on both paths,
+// per Dispatcher.hpp's ordering contract) and not by this order.
 //
 // `price`/`size` are gated on `kind == Trade` because `TickRecord` is one
 // struct for a trade and an L1 quote and `kind` says which half is
@@ -121,11 +104,11 @@ public:
         addCount(recordfields::kSize, rec.size);
       }
     }
-    if (rec.bidPx != data::kNoPrice) {
-      addPrice(recordfields::kBid, rec.bidPx);
-    }
     if (rec.askPx != data::kNoPrice) {
       addPrice(recordfields::kAsk, rec.askPx);
+    }
+    if (rec.bidPx != data::kNoPrice) {
+      addPrice(recordfields::kBid, rec.bidPx);
     }
     if (rec.bidPx != data::kNoPrice && rec.bidSz != 0) {
       addCount(recordfields::kBidSize, rec.bidSz);
@@ -182,10 +165,6 @@ private:
     double             value = 0.0;
   };
 
-  // `name` MUST have static storage duration — an `Entry` keeps a POINTER to
-  // it, which is what makes handing a `const std::string&` to the sink free.
-  // Every caller passes a `recordfields::` object; a temporary here would
-  // dangle the moment the constructor returned.
   void addPrice(const std::string& name, std::int64_t fixed) noexcept {
     fields_[n_++] = Entry{&name, data::toDouble(fixed)};
   }

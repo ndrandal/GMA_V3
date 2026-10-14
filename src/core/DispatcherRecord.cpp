@@ -13,9 +13,9 @@
 // tests/dispatch/RecordIngressParityTest.cpp, which reads this file and
 // `src/core/Dispatcher.cpp` off disk and asserts:
 //
-//   * this file names none of the ~21 JSON-shaped identifiers in
-//     `jsonTokens()` — `rapidjson`, `Document`, `payload`, `Event`, the
-//     `*Member` family, the `Get*`/`Is*` accessors, `JsonFieldSource`;
+//   * this file names none of `rapidjson`, `Document`, `payload`,
+//     `HasMember`, `MemberBegin`, `GetDouble`, `JsonFieldSource`, `const
+//     Event&`;
 //   * `Dispatcher::ingest` — the body both entry points share — names none of
 //     them either;
 //   * and, as its POSITIVE CONTROL, that `Dispatcher::onTick` DOES. Same
@@ -65,20 +65,11 @@ void Dispatcher::onRecord(const data::TickRecord& rec) {
     // `symbolId` and nothing else, so without a table there is no stream key.
     // Routing under "" would put every symbol's values into one bucket and
     // every subscription would miss — a silent wrong answer, which is worse
-    // than a loud nothing. Warn, not Error, because the only way to reach it
-    // is a wiring mistake that the first record reports.
-    //
-    // ONCE per Dispatcher, not once per record. The reason is benchmark
-    // integrity rather than log tidiness — at MBO rates a per-record Warn
-    // would dominate ENC-1487's step-2 measurement — see the flag's
-    // declaration in Dispatcher.hpp for the full argument.
-    if (!_warnedNoSymbolTable.exchange(true, std::memory_order_relaxed)) {
-      gma::util::logger().log(
-          gma::util::LogLevel::Warn,
-          "Dispatcher: onRecord with no SymbolTable installed — every record "
-          "on this path is being dropped (logged once)",
-          { {"symbolId", std::to_string(rec.header.symbolId)} });
-    }
+    // than a loud nothing. Logged at Warn, not Error, because the only way to
+    // reach it is a wiring mistake that the first record reports.
+    gma::util::logger().log(gma::util::LogLevel::Warn,
+                            "Dispatcher: onRecord with no SymbolTable installed",
+                            { {"symbolId", std::to_string(rec.header.symbolId)} });
     return;
   }
 
@@ -93,38 +84,9 @@ void Dispatcher::onRecord(const data::TickRecord& rec) {
   // without ENC-1487's numbers in hand.
   const std::string symbol = symbols->name(rec.header.symbolId);
   if (symbol.empty()) {
-    // THREE ways in, not two — the third was found by an adversarial pass and
-    // is the one a reader would miss:
-    //   1. kInvalidSymbolId — a record that names no symbol.
-    //   2. an id this table never issued.
-    //   3. an id the table DID issue for the empty string. `SymbolTable`
-    //      deliberately does not special-case `intern("")` (an empty ticker is
-    //      a provider bug and folding it onto kInvalidSymbolId would hide it),
-    //      so a real id can resolve to "". `name()` flattens all three to the
-    //      same answer, which is why one branch is correct here even though
-    //      the causes differ.
-    // `onTick` has always dropped an empty stream key; this is the same rule
-    // reached from the other side.
-    //
-    // THE RULING on route 3: an empty ticker is a REFUSAL, not a valid
-    // stream key. `SymbolTable` is right not to fold `intern("")` onto
-    // kInvalidSymbolId — that would hide a provider bug — and this is right to
-    // refuse the id it issues, because the engine keys every listener,
-    // history buffer and store entry on the ticker string. Admitting "" gives
-    // every such record one shared bucket that no subscription can name.
-    //
-    // Said out loud, once (same benchmark-integrity reason as above), because
-    // the failure is total and otherwise invisible: a normalizer interning
-    // into a different table than the one installed here drops EVERY record,
-    // and a silently empty chart is a much longer debugging session than one
-    // warning.
-    if (!_warnedUnresolvedSymbol.exchange(true, std::memory_order_relaxed)) {
-      gma::util::logger().log(
-          gma::util::LogLevel::Warn,
-          "Dispatcher: onRecord symbolId does not resolve to a ticker — record "
-          "dropped (logged once)",
-          { {"symbolId", std::to_string(rec.header.symbolId)} });
-    }
+    // Either kInvalidSymbolId (a record that names no symbol) or an id this
+    // table never issued. `onTick` has always dropped an empty stream key;
+    // this is the same rule reached from the other side.
     return;
   }
 
