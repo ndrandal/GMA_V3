@@ -528,13 +528,24 @@ class DatabentoAdapter {
   SymbolTable& symbols_;
   SymbolTable& venues_;
 
+  // One resolved symbology window. The ticker is interned ONCE, at
+  // metadata-parse time, and not per record: `SymbolTable::intern` takes a
+  // write lock on a `shared_mutex`, and taking it per record on an MBO stream
+  // would put a lock on the hot path — the exact thing SymbolTable.hpp says
+  // the ids exist to avoid.
+  struct SymbolWindow {
+    std::uint32_t startDate = 0;  // yyyymmdd, HALF-OPEN [startDate, endDate)
+    std::uint32_t endDate   = 0;
+    SymbolId      id        = kInvalidSymbolId;
+  };
+
   std::optional<dbn::Metadata> meta_;
   std::optional<std::uint16_t> publisherId_;   // asserted stable across the stream
   SymbolId                     venueId_ = kInvalidSymbolId;
   SymbolId                     overrideSymbolId_ = kInvalidSymbolId;
   // instrument_id -> date-ranged tickers, built from the metadata mappings in
   // whichever direction they were recorded.
-  std::unordered_map<std::uint32_t, std::vector<dbn::MappingInterval>> symbology_;
+  std::unordered_map<std::uint32_t, std::vector<SymbolWindow>> symbology_;
 
   std::vector<std::byte> buf_;
   std::size_t            cursor_ = 0;
