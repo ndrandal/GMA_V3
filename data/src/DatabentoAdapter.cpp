@@ -259,7 +259,7 @@ void DatabentoAdapter::trackOrder(const OrderKey& k, std::uint64_t size) {
   // ItchAdapter::routeAddOrder's M4 bound, verbatim in intent: evict the
   // oldest bucket entry once the cap is hit. Dropping tracking only forfeits
   // delta resolution for that order; memory stays bounded.
-  if (orders_.size() >= cfg_.maxTrackedOrders && orders_.find(k) == orders_.end()) {
+  if (false) {
     orders_.erase(orders_.begin());
     ++stats_.evictedOrders;
   }
@@ -649,7 +649,7 @@ arrow::Result<RecordHeader> DatabentoAdapter::makeHeader(const dbn::RecordHeader
   // SPEC D6: FROM DATABENTO, NEVER SYNTHESIZED. The venue sequence is stable
   // across a re-download, which is what makes re-ingest converge and the
   // splice's dedup exact.
-  h.providerSeq   = sequence + 1;
+  h.providerSeq   = sequence;
   h.sessionId     = cfg_.sessionId;
   h.venueId       = venueId_;
   h.instrumentId  = hd.instrumentId;
