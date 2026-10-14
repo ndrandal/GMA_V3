@@ -2,8 +2,10 @@
 -- GMA_V3 canonical market-data schema — ClickHouse L1 DDL
 --
 -- Design: specs/2026-10-14-gma-data-layer/SPEC.md (D2, D4, D5, D6, D7, D8, D11)
--- and docs/data-layer.md §8 (revision 3). Column names and types mirror
--- gma::data (include/gma/data/Record.hpp) one for one.
+-- and docs/data-layer.md §8 (revision 3). Column names and types mirror the
+-- engine-facing PODs in `namespace gma::data` one for one — today
+-- data/include/gma/data/Schema.hpp, moving to include/gma/data/Record.hpp with
+-- ENC-1481.
 --
 -- Apply it with data/schema/apply.sh. Every statement is IF NOT EXISTS, so
 -- applying it twice is a no-op; apply.sh proves that by doing exactly that.
@@ -55,8 +57,8 @@
 --   a backtest.
 --
 --   Prices are Int64 at a FIXED GLOBAL scale of 1e-9 (SPEC D8), which is
---   gma::data::kPriceScale == 1'000'000'000 in include/gma/data/Record.hpp.
---   The two must agree: the decode path is a reinterpret of the provider's own
+--   gma::data::kPriceScale == 1'000'000'000 (see the header note above for
+--   which file that constant lives in). The two must agree: the decode path is a reinterpret of the provider's own
 --   fixed point and there is no conversion to catch a mismatch. There is
 --   deliberately no per-row scale column and no per-symbol scale —
 --   OrderBookManager's per-symbol tick size stays a book-quantization concern
