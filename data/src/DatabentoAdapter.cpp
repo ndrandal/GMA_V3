@@ -260,7 +260,7 @@ void DatabentoAdapter::trackOrder(const OrderKey& k, std::uint64_t size) {
   // oldest bucket entry once the cap is hit. Dropping tracking only forfeits
   // delta resolution for that order; memory stays bounded.
   if (orders_.size() >= cfg_.maxTrackedOrders && orders_.find(k) == orders_.end()) {
-    /*no evict*/;
+    orders_.erase(orders_.begin());
     ++stats_.evictedOrders;
   }
   orders_[k] = size;
@@ -738,9 +738,6 @@ arrow::Status DatabentoAdapter::onMbo(const dbn::MboMsg& m) {
       ++stats_.sideUnspecified;
       break;
   }
-  if (sideKnown && m.action == static_cast<char>(dbn::Action::Fill)) {
-    out = out == Side::Bid ? Side::Ask : Side::Bid;
-  }
 
   const OrderKey key{m.hd.instrumentId, m.orderId};
 
@@ -749,7 +746,7 @@ arrow::Status DatabentoAdapter::onMbo(const dbn::MboMsg& m) {
     BookRecord r;
     r.header   = h;
     r.action   = action;
-    r.side     = out;
+    r.side     = (sideKnown && action == BookAction::Trade && m.action == static_cast<char>(dbn::Action::Fill)) ? (out == Side::Bid ? Side::Ask : Side::Bid) : out;
     r.price    = price;
     r.size     = size;
     r.orderId  = m.orderId;
