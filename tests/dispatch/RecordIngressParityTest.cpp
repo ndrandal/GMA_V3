@@ -542,10 +542,30 @@ TEST(RecordIngressParityTest, NoFieldAnswersTryGetUint64OnEitherPath) {
   }
   ASSERT_FALSE(names.empty()) << "the record emitted no field — vacuous";
 
+  // THE LOAD-BEARING PROPERTY behind every rewritten extraction loop in
+  // MarketTickComputer: `tryGet*` must leave `out` UNTOUCHED on a miss. The
+  // old code was `if (doc.HasMember(f) && doc[f].IsNumber()) x = doc[f].Get…`,
+  // i.e. `x` kept its previous value when the alias did not match, and the
+  // alias loops rely on that to fall through to the next candidate. If either
+  // source wrote a zero on a miss, the loops would silently stop falling
+  // through and every field-map alias after the first would break.
+  for (const auto& miss : {std::string("nope"), std::string("timestamp")}) {
+    double d = -7.5;
+    std::uint64_t u = 77;
+    EXPECT_FALSE(recFields.tryGetNumber(miss, d));
+    EXPECT_FALSE(jsonFields.tryGetNumber(miss, d));
+    EXPECT_EQ(d, -7.5) << "tryGetNumber wrote to `out` on a miss: " << miss;
+    EXPECT_FALSE(recFields.tryGetUint64(miss, u));
+    EXPECT_FALSE(jsonFields.tryGetUint64(miss, u));
+    EXPECT_EQ(u, 77u) << "tryGetUint64 wrote to `out` on a miss: " << miss;
+  }
+
   for (const auto& n : names) {
     std::uint64_t a = 1, b = 1;
     EXPECT_FALSE(recFields.tryGetUint64(n, a)) << n;
     EXPECT_FALSE(jsonFields.tryGetUint64(n, b)) << n;
+    EXPECT_EQ(a, 1u) << "tryGetUint64 wrote to `out` on a refusal: " << n;
+    EXPECT_EQ(b, 1u) << "tryGetUint64 wrote to `out` on a refusal: " << n;
     // And both still read as numbers, so nothing is simply missing.
     double da = 0.0, db = 0.0;
     EXPECT_TRUE(recFields.tryGetNumber(n, da)) << n;
@@ -1064,6 +1084,127 @@ TEST(RecordFieldSourceMappingTest, LookupAgreesWithEmission) {
   }
   EXPECT_EQ(src.fieldCountHint(), 3u);
   EXPECT_TRUE(src.isObject());
+}
+
+// ===========================================================================
+// 4b. TWO BEHAVIOURS LABELLED, NOT FIXED
+// ===========================================================================
+//
+// Both were found by adversarial passes. Neither is a parity break, and a test
+// that called either one a parity failure would be asserting something false.
+// They are pinned so the next reader does not have to rediscover which they
+// are.
+
+TEST(RecordIngressParityTest, IdenticalForAFieldlessTick) {
+  // A RESOURCE QUIRK ON A PATH BUILT FOR HIGH-CARDINALITY MBO INGEST — not a
+  // parity break.
+  //
+  // `ingest` creates the `_rawAdmitted[symbol]` ledger entry before knowing
+  // whether any field will be admitted, so a record that emits NOTHING (all
+  // `kNoPrice`, zero size) still consumes one of `maxSymbols` and can block
+  // raw admission for a later, real symbol. The JSON equivalent of that record
+  // is `{}`, which does exactly the same — only a NON-OBJECT payload escapes,
+  // because `isObject()` gates the whole block. So the two entry points agree,
+  // which is what this ticket is responsible for; the quirk itself is
+  // pre-existing on the JSON path and inherited, and deferring the ledger
+  // insert would change the JSON path's cap accounting and needs its own
+  // ticket.
+  auto cfg = defaultCfg();
+  cfg.maxSymbols = 1;
+
+  const auto drove = [&cfg](Path path) {
+    Rig rig(cfg);
+    const auto other = rig.symbols.intern("OTHER");
+
+    data::TickRecord fieldless;            // emits no field at all
+    fieldless.header.symbolId = other;
+    data::TickRecord real =
+        makeRecord(rig.symbolId, 100.25, 10, 100.20, 100.30);
+
+    for (const auto* r : {&fieldless, &real}) {
+      if (path == Path::Record) {
+        rig.disp.onRecord(*r);
+      } else {
+        const std::string sym = rig.symbols.name(r->header.symbolId);
+        rig.disp.onTick(equivalentEvent(sym, *r));
+      }
+    }
+    rig.quiesce();
+    return std::make_pair(rig.log.rows(), dumpStore(rig.store));
+  };
+
+  const auto [dj, sj] = drove(Path::Json);
+  const auto [dr, sr] = drove(Path::Record);
+
+  // The fieldless tick really did burn the slot — otherwise this test is
+  // comparing two unconstrained runs and says nothing about the cap.
+  bool parityRawAdmitted = false;
+  for (const auto& row : sj) {
+    if (row.rfind(std::string(kTicker) + " / price = ", 0) == 0) {
+      parityRawAdmitted = true;
+      break;
+    }
+  }
+  EXPECT_FALSE(parityRawAdmitted)
+      << "the fieldless tick did NOT burn the only _rawAdmitted slot — the "
+         "quirk this test documents no longer exists, so delete the paragraph "
+         "in Dispatcher.cpp rather than this assertion";
+
+  EXPECT_EQ(dj, dr);
+  EXPECT_EQ(sj, sr);
+}
+
+TEST(RecordIngressParityTest, DuplicateJsonMembersAreAPreExistingJsonOnlyQuirk) {
+  // A JSON-ONLY QUIRK, PRE-EXISTING AND NOT A REGRESSION. The record path
+  // cannot express it at all — `RecordFieldSource` emits each name at most
+  // once — so it is outside the parity claim entirely, and that is why this
+  // test asserts the quirk rather than an equality.
+  //
+  // For `{"price":1.0,"price":2.0}`: the LISTENER sees 1.0, because
+  // `FindMember` returns the first match (as `HasMember`/`operator[]` did at
+  // HEAD~2); the STORE ends at 2.0, because raw admission enumerates every
+  // member and `setBatch` applies them in order. Identical before this ticket.
+  const auto cfg = defaultCfg();
+  Rig rig(cfg);
+
+  auto doc = std::make_shared<rapidjson::Document>();
+  doc->SetObject();
+  auto& alloc = doc->GetAllocator();
+  doc->AddMember("price", rapidjson::Value(1.0), alloc);
+  doc->AddMember("price", rapidjson::Value(2.0), alloc);
+  rig.disp.onTick(Event{kTicker, doc});
+  rig.quiesce();
+
+  bool sawFirst = false;
+  for (const auto& row : rig.log.rows()) {
+    if (row.rfind("price |", 0) == 0) {
+      EXPECT_NE(row.find(describeDouble(1.0)), std::string::npos)
+          << "the listener no longer reads the FIRST duplicate member: " << row;
+      sawFirst = true;
+    }
+  }
+  EXPECT_TRUE(sawFirst) << "no `price` delivery at all — vacuous";
+
+  const auto stored = rig.store.get(kTicker, "price");
+  ASSERT_TRUE(stored.has_value());
+  EXPECT_EQ(describe(*stored), "d:" + describeDouble(2.0))
+      << "the store no longer ends at the LAST duplicate member";
+
+  // And the record path cannot produce the situation, which is the actual
+  // parity-relevant statement here.
+  const data::TickRecord r = makeRecord(rig.symbolId, 100.25, 10, 100.20, 100.30);
+  std::vector<std::string> names;
+  {
+    struct Collect final : engine::NumericFieldSink {
+      std::vector<std::string>* out;
+      void field(const std::string& name, double) override { out->push_back(name); }
+    } c;
+    c.out = &names;
+    engine::RecordFieldSource(r).forEachNumber(c);
+  }
+  std::set<std::string> unique(names.begin(), names.end());
+  EXPECT_EQ(unique.size(), names.size())
+      << "RecordFieldSource emitted a duplicate field name";
 }
 
 // ===========================================================================
