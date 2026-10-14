@@ -539,7 +539,7 @@ arrow::Status DatabentoAdapter::parseMetadata(std::span<const std::byte> block,
   md.endPadding = r.remaining();
   if (md.endPadding != 0) {
     if (version < dbn::kFirstAlignedVersion ||
-        md.endPadding > dbn::kMetadataAlignment) {
+        md.endPadding >= dbn::kMetadataAlignment) {
       return arrow::Status::Invalid(
           "DBN v", static_cast<int>(version), " metadata has ", md.endPadding,
           " unconsumed trailing byte(s); only v", static_cast<int>(dbn::kFirstAlignedVersion),
