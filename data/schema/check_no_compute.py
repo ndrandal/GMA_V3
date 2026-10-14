@@ -76,15 +76,32 @@ COMBINATORS = (
 )
 
 
+class CouldNotRun(Exception):
+    """The instrument is broken, as distinct from the file being wrong.
+
+    Exit 2, never 1. "Could not run" and "found a violation" being the same
+    colour is the failure mode this whole project keeps hitting — a check that
+    cannot read its own vocabulary must not be reportable as a D2 finding, and
+    `raise SystemExit(msg)` exits 1, which is the colour reserved for findings.
+    """
+
+
 def load_aggregates(path=AGGREGATES):
     names = []
-    with open(path, "r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line and not line.startswith("#"):
-                names.append(line)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    names.append(line)
+    except OSError as exc:
+        raise CouldNotRun("cannot read the aggregate vocabulary %s: %s"
+                          % (path, exc)) from None
     if not names:
-        raise SystemExit("could not run: %s has no function names" % path)
+        raise CouldNotRun(
+            "%s has no function names, so the aggregate scan would match "
+            "nothing and report a clean file. Refusing to pass. Run "
+            "`check_no_compute.py refresh-aggregates`." % path)
     return names
 
 
@@ -220,12 +237,67 @@ def scan(path, schema_decisions=True, aggregates_path=AGGREGATES):
                     "deletes the in-flight one, so an incomplete window reads "
                     "as complete (SPEC D11, measured)."
                     % iw["clauses"].get("ENGINE"))
-            if not iw["clauses"].get("ORDER BY", "").endswith("updated_at)"):
+            # The exact key, not a suffix test. to_ts must be IN it, or a
+            # recorded [00:00,12:00) answers "complete" for a request covering
+            # [00:00,24:00) and returns half a day as if whole. And session_id
+            # must NOT sit between the window prefix and the clock, or the tail
+            # of the prefix range is the newest row of the highest session_id
+            # rather than the newest row — and nothing makes session_id
+            # time-monotonic.
+            want_iw = "(symbol,kind,from_ts,to_ts,updated_at)"
+            got_iw = iw["clauses"].get("ORDER BY")
+            if got_iw != want_iw:
                 findings.append(
-                    "ENC-1480: gma.ingest_windows ORDER BY is %s — it must end "
-                    "with updated_at, so 'the newest row for this window' is a "
-                    "key-prefix tail rather than a scan."
-                    % iw["clauses"].get("ORDER BY"))
+                    "ENC-1480: gma.ingest_windows ORDER BY is %s, expected %s. "
+                    "to_ts must be in the key (a recorded [00:00,12:00) must "
+                    "not answer 'complete' for [00:00,24:00) — D11), and "
+                    "session_id must not sit between the window prefix and "
+                    "updated_at (it is not time-monotonic, so the prefix tail "
+                    "would be the newest row of the highest session, not the "
+                    "newest row)." % (got_iw, want_iw))
+            # The write clock needs a DEFAULT or "set on every row" is a
+            # convention with nothing behind it: measured, an INSERT omitting
+            # the column stores epoch 0, every row ties, and "the single newest
+            # row" becomes arbitrary — the same zero-valued-clock defect that
+            # disqualified ReplacingMergeTree(completed_at).
+            iw_cols = {c[0]: c for c in iw["columns"]}
+            ua = iw_cols.get("updated_at")
+            if ua is None:
+                findings.append("ENC-1480: gma.ingest_windows has no "
+                                "updated_at column to order its log by.")
+            elif "DEFAULT now64(3)" not in ua[2]:
+                findings.append(
+                    "ENC-1480: gma.ingest_windows.updated_at has no "
+                    "`DEFAULT now64(3)` (expression is %r). Without it an "
+                    "INSERT that omits the column stores epoch 0 — measured — "
+                    "every row ties and 'the newest row' is arbitrary, so a "
+                    "stale state=1 can win (SPEC D11)." % (ua[2] or "none"))
+            if "state" in iw_cols and "3 invalidated" not in raw:
+                findings.append(
+                    "ENC-1480: gma.ingest_windows.state no longer documents "
+                    "state 3 (invalidated). A DROP PARTITION for one symbol "
+                    "wipes every symbol's rows for that day, and 'collaterally "
+                    "wiped' is neither in-flight nor failed.")
+
+        # gaps must be partitioned on the day of the HOLE, so the §8.6
+        # DROP PARTITION reload can reach it. On ts_detected it cannot: a
+        # corrected re-pull leaves a row still asserting a discontinuity in data
+        # that is now complete — a phantom hole.
+        gp = tables.get("gma.gaps")
+        if gp is not None:
+            if gp["clauses"].get("PARTITION BY") != "toYYYYMMDD(ts_from)":
+                findings.append(
+                    "ENC-1480: gma.gaps PARTITION BY is %s, expected "
+                    "toYYYYMMDD(ts_from). On the detection day the re-ingest "
+                    "DROP PARTITION cannot remove these rows, so a filled hole "
+                    "leaves a phantom one behind."
+                    % gp["clauses"].get("PARTITION BY"))
+            if gp["clauses"].get("ORDER BY") != "(symbol,ts_from,seq_from)":
+                findings.append(
+                    "ENC-1480: gma.gaps ORDER BY is %s, expected "
+                    "(symbol,ts_from,seq_from) — it must lead with the same "
+                    "event time the partition key is built on."
+                    % gp["clauses"].get("ORDER BY"))
         replacing = sorted(n for n, t in tables.items()
                            if "Replacing" in (t["clauses"].get("ENGINE") or ""))
         if replacing != ["gma.symbology"]:
@@ -315,6 +387,21 @@ MUTANTS = [
      ("CREATE DATABASE IF NOT EXISTS gma;",
       "CREATE DATABASE IF NOT EXISTS gma;\nALTER TABLE gma.trades ADD PROJECTION IF NOT EXISTS p_time_symbol ( SELECT * ORDER BY (ts_event, symbol) );"),
      "a projection is live"),
+    ("ingest_windows key back to the session_id-before-clock form",
+     ("ORDER BY (symbol, kind, from_ts, to_ts, updated_at)",
+      "ORDER BY (symbol, kind, from_ts, session_id, updated_at)"),
+     "ingest_windows ORDER BY"),
+    ("to_ts dropped from the ingest_windows key",
+     ("ORDER BY (symbol, kind, from_ts, to_ts, updated_at)",
+      "ORDER BY (symbol, kind, from_ts, updated_at)"),
+     "ingest_windows ORDER BY"),
+    ("updated_at loses its DEFAULT",
+     ("updated_at    DateTime64(3, 'UTC') DEFAULT now64(3),",
+      "updated_at    DateTime64(3, 'UTC'),"),
+     "DEFAULT now64(3)"),
+    ("gaps partitioned on the detection day again",
+     ("PARTITION BY toYYYYMMDD(ts_from)", "PARTITION BY toYYYYMMDD(ts_detected)"),
+     "gma.gaps PARTITION BY"),
     ("an aggregating rollup appended",
      ("CREATE DATABASE IF NOT EXISTS gma;",
       "CREATE DATABASE IF NOT EXISTS gma;\nCREATE TABLE gma.bars (bucket DateTime64(9,'UTC'), symbol LowCardinality(String), volume AggregateFunction(sum, UInt64)) ENGINE = AggregatingMergeTree ORDER BY (symbol, bucket);"),
@@ -430,7 +517,14 @@ def main(argv=None):
     p_ref.add_argument("--url", default=DEFAULT_URL)
 
     args = ap.parse_args(argv)
+    try:
+        return _run(args)
+    except CouldNotRun as exc:
+        print("could not run: %s" % exc, file=sys.stderr)
+        return 2
 
+
+def _run(args):
     if args.cmd == "self-test":
         print("check_no_compute self-test — a gate never observed failing has "
               "not been shown to gate:")
