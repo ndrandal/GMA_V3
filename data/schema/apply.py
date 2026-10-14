@@ -392,13 +392,13 @@ def cmd_prove_verify(args):
     # silently become a no-op.
     cols = list(want["columns"])
     mutated_cols = []
-    for cname, ctype, codec in cols[:-1]:            # mutation 1: drop the last column
+    for cname, ctype, cexpr, codec in cols[:-1]:     # mutation 1: drop the last column
         if cname == "seq_to":
             codec = "CODEC(ZSTD(9))"                 # mutation 2: different codec
-        mutated_cols.append((cname, ctype, codec))
+        mutated_cols.append((cname, ctype, cexpr, codec))
     body = ",\n    ".join(
-        "%s %s %s" % (c, t, k) if k else "%s %s" % (c, t)
-        for c, t, k in mutated_cols)
+        " ".join(part for part in (c, t, e, k) if part)
+        for c, t, e, k in mutated_cols)
     probe_ddl = (
         "CREATE TABLE %s.gaps\n(\n    %s\n)\nENGINE = %s\n"
         "PARTITION BY %s\nORDER BY %s\nSETTINGS index_granularity = 4096"
@@ -420,7 +420,7 @@ def cmd_prove_verify(args):
         names = [c[0] for c in got["columns"]]
         if dropped not in names and len(names) == len(cols) - 1:
             applied.append("column %r dropped" % dropped)
-        if dict((c[0], c[2]) for c in got["columns"]).get("seq_to") == "CODEC(ZSTD(9))":
+        if dict((c[0], c[3]) for c in got["columns"]).get("seq_to") == "CODEC(ZSTD(9))":
             applied.append("seq_to codec -> ZSTD(9)")
         if got["clauses"].get("SETTINGS", {}).get("index_granularity") == "4096":
             applied.append("index_granularity -> 4096")
