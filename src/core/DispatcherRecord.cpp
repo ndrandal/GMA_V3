@@ -32,7 +32,6 @@
 // "unifying" the paths by synthesizing an `Event` inside `onRecord`.
 
 #include "gma/Dispatcher.hpp"
-#include "gma/AtomicStore.hpp"
 
 #include "gma/data/Record.hpp"
 #include "gma/data/SymbolTable.hpp"
@@ -97,7 +96,6 @@ void Dispatcher::onRecord(const data::TickRecord& rec) {
   // parity test drives down the JSON path.
   const engine::RecordFieldSource fields(rec);
 
-  if (_store) _store->set(symbol, "zzGhost", 1.0);   // RECORD PATH ONLY
   ingest(symbol, recordEventType(), fields);
 }
 
