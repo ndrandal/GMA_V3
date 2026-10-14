@@ -192,6 +192,17 @@ def scan(path, schema_decisions=True, aggregates_path=AGGREGATES):
                     "question ENC-1484 (T6) exists to measure against real MBO "
                     "(SPEC D5)." % (got, want))
 
+    # How much the comment stripping is actually doing, reported on every run.
+    # If this number is 0 the trap is gone and someone has rewritten the
+    # schema's header; if the scan were run on the raw text instead, every one
+    # of these would be reported as a violation of a rule it is documenting.
+    raw_hits = len(agg_re.findall(raw))
+    for _label, rx, _why in STRUCTURAL:
+        raw_hits += len(rx.findall(raw))
+    facts["raw_hits"] = raw_hits
+    facts["comment_only_hits"] = raw_hits - len(
+        [f for f in findings if f.startswith("D2 ")])
+
     return findings, facts
 
 
@@ -338,6 +349,10 @@ def main(argv=None):
     print("  %d statements, %d bytes scanned, %d comment bytes stripped first"
           % (facts["statements"], facts["scanned_bytes"],
              facts["comment_bytes_removed"]))
+    if facts.get("comment_only_hits"):
+        print("  %d forbidden construct(s) appear in COMMENTS only — a scan "
+              "without comment stripping would report every one of them"
+              % facts["comment_only_hits"])
     if "tables" in facts:
         print("  tables created: %s" % ", ".join(facts["tables"]))
     if findings:

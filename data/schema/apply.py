@@ -210,38 +210,44 @@ def cmd_prove_verify(args):
         return 2
     want = ddl.parse_create_table(src)
 
+    # The probe DDL is SYNTHESIZED from the parsed form rather than patched as
+    # text: the statements `read_statements` hands back are already
+    # comment-stripped, so string surgery against the file's comments would
+    # silently become a no-op.
+    cols = list(want["columns"])
+    mutated_cols = []
+    for cname, ctype, codec in cols[:-1]:            # mutation 1: drop the last column
+        if cname == "seq_to":
+            codec = "CODEC(ZSTD(9))"                 # mutation 2: different codec
+        mutated_cols.append((cname, ctype, codec))
+    body = ",\n    ".join(
+        "%s %s %s" % (c, t, k) if k else "%s %s" % (c, t)
+        for c, t, k in mutated_cols)
+    probe_ddl = (
+        "CREATE TABLE %s.gaps\n(\n    %s\n)\nENGINE = %s\n"
+        "PARTITION BY %s\nORDER BY %s\nSETTINGS index_granularity = 4096"
+        % (PROBE_DB, body, want["clauses"]["ENGINE"],
+           want["clauses"]["PARTITION BY"], want["clauses"]["ORDER BY"]))
+    dropped = cols[-1][0]
+
     ch("DROP DATABASE IF EXISTS %s SYNC" % PROBE_DB, args.url)
     ch("CREATE DATABASE %s" % PROBE_DB, args.url)
     try:
-        # Three independent mutations, so a differ that only looks at one place
-        # still has to see the others: a dropped column, a different codec on a
-        # kept one, and a different index_granularity.
-        mutated = (src
-                   .replace("gma.gaps", "%s.gaps" % PROBE_DB)
-                   .replace("    -- 0 none, 1 re-snapshot requested, 2 backfilled from history\n"
-                            "    recovery      UInt8                 CODEC(ZSTD(1))\n", "")
-                   .replace("    cause         UInt8                 CODEC(ZSTD(1)),\n",
-                            "    cause         UInt8                 CODEC(ZSTD(1))\n")
-                   .replace("seq_to        UInt64                CODEC(DoubleDelta, ZSTD(1))",
-                            "seq_to        UInt64                CODEC(ZSTD(9))")
-                   .replace("index_granularity = 1024", "index_granularity = 4096"))
-        if mutated == src:
-            print("could not run: the mutation was a no-op, so detecting it "
-                  "would prove nothing", file=sys.stderr)
-            return 2
-        ch(mutated, args.url)
+        ch(probe_ddl, args.url)
         shown = ch("SHOW CREATE TABLE %s.gaps FORMAT TSVRaw" % PROBE_DB,
                    args.url).strip()
         got = ddl.parse_create_table(shown)
 
-        # Assert the mutation actually landed before claiming its detection.
+        # Assert the mutation actually landed before claiming its detection: a
+        # no-op mutation reads exactly like a passing gate.
         applied = []
-        if len(got["columns"]) == len(want["columns"]) - 1:
-            applied.append("recovery column dropped")
+        names = [c[0] for c in got["columns"]]
+        if dropped not in names and len(names) == len(cols) - 1:
+            applied.append("column %r dropped" % dropped)
         if dict((c[0], c[2]) for c in got["columns"]).get("seq_to") == "CODEC(ZSTD(9))":
-            applied.append("seq_to codec changed")
+            applied.append("seq_to codec -> ZSTD(9)")
         if got["clauses"].get("SETTINGS", {}).get("index_granularity") == "4096":
-            applied.append("index_granularity changed")
+            applied.append("index_granularity -> 4096")
         if len(applied) != 3:
             print("could not run: only %d of 3 mutations reached the server (%s)"
                   % (len(applied), ", ".join(applied) or "none"), file=sys.stderr)
