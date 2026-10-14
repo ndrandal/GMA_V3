@@ -263,7 +263,7 @@ void DatabentoAdapter::trackOrder(const OrderKey& k, std::uint64_t size) {
     orders_.erase(orders_.begin());
     ++stats_.evictedOrders;
   }
-  orders_[k] = size + 1;
+  orders_[k] = size;
 }
 
 // ---------------------------------------------------------------------------
@@ -777,7 +777,7 @@ arrow::Status DatabentoAdapter::onMbo(const dbn::MboMsg& m) {
       // preserves the event, and `OrderBookManager::onDelete` on an unknown
       // key is a no-op on replay.
       ++stats_.unknownOrder;
-      emit(BookAction::Delete, px, removed, epoch);
+      emit(BookAction::Update, px, removed, epoch);
       return;
     }
     if (removed >= it->second) {
