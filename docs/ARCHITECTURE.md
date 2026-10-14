@@ -126,6 +126,56 @@ Key semantics:
 - **FunctionMap builtins are subscribable.** `mean`, `sum`, `stddev`, etc. are computed per-field per-tick inside `Dispatcher::computeAndStoreAtomics` and fan out to matching listeners. By default they are stored under the **bare** function name — one slot per symbol, shared by every field, so two fields driving the same builtin overwrite each other. Set `atomicKeyNamespaceByField = true` to store them as `<field>.<fn>` instead; Listener push is unchanged either way. See [atomic-keys.md](atomic-keys.md#derived-atomic-key-shape--atomickeynamespacebyfield-enc-1008) for what flipping it breaks.
 - **Per-field raw path.** If a listener subscribed on `(AAPL, lastPrice)` and the payload has `lastPrice`, the dispatcher reads it and delivers directly — no TA involvement.
 
+### Two ingress shapes, one body (ENC-1486)
+
+`Dispatcher` has **two** entry points and **one** implementation behind them:
+
+```cpp
+void onTick  (const Event& tick);                 // JSON DOM — the legacy TCP
+                                                  //   feed + market.wsclient
+void onRecord(const data::TickRecord& rec);       // resolved fields, no DOM
+```
+
+`onTick`'s unit of work is a `shared_ptr<rapidjson::Document>`: it walks every
+member constructing a `std::string` per member per tick for the raw-admission
+ledger, and each computer then probes the DOM by name. For a chart tick that is
+irrelevant; at MBO rates — tens of millions of records per symbol-day — it is
+the dominant cost, not the math. `onRecord` takes a `gma::data::TickRecord`
+(`include/gma/data/Record.hpp`, an Arrow-free POD inside `gma_engine`) whose
+fields the normalizer already resolved, so nothing on that path constructs a
+DOM or a per-field string.
+
+Both are three-line adapters over the private
+`ingest(symbol, eventType, const engine::FieldSource&)`, so the raw-admission
+ledger, the history buffers, `computeAndStoreAtomics`, the `AtomicStore` keys,
+the computer sets and `deliver()`'s ordering are literally one implementation —
+**a graph cannot tell which entry point fed it**, structurally rather than by
+intention. `engine::FieldSource` is the field view; `JsonFieldSource` reads a
+DOM and `RecordFieldSource` reads a `TickRecord`, and the latter's header
+carries the record → engine field mapping and what each omission protects.
+
+Consequences worth knowing before you touch either:
+
+- **`IEventComputer::compute` takes a `FieldSource`, not an `Event`.** A record
+  overload would be a second implementation of every connector's field
+  extraction, free to drift — which is exactly how a graph would learn to tell
+  the paths apart. `computeEvent(const Event&)` is a non-virtual DOM shim for a
+  caller that has an `Event` in hand (connector unit tests); the Dispatcher
+  does not use it.
+- **`onRecord` needs `setSymbolTable()`.** A record names an interned
+  `symbolId`; `StreamValue` carries a `std::string symbol`, so the ticker is
+  resolved back at this boundary — one heap copy per record, deliberately left
+  in place because removing it is a separately measured step of the data-layer
+  benchmark. Without a table installed, or for an id the table never issued,
+  `onRecord` is a no-op: there is no stream key, and routing under `""` would
+  be a silent wrong answer.
+- **There is no event time on this path.** `header.tsEventNs` is not exposed as
+  a field and the clock nodes are untouched.
+
+Design: `specs/2026-10-14-gma-data-layer/SPEC.md` D1/D3/D9,
+`docs/data-layer.md` §C2/§C6/§6. Pinned by
+`tests/dispatch/RecordIngressParityTest.cpp`.
+
 ## 4. Engine registries (extension points)
 
 All live under `include/gma/engine/`. Most are header-only static singletons with a mutex-guarded map. Connectors publish here during `registerWith()`.
