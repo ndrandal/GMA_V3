@@ -41,9 +41,11 @@
 -- precisely so that documenting a prohibition is not reported as committing it,
 -- and it has a fixture for that case. A naive grep would flag this header.
 --
--- Three event tables, not one. A unified event table needs every type's fields
--- nullable, which defeats the codecs below and makes every read scan columns it
--- does not want.
+-- One table per record type, not one unified event table. A union table needs
+-- every type's fields nullable, which defeats the codecs below and makes every
+-- read scan columns it does not want. (Two event tables are live here —
+-- `trades` and `book_events` — because `quotes` is defined-but-commented; see
+-- its block.)
 --
 -- DECISIONS ENCODED HERE
 --

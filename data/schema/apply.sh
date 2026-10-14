@@ -29,7 +29,7 @@ FRESH=""
 for arg in "$@"; do
   case "$arg" in
     --fresh) FRESH="--fresh" ;;
-    -h|--help) sed -n '2,24p' "$SELF"; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$SELF"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
