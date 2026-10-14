@@ -460,24 +460,82 @@ SETTINGS index_granularity = 1024;
 -- (`ingested_at`), verified in the same run resolving an open interval's later
 -- closure correctly.
 --
--- ⚠ THE READ RULE, AND IT IS NOT OPTIONAL. `state = 1` on SOME row does not
--- mean the window is loaded. A window accumulates rows forever, including rows
--- from older sessions that WERE complete before a re-ingest emptied the
--- partition, and session_id is part of the sort key, so a re-ingest under a new
--- session adds a row rather than superseding one. Measured, same run: after
--- (session 1, state=1) then (session 7, state=0), `WHERE state = 1` matches one
--- row and the window reads as complete while its data is gone.
+-- ⚠ THE READ RULE, AND IT IS NOT OPTIONAL. Three separate ways a naive read of
+-- this table answers "complete" over data that is not there, each measured:
 --
---     isComplete(symbol, kind, window) :=
---         take the single NEWEST row by updated_at for that
---         (symbol, kind, from_ts), ACROSS ALL session_ids,
---         and require state = 1.
---         No row at all -> not ingested -> the query FAILS (D11).
+--   1. `state = 1` ON SOME ROW IS NOT COMPLETENESS. A window accumulates rows
+--      forever, including rows from sessions that WERE complete before a
+--      re-ingest emptied the partition. Measured: after (session 1, state=1)
+--      then (session 7, state=0), `WHERE state = 1` matches one row and the
+--      window reads as complete while its data is gone.
 --
--- updated_at is the last element of the sort key so that newest row is the tail
--- of a key-prefix range rather than a scan. The key is not unique and does not
--- need to be: nothing dedups here, which is the entire point of plain MergeTree
--- (SPEC D5).
+--   2. RESOLVING PER RECORDED WINDOW IS NOT COVERAGE OF THE REQUEST. A recorded
+--      [00:00, 12:00) at state=1 says nothing about [12:00, 24:00). A rule that
+--      resolves the newest row for a (symbol, kind, from_ts) and stops there
+--      answers "complete" for a request covering [00:00, 24:00) and returns
+--      HALF A DAY AS IF WHOLE — the flat-market failure D11 exists to prevent,
+--      in the one rule meant to prevent it. to_ts is therefore in the sort key
+--      and in the rule, and the rule is about COVERAGE, not about a row.
+--
+--   3. A TIE IN updated_at MAKES "THE NEWEST ROW" ARBITRARY. See the column's
+--      DEFAULT below.
+--
+-- So:
+--
+--     isComplete(symbol, kind, [req_from, req_to)) :=
+--         W := { [from_ts, to_ts) recorded for (symbol, kind)
+--                whose NEWEST row by updated_at has state = 1 }
+--         require  [req_from, req_to)  is covered by  union(W).
+--         Any part of the request not covered -> NOT INGESTED -> FAIL (D11).
+--
+-- Notes on that rule, because each clause is load-bearing:
+--
+--   * "newest row by updated_at" is resolved PER (symbol, kind, from_ts, to_ts)
+--     — one recorded window — and only then do the surviving state=1 windows
+--     form W. Resolving first and covering second is the order that matters: a
+--     window re-opened by a re-ingest must drop OUT of W before coverage is
+--     tested.
+--   * union(W) so that a seven-day request over seven daily windows is
+--     complete. Adjacent half-open intervals join; a hole anywhere fails.
+--   * a state=0 / 2 / 3 newest row contributes nothing. There is no partial
+--     credit, and `rows_inserted` is never consulted.
+--   * THE COVERAGE TEST IS DONE BY THE CALLER over the selected rows, not in
+--     SQL. That keeps it a selection on this side of the boundary and is also
+--     simply easier to get right in C++ than in an interval-merge query.
+--
+-- SORT KEY: (symbol, kind, from_ts, to_ts, updated_at), and session_id is
+-- DELIBERATELY NOT IN IT. With session_id sitting between the window prefix and
+-- the clock, the tail of a prefix range is the newest row OF THE HIGHEST
+-- session_id, not the newest row overall — and nothing makes session_id
+-- time-monotonic (it exists precisely because a restart resets a synthesized
+-- counter, as the provider_seq note in the header says). A reader taking the
+-- tail would resolve to a stale state=1 from a higher-numbered OLDER session.
+-- With session_id out of the key, "the newest row for this window" genuinely IS
+-- the tail of the (symbol, kind, from_ts, to_ts) prefix range, and session_id
+-- stays on the row as provenance. The key is not unique and does not need to
+-- be: nothing dedups here, which is the entire point of plain MergeTree (D5).
+--
+-- ⚠ INVARIANT THAT THE SCHEMA CANNOT ENFORCE, SO IT IS WRITTEN HERE AND OWNED BY
+-- THE INGEST JOB (ENC-1483):
+--
+--     A `DROP PARTITION` INVALIDATES EVERY SYMBOL'S COMPLETENESS ROWS FOR THAT
+--     PARTITION, NOT JUST THE SYMBOL BEING RE-INGESTED.
+--
+-- Partitions are day-granular (`toYYYYMMDD(ts_event)`) while completeness is
+-- recorded PER SYMBOL, so re-ingesting symbol A for a day deletes symbol B's
+-- rows for that day too. Without this step B's newest row still reads state=1
+-- and isComplete(B, …) returns true over an empty partition. docs §8.6 records
+-- the reload COST of day-granular partitions; it does not record this
+-- invalidation, and at one symbol the two are indistinguishable — which is
+-- exactly why it has to be written down now rather than found at the universe.
+-- Concretely, dropping partition P obliges the job to write, for every
+-- (symbol, kind) with a recorded window intersecting P, a fresh row at
+-- state = 3 (invalidated) or state = 0 (in flight, if it is about to reload
+-- that symbol too). `gma.gaps` is partitioned to the same key so the same
+-- DROP PARTITION removes its rows for P — see that table.
+-- Nothing in ClickHouse checks any of this: there is no foreign key and no
+-- trigger. It is a code obligation, and the ingest job's tests are where it
+-- gets held up.
 --
 -- AND RESOLVING THE NEWEST ROW IS NOT A D2 VIOLATION, so do not "fix" it by
 -- removing the resolution. D2 governs the MANIFEST -> SELECT path that feeds
@@ -490,10 +548,11 @@ SETTINGS index_granularity = 1024;
 --
 -- OPEN, and it belongs to the ingest job (ENC-1483) rather than to the schema:
 -- whether a re-ingest reuses its window's session_id or takes a new one. The
--- read rule above is correct under both, which is why it is written in terms of
--- "across all session_ids" — but docs §8.8 names the key
--- (symbol, kind, from_ts, session_id) without saying which, and "the key is
--- unique by construction" is only true of the reuse answer.
+-- read rule above is correct under both, which is why session_id is out of the
+-- key and out of the rule. (docs §8.8 states the recorded-never-inferred rule
+-- and the three-situations table; it specifies NO DDL and NO sort key, so the
+-- key here — and its divergence from revision 2's — is this file's decision to
+-- own, not a doc citation to lean on.)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS gma.ingest_windows
 (
@@ -504,26 +563,40 @@ CREATE TABLE IF NOT EXISTS gma.ingest_windows
     kind          LowCardinality(String),
     from_ts       DateTime64(9, 'UTC'),
     to_ts         DateTime64(9, 'UTC'),     -- half-open [from_ts, to_ts)
-    session_id    UInt32,
-    -- 0 in-flight, 1 complete, 2 failed. A window is only readable at 1, and
-    -- only on the newest row — see the read rule above.
+    -- 0 in-flight, 1 complete, 2 failed, 3 invalidated (the data was removed by
+    -- a partition reload for another symbol — see the invariant above). ONLY 3
+    -- is new relative to revision 2, and it exists because "collaterally wiped"
+    -- is neither in-flight nor failed, and writing it as either would be a lie
+    -- in the one table whose job is to not lie. A window is readable only when
+    -- its NEWEST row is state = 1.
     state         UInt8,
     -- Diagnostics ONLY. A row count can never establish completeness (see
     -- above); `state` is the authority.
     rows_inserted UInt64,
-    -- WRITE CLOCK. Set on EVERY row, in-flight rows included. This is what
-    -- orders the transition log, and the reason it is a separate column from
-    -- completed_at is the measurement above.
-    updated_at    DateTime64(3, 'UTC'),
-    -- Semantic: when this window finished loading. Zero on an in-flight or a
-    -- failed row. Never use it to order rows.
+    -- WRITE CLOCK, and the DEFAULT is what makes "set on every row" true rather
+    -- than a convention. Measured: with no DEFAULT, an INSERT that omits this
+    -- column stores 1970-01-01 00:00:00.000 — so if ENC-1483 ever omits it,
+    -- every row ties at epoch 0, "the single newest row" becomes arbitrary and a
+    -- stale state=1 can win. That is the IDENTICAL zero-valued-clock defect this
+    -- table was rewritten to eliminate; see the ENGINE note above.
+    --
+    -- `DEFAULT now64(3)` is not a D2 violation: a column default computes
+    -- nothing about the market, it only fires when the column is omitted, and
+    -- D2's prohibition is on MATERIALIZED / ALIAS columns deriving a VALUE. A
+    -- wall clock on a control-plane metadata row is not an operator's input.
+    updated_at    DateTime64(3, 'UTC') DEFAULT now64(3),
+    -- Semantic: when this window finished loading. Zero on an in-flight,
+    -- failed or invalidated row. NEVER use it to order rows — doing exactly
+    -- that is what made the revision-2 engine delete the in-flight row.
     completed_at  DateTime64(3, 'UTC'),
-    -- Provenance, so a window can be re-pulled identically.
+    -- Provenance, not identity: which ingest session wrote this row. It is NOT
+    -- in the sort key; see the SORT KEY note above.
+    session_id    UInt32,
     source        LowCardinality(String),   -- 'databento' | 'feedsim' | ...
     source_ref    String                    -- DBN batch id / file name
 )
 ENGINE = MergeTree
-ORDER BY (symbol, kind, from_ts, session_id, updated_at)
+ORDER BY (symbol, kind, from_ts, to_ts, updated_at)
 SETTINGS index_granularity = 1024;
 
 -- ---------------------------------------------------------------------------
