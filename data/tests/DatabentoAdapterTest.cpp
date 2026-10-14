@@ -935,6 +935,62 @@ TEST(DbnActionMappingTest, ATradeSideIsTheAggressorAndAFillSideIsFlipped) {
   EXPECT_EQ(h.a->bookEvents()[2].side, Side::Bid) << "a Fill on a resting ASK is a BUY";
 }
 
+TEST(DbnActionMappingTest, EveryBookMutationRowCarriesTheRestingSide) {
+  // The column `BookRecord::side` holds TWO meanings — the resting order's side
+  // on Add/Update/Delete/Clear, the aggressor's on a Trade row (see the header).
+  // A column with two meanings needs every row asserted, or the meanings swap
+  // silently. `ItchAdapter` is structurally incapable of this bug: its mutation
+  // events (`ObDeleteEvent{symbol, orderRef}`,
+  // `ObUpdateEvent{symbol, orderRef, nullopt, remaining}`) carry no side at all
+  // and only `ObTradeEvent` gets the flipped aggressor. The side on a mutation
+  // row is a column THIS adapter added, so it is this adapter's job to prove it.
+  //
+  // The case that was wrong: with `fillReducesRestingOrder` a Fill emits BOTH a
+  // mutation row and a print, and the aggressor flip leaked onto the mutation.
+  const char bid = static_cast<char>(dbn::Side::Bid);
+  const char ask = static_cast<char>(dbn::Side::Ask);
+
+  for (const char restingSide : {bid, ask}) {
+    SCOPED_TRACE(dbn::sideName(restingSide));
+    const Side wantResting  = restingSide == bid ? Side::Bid : Side::Ask;
+    const Side wantAggressor = restingSide == bid ? Side::Ask : Side::Bid;
+
+    DbnWriter w = plainWriter();
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Add), restingSide, 1,
+                 1'000'000'000LL, 10, 1));
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Cancel), restingSide, 1,
+                 1'000'000'000LL, 3, 2));   // partial -> Update
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Modify), restingSide, 1,
+                 1'100'000'000LL, 5, 3));   // -> Update
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Fill), restingSide, 1,
+                 1'100'000'000LL, 2, 4));   // -> Update(resting) + Trade(aggressor)
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Fill), restingSide, 1,
+                 1'100'000'000LL, 9, 5));   // -> Delete(resting) + Trade(aggressor)
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Clear), restingSide, 0,
+                 dbn::kUndefPrice, 0, 6));  // -> Clear(resting)
+
+    DatabentoAdapter::Config cfg;
+    cfg.fillReducesRestingOrder = true;
+    Harness h(cfg);
+    ASSERT_TRUE(h.run(w).ok());
+    ASSERT_EQ(h.a->bookEvents().size(), 8u);
+
+    for (std::size_t i = 0; i < h.a->bookEvents().size(); ++i) {
+      const BookRecord& r = h.a->bookEvents()[i];
+      SCOPED_TRACE(static_cast<int>(r.action));
+      if (r.action == BookAction::Trade) {
+        EXPECT_EQ(r.side, wantAggressor)
+            << "row " << i << ": a Trade row carries the AGGRESSOR side";
+      } else {
+        EXPECT_EQ(r.side, wantResting)
+            << "row " << i << ": action " << static_cast<int>(r.action)
+            << " is a book MUTATION and must carry the RESTING side, not the "
+               "aggressor the Fill print needs";
+      }
+    }
+  }
+}
+
 TEST(DbnActionMappingTest, ActionNoneIsAcceptedAndProducesNoBookRow) {
   DbnWriter w = plainWriter();
   w.addMbo(mbo(static_cast<char>(dbn::Action::None),
