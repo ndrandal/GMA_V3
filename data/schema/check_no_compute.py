@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""THE DDL MUST NOT COMPUTE — the committed check for SPEC D2, applied to
+`data/schema/clickhouse.sql`.
+
+SPEC `specs/2026-10-14-gma-data-layer/SPEC.md` D1/D2: ClickHouse does selection,
+gma does computation, and nothing computes a value twice. D2 is usually read as a
+rule about the shim's SELECTs (`gma_shim_sql_lint`, docs §5.4 — a different
+check, not this one), but it binds the schema just as hard: a `MATERIALIZED`
+column, an `AggregatingMergeTree` or a bar-producing `MATERIALIZED VIEW` is a
+second implementation of gma's math that no SELECT lint would ever see, because
+by the time a query runs the value has already been computed.
+
+So this asserts a property of the FILE:
+
+  * no aggregate function call, from a 208-name vocabulary read off the server
+    (`clickhouse_aggregates.txt`) rather than recalled;
+  * no `GROUP BY`;
+  * no `MATERIALIZED` or `ALIAS` column, and no view of any kind;
+  * no `AggregatingMergeTree` / `SummingMergeTree`;
+  * no window function (`OVER (`).
+
+TWO THINGS MAKE IT A GATE RATHER THAN A GESTURE.
+
+1. COMMENTS ARE STRIPPED BEFORE SCANNING. The schema's own header documents
+   every one of those prohibitions by name — "no AggregatingMergeTree, no
+   SummingMergeTree", "no MATERIALIZED or ALIAS column computing a value" — so a
+   naive grep reports the documentation as the violation. `ddl.strip_comments`
+   removes `--` to end-of-line and `/* */` while preserving string literals, and
+   `self-test` proves both directions: a file whose ONLY occurrence of a
+   forbidden construct is inside a comment passes, and a file with a real one
+   fails.
+
+2. IT IS ANTI-VACUOUS. A scan that matched nothing because its parser quietly
+   produced no input reads exactly like a clean pass (docs §5.4 calls this
+   anti-vacuity for the SQL lint; this repo has shipped the failure more than
+   once). So the check also asserts a non-zero statement count, that the
+   stripper actually removed something, and — for the real schema — that the six
+   expected tables are present, that `gma.quotes` is NOT created, that no
+   projection is live and that `book_events` carries the plain sort key. Those
+   last four are this ticket's decisions, not D2, and they are reported
+   separately.
+
+Usage:
+  check_no_compute.py lint [FILE] [--no-schema-decisions] [--cross-check-aggregates]
+  check_no_compute.py self-test
+  check_no_compute.py refresh-aggregates [--url URL]
+
+Exit 0 clean, 1 on a finding, 2 if it could not run.
+"""
+
+import argparse
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ddl  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCHEMA = os.path.join(HERE, "clickhouse.sql")
+AGGREGATES = os.path.join(HERE, "clickhouse_aggregates.txt")
+FIXTURES = os.path.join(HERE, "fixtures")
+DEFAULT_URL = os.environ.get("CH_HTTP_URL", "http://127.0.0.1:8123/")
+
+EXPECTED_TABLES = [
+    "gma.trades", "gma.book_events", "gma.book_snapshots",
+    "gma.symbology", "gma.ingest_windows", "gma.gaps",
+]
+
+# Aggregate-function combinators. `sumIf`, `quantilesState`, `anyLastOrNull` are
+# the same function with a suffix, so the vocabulary has to tolerate them or the
+# cheapest possible evasion walks straight through.
+COMBINATORS = (
+    "If|Array|ArrayIf|Map|MapIf|SimpleState|State|Merge|MergeState|"
+    "OrNull|OrDefault|Resample|Distinct|ForEach|Null|ArgMin|ArgMax"
+)
+
+
+def load_aggregates(path=AGGREGATES):
+    names = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                names.append(line)
+    if not names:
+        raise SystemExit("could not run: %s has no function names" % path)
+    return names
+
+
+def aggregate_regex(names):
+    # Longest first so `sumCount` is not shadowed by `sum`.
+    alt = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    return re.compile(
+        r"\b(?:" + alt + r")(?:" + COMBINATORS + r")*\s*\(",
+        re.IGNORECASE,
+    )
+
+
+# Structural prohibitions. Each is (label, compiled regex, why).
+STRUCTURAL = [
+    ("GROUP BY", re.compile(r"\bGROUP\s+BY\b", re.I),
+     "a GROUP BY in the DDL computes; D2 permits selection only"),
+    ("MATERIALIZED", re.compile(r"\bMATERIALIZED\b", re.I),
+     "a MATERIALIZED column or view computes a value at insert time, where no "
+     "SELECT lint can see it"),
+    ("ALIAS", re.compile(r"\bALIAS\b", re.I),
+     "an ALIAS column computes a value at read time and is invisible in the "
+     "projection list"),
+    ("AggregatingMergeTree", re.compile(r"\bAggregatingMergeTree\b", re.I),
+     "an aggregating engine computes during merges — SPEC D2/D4"),
+    ("SummingMergeTree", re.compile(r"\bSummingMergeTree\b", re.I),
+     "a summing engine computes during merges — SPEC D2/D4"),
+    ("window function", re.compile(r"\bOVER\s*\(", re.I),
+     "a window function is computation"),
+    ("CREATE VIEW", re.compile(r"\bCREATE\s+(?:OR\s+REPLACE\s+)?"
+                               r"(?:MATERIALIZED\s+|LIVE\s+|WINDOW\s+)?VIEW\b", re.I),
+     "any view puts an expression in a projection list the planner does not "
+     "control"),
+]
+
+
+def _line_of(text, pos):
+    return text.count("\n", 0, pos) + 1
+
+
+def scan(path, schema_decisions=True, aggregates_path=AGGREGATES):
+    """-> (findings, facts). findings empty == pass."""
+    with open(path, "r", encoding="utf-8") as fh:
+        raw = fh.read()
+    stripped = ddl.strip_comments(raw)
+    statements = ddl.split_statements(stripped)
+
+    findings, facts = [], {}
+    facts["file"] = path
+    facts["raw_bytes"] = len(raw)
+    facts["scanned_bytes"] = len(stripped.strip())
+    facts["comment_bytes_removed"] = len(raw) - len(stripped)
+    facts["statements"] = len(statements)
+
+    # --- anti-vacuity, before any scanning verdict is worth anything --------
+    if not statements:
+        findings.append("ANTI-VACUITY: 0 statements parsed out of %s. A scan "
+                        "with no input cannot pass." % path)
+        return findings, facts
+    if facts["scanned_bytes"] == 0:
+        findings.append("ANTI-VACUITY: the comment-stripped text is empty.")
+        return findings, facts
+
+    # --- D2: the DDL must not compute --------------------------------------
+    agg_re = aggregate_regex(load_aggregates(aggregates_path))
+    for m in agg_re.finditer(stripped):
+        findings.append("D2 line %d: aggregate function call %r — the DDL must "
+                        "not compute (SPEC D2)"
+                        % (_line_of(stripped, m.start()), m.group(0)))
+    for label, rx, why in STRUCTURAL:
+        for m in rx.finditer(stripped):
+            findings.append("D2 line %d: %s — %s"
+                            % (_line_of(stripped, m.start()), label, why))
+
+    # --- ENC-1480's schema decisions ---------------------------------------
+    if schema_decisions:
+        tables = {}
+        for stmt in statements:
+            if ddl.is_create_table(stmt):
+                parsed = ddl.parse_create_table(stmt)
+                tables[parsed["table"]] = parsed
+        facts["tables"] = sorted(tables)
+
+        for want in EXPECTED_TABLES:
+            if want not in tables:
+                findings.append("ENC-1480: %s is not created by this file" % want)
+        if "gma.quotes" in tables:
+            findings.append(
+                "ENC-1480: gma.quotes is created. Nothing populates it without "
+                "mbp-1 (SPEC Non-goals) and an empty table reads as 'the market "
+                "had no quotes' — the §8.8 failure. It stays commented.")
+        if re.search(r"\bADD\s+PROJECTION\b", stripped, re.I):
+            findings.append(
+                "ENC-1480: a projection is live. SPEC D4 defers them — at one "
+                "symbol (ts_event, symbol) and (symbol, ts_event, …) are the "
+                "same order, so it buys nothing and costs write amplification "
+                "on the table B1/B2 measure.")
+        be = tables.get("gma.book_events")
+        if be is not None:
+            got = be["clauses"].get("ORDER BY", "")
+            want = "(symbol,ts_event,provider_seq)"
+            if got != want:
+                findings.append(
+                    "ENC-1480: book_events ORDER BY is %s, expected %s. "
+                    "Adding `action, order_id` pre-decides the granule-skipping "
+                    "question ENC-1484 (T6) exists to measure against real MBO "
+                    "(SPEC D5)." % (got, want))
+
+    return findings, facts
+
+
+# --------------------------------------------------------------------------
+# Server access (only for refresh / cross-check — never for the verdict)
+# --------------------------------------------------------------------------
+
+
+def ch_query(sql, url=DEFAULT_URL):
+    import urllib.request
+    req = urllib.request.Request(url, data=sql.encode("utf-8"), method="POST")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read().decode("utf-8")
+
+
+def server_aggregates(url=DEFAULT_URL):
+    out = ch_query(
+        "SELECT name FROM system.functions WHERE is_aggregate ORDER BY name "
+        "FORMAT TSVRaw", url)
+    return [l.strip() for l in out.splitlines() if l.strip()]
+
+
+# --------------------------------------------------------------------------
+# self-test — the gate has to be seen failing
+# --------------------------------------------------------------------------
+
+SELF_TESTS = [
+    # (fixture, must_fail, must_mention, schema_decisions)
+    ("clickhouse.sql", False, None, True),
+    ("fixtures/comment_only_mentions.sql", False, None, False),
+    ("fixtures/violation_aggregating_engine.sql", True, "AggregatingMergeTree", False),
+    ("fixtures/violation_materialized_column.sql", True, "MATERIALIZED", False),
+    ("fixtures/violation_aggregate_view.sql", True, "aggregate function call", False),
+    ("fixtures/violation_alias_column.sql", True, "ALIAS", False),
+    ("fixtures/vacuous_comments_only.sql", True, "ANTI-VACUITY", False),
+]
+
+
+def self_test():
+    failures = 0
+    for rel, must_fail, mention, decisions in SELF_TESTS:
+        path = os.path.join(HERE, rel)
+        findings, facts = scan(path, schema_decisions=decisions)
+        failed = bool(findings)
+        verdict = "REJECT" if failed else "accept"
+        want = "REJECT" if must_fail else "accept"
+        ok = failed == must_fail
+        if ok and mention:
+            ok = any(mention in f for f in findings)
+        print("  [%s] %-46s -> %-6s (want %s, %d statements, %d comment bytes "
+              "stripped)" % ("ok" if ok else "FAIL", rel, verdict, want,
+                             facts["statements"], facts["comment_bytes_removed"]))
+        if not ok:
+            failures += 1
+            for f in findings:
+                print("        finding: %s" % f)
+            if must_fail and not findings:
+                print("        expected a finding and got none")
+            if mention and not any(mention in f for f in findings):
+                print("        expected a finding mentioning %r" % mention)
+    return failures
+
+
+# --------------------------------------------------------------------------
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p_lint = sub.add_parser("lint", help="check one DDL file (default: the schema)")
+    p_lint.add_argument("file", nargs="?", default=SCHEMA)
+    p_lint.add_argument("--no-schema-decisions", action="store_true",
+                        help="D2 only; skip the ENC-1480 shape assertions "
+                             "(for fixtures and for other DDL files)")
+    p_lint.add_argument("--cross-check-aggregates", action="store_true",
+                        help="also ask the server for its aggregate list and "
+                             "fail if the committed snapshot no longer covers it")
+    p_lint.add_argument("--url", default=DEFAULT_URL)
+
+    sub.add_parser("self-test", help="prove the check rejects real violations "
+                                     "and accepts comment-only mentions")
+
+    p_ref = sub.add_parser("refresh-aggregates",
+                           help="re-derive clickhouse_aggregates.txt from a server")
+    p_ref.add_argument("--url", default=DEFAULT_URL)
+
+    args = ap.parse_args(argv)
+
+    if args.cmd == "self-test":
+        print("check_no_compute self-test — a gate never observed failing has "
+              "not been shown to gate:")
+        failures = self_test()
+        if failures:
+            print("SELF-TEST FAILED: %d case(s)" % failures)
+            return 1
+        print("self-test: %d/%d cases behaved as specified" % (len(SELF_TESTS),
+                                                              len(SELF_TESTS)))
+        return 0
+
+    if args.cmd == "refresh-aggregates":
+        try:
+            names = server_aggregates(args.url)
+            version = ch_query("SELECT version() FORMAT TSVRaw", args.url).strip()
+        except Exception as exc:                     # noqa: BLE001
+            print("could not run: %s" % exc, file=sys.stderr)
+            return 2
+        header = []
+        with open(AGGREGATES, "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("#") and not line.startswith("# server:"):
+                    header.append(line.rstrip("\n"))
+                else:
+                    break
+        with open(AGGREGATES, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(header) + "\n")
+            fh.write("# server: %s\n" % version)
+            fh.write("\n".join(names) + "\n")
+        print("refreshed %s: %d aggregate functions from %s"
+              % (AGGREGATES, len(names), version))
+        return 0
+
+    findings, facts = scan(args.file,
+                           schema_decisions=not args.no_schema_decisions)
+
+    if args.cross_check_aggregates:
+        try:
+            live = set(server_aggregates(args.url))
+        except Exception as exc:                     # noqa: BLE001
+            print("could not run cross-check: %s" % exc, file=sys.stderr)
+            return 2
+        missing = sorted(live - set(load_aggregates()))
+        if missing:
+            findings.append(
+                "VOCABULARY: the server knows %d aggregate function(s) the "
+                "committed snapshot does not (%s%s). Run `refresh-aggregates`."
+                % (len(missing), ", ".join(missing[:8]),
+                   ", …" if len(missing) > 8 else ""))
+        else:
+            print("  cross-check: snapshot covers all %d server aggregates"
+                  % len(live))
+
+    print("check_no_compute: %s" % facts["file"])
+    print("  %d statements, %d bytes scanned, %d comment bytes stripped first"
+          % (facts["statements"], facts["scanned_bytes"],
+             facts["comment_bytes_removed"]))
+    if "tables" in facts:
+        print("  tables created: %s" % ", ".join(facts["tables"]))
+    if findings:
+        print("  FINDINGS (%d):" % len(findings))
+        for f in findings:
+            print("    - %s" % f)
+        return 1
+    print("  clean: the DDL selects and stores, and computes nothing (SPEC D2)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
