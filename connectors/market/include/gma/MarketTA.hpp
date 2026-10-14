@@ -37,8 +37,16 @@ std::vector<std::pair<std::string, ArgType>> computeAllAtomicValues(
 
 // Per-symbol TA event computer. Owned by the market connector; one instance
 // per dispatcher (state is not shared across dispatchers). The field-map
-// argument tells the computer which JSON keys to read for trade price /
-// volume / bid / ask / timestamp on each tick payload.
+// argument tells the computer which field names to read for trade price /
+// volume / bid / ask / timestamp on each tick.
+//
+// ENC-1486: the field names are no longer specifically JSON keys. `compute`
+// takes an `engine::FieldSource`, so one implementation serves both
+// `Dispatcher::onTick` (a rapidjson DOM) and `Dispatcher::onRecord` (a
+// `data::TickRecord`, no DOM). SPEC specs/2026-10-14-gma-data-layer/SPEC.md
+// D1 forbids a second implementation, and a record-shaped overload of the
+// extraction below would have been one — with the two free to drift, which is
+// precisely what would let a graph tell which ingress fed it.
 class MarketTickComputer final : public engine::IEventComputer {
 public:
   // Default field-map (NASDAQ-style names) for callers that don't have a
@@ -50,7 +58,9 @@ public:
   MarketTickComputer(const util::Config& cfg, market::MarketFieldMap fieldMap);
 
   std::string_view eventType() const override { return "tick"; }
-  void compute(const Event& e, engine::ComputeContext& ctx) override;
+  void compute(const std::string& symbol,
+               const engine::FieldSource& fields,
+               engine::ComputeContext& ctx) override;
 
 private:
   util::Config                                       _cfg;

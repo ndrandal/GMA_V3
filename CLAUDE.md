@@ -197,6 +197,31 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture including 
   against 80,000 writes — a concurrency test silently converted into a no-op. The test now
   records its reader throughput and asserts a floor for that reason; the measured sweep is the
   table in `src/core/AtomicStore.cpp`.
+- **Two Dispatcher ingress shapes, one body (ENC-1486).** `Dispatcher::onTick(const Event&)`
+  (JSON DOM — the legacy TCP feed and `market.wsclient`) and
+  `Dispatcher::onRecord(const data::TickRecord&)` (resolved fields, no DOM) are both
+  three-line adapters over the private
+  `ingest(symbol, eventType, const engine::FieldSource&)`. The raw-admission ledger, the
+  history buffers, `computeAndStoreAtomics`, the `AtomicStore` keys, the computer sets and
+  `deliver()`'s ordering are therefore **one** implementation reached two ways — SPEC
+  `specs/2026-10-14-gma-data-layer/SPEC.md` D1, and the reason **a graph cannot tell which
+  entry point fed it** is structural rather than asserted. Three things follow and each has
+  a sharp edge: **(1)** `IEventComputer::compute` takes a `const engine::FieldSource&`, not
+  an `Event` — a record overload would be a second copy of every connector's field
+  extraction, free to drift; read inputs with `fields.tryGetNumber(name, out)` and a
+  computer works on both paths. `computeEvent(const Event&)` is a non-virtual DOM shim for
+  direct callers (connector unit tests), not what the Dispatcher calls. **(2)** `onRecord`
+  needs `setSymbolTable()`; without a table, or for an id the table never issued, it is a
+  **no-op** — a record names only an interned `symbolId`, and routing under `""` would be a
+  silent wrong answer. The `symbolId` → ticker resolution is a deliberate heap copy per
+  record (`StreamValue` still carries `std::string symbol`); do not remove it without
+  ENC-1487's numbers, which measure it as a separate step. **(3)** No event time:
+  `header.tsEventNs` is not exposed as a field and the clock nodes are untouched (SPEC D9).
+  Mapping table and the reason for each omission: `include/gma/engine/RecordFieldSource.hpp`.
+  Pinned by `tests/dispatch/RecordIngressParityTest.cpp`, which compares deliveries **in
+  order** and store contents across the two paths, carries its own negative controls, and
+  separately pins the record→field mapping absolutely — the parity half cannot see a bug
+  *inside* the mapping, because it derives the equivalent JSON tick through it.
 - **Derived-builtin key shape — `atomicKeyNamespaceByField` (ENC-1008).** `Dispatcher::computeAndStoreAtomics` stores FunctionMap builtins (`mean`, `sum`, `stddev`, … — 56 names) under the **bare** function name by default. That is a single per-symbol slot shared by every field, so two fields of one symbol both driving `mean` overwrite each other and one value is silently lost. Setting `atomicKeyNamespaceByField = true` stores them as `<field>.<fn>` (`lastPrice.mean`) so each source field keeps its own. **Default off**, because the key is a client-supplied wire string — `field` in a WS subscribe is read verbatim by `TreeBuilder` for both `Listener` and `AtomicAccessor` — with no version negotiation. Flipping it breaks an `AtomicAccessor` bound to a bare builtin name — loudly for the 53 names nothing else writes, and **silently for `mean`/`median`/`spread`**, which `MarketTickComputer` also writes over price history and which therefore keep resolving to a *different* value. Listener **push is unchanged** in both states, and outbound WS frames carry no key string at all. Both states are pinned by `tests/dispatch/AtomicKeyNamespaceTest.cpp`; the migration checklist is in [`docs/atomic-keys.md`](docs/atomic-keys.md).
 
 ## Configuration

@@ -28,7 +28,10 @@ public:
   explicit NoopComputer(std::string type, int* sink = nullptr)
     : type_(std::move(type)), sink_(sink) {}
   std::string_view eventType() const override { return type_; }
-  void compute(const Event&, ComputeContext&) override { if (sink_) ++*sink_; }
+  // ENC-1486: compute takes a FieldSource, not an Event.
+  void compute(const std::string&, const FieldSource&, ComputeContext&) override {
+    if (sink_) ++*sink_;
+  }
 private:
   std::string type_;
   int*        sink_;
@@ -122,8 +125,8 @@ TEST(EventComputerRegistryTest, CreateAllYieldsFreshInstancesInOrder) {
   ASSERT_EQ(batch1.size(), 2u);
   Event ev;
   ComputeContext ctx{};
-  batch1[0]->compute(ev, ctx);
-  batch1[1]->compute(ev, ctx);
+  batch1[0]->computeEvent(ev, ctx);
+  batch1[1]->computeEvent(ev, ctx);
   EXPECT_EQ(sinkA, 1);
   EXPECT_EQ(sinkB, 1);
 

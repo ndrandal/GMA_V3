@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <map>
@@ -15,6 +16,7 @@
 #include <unordered_set>
 #include "gma/FunctionMap.hpp"
 #include "gma/Event.hpp"
+#include "gma/engine/FieldSource.hpp"
 #include "gma/StreamValue.hpp"
 #include "gma/engine/EventComputerRegistry.hpp"
 #include "gma/engine/IEventComputer.hpp"
@@ -23,6 +25,14 @@
 #include "gma/util/Config.hpp"
 
 namespace gma {
+
+// ENC-1486. The record ingress path's parameter types. Forward-declared
+// rather than included: they are PODs in `gma_engine` (include/gma/data/),
+// Arrow-free by construction, and `Dispatcher` only needs to name them.
+namespace data {
+struct TickRecord;
+class  SymbolTable;
+}  // namespace data
 
 /**
  * Dispatcher routes incoming events to subscribed listeners and maintains
@@ -127,6 +137,73 @@ public:
   // rejected. Raised on ENC-1005 for the SPEC to rule on.
   void onTick(const Event& tick);
 
+  // ENC-1486 — RECORD INGRESS. The same ingress, with the JSON DOM removed.
+  //
+  // Design: specs/2026-10-14-gma-data-layer/SPEC.md D1, D3, D13;
+  //         docs/data-layer.md §C2, §C6, §6.
+  //
+  // WHY A SECOND ENTRY POINT. `onTick`'s unit of work is a
+  // `shared_ptr<rapidjson::Document>`: it walks `MemberBegin()..MemberEnd()`
+  // constructing a `std::string` per member per tick for the raw-admission
+  // ledger, and every `IEventComputer` then probes it by name. For a chart
+  // tick that is irrelevant. At MBO rates — tens of millions of records per
+  // symbol-day — it is the dominant cost, not the math
+  // (docs/data-layer.md §C6). A `data::TickRecord` arrives with its fields
+  // already resolved, so this path constructs no DOM and no per-field string.
+  //
+  // THE JSON PATH IS UNCHANGED AND STAYS. The legacy TCP feed server and
+  // `market.wsclient` ingress keep using `onTick`. Two ingress shapes is a
+  // cost; folding them is a bigger one (docs/data-layer.md §C2).
+  //
+  // A GRAPH CANNOT TELL WHICH ENTRY POINT FED IT, and that is structural
+  // rather than asserted: both entry points are three-line adapters over one
+  // private `ingest()` taking a `const engine::FieldSource&`, so the
+  // raw-admission ledger, the history buffers, `computeAndStoreAtomics`, the
+  // `AtomicStore` keys, the computer sets and `deliver()`'s ordering are one
+  // implementation reached two ways (SPEC D1). Pinned by
+  // tests/dispatch/RecordIngressParityTest.cpp, which drives one logical tick
+  // down both paths and compares deliveries IN ORDER and store contents.
+  //
+  // THE SYMBOL IS STILL HEAP-COPIED HERE, deliberately. `StreamValue` carries
+  // `std::string symbol`, so this method resolves `header.symbolId` back to a
+  // ticker through `setSymbolTable()`'s table — one `std::string` per record,
+  // plus `StreamValue`'s own copy per delivered value. ENC-1481's interning
+  // removed the copy on the INGRESS side only. Removing it from the value path
+  // is step 4 of ENC-1487's five-step benchmark ("interned symbols") and must
+  // stay separately measurable, so it is NOT done here: doing it now would
+  // merge two data points and misattribute B2.
+  //
+  // THERE IS NO EVENT TIME ON THIS PATH. `header.tsEventNs` is not exposed as
+  // a field and the clock nodes are untouched — SPEC D9 /
+  // docs/data-layer.md §C1, explicitly post-measurement. B1/B2 use a
+  // non-windowed graph precisely so they need none of it. See
+  // include/gma/engine/RecordFieldSource.hpp for the full field mapping and
+  // for what each omission is protecting.
+  //
+  // PRECONDITIONS. `setSymbolTable()` must have been called with a table that
+  // knows `rec.header.symbolId`; otherwise this is a no-op (there is no stream
+  // key to route on, and routing under "" would be wrong rather than
+  // degraded). Single-threaded ingress is a precondition here for exactly the
+  // reason it is on `onTick` — see that method's ORDERED DELIVERY note.
+  void onRecord(const data::TickRecord& rec);
+
+  // ENC-1486. Installs the `symbolId` -> ticker resolver the record path needs.
+  // Non-owning; the table must outlive every `onRecord` call. Set once at
+  // wiring time, before ingress starts — the pointer is atomic so that a later
+  // install is not a data race, but the table itself is only read here.
+  void setSymbolTable(const data::SymbolTable* symbols);
+
+  // ENC-1486. The event type a record routes to, i.e. which
+  // `IEventComputer`s see it. A `TickRecord` IS the resolved form of a
+  // `tick`, so it must reach exactly the computers an `Event{sym, payload}`
+  // reaches — `Event::type` defaults to "tick" and `MarketConnector`
+  // registers its computer factory under "tick". Deliberately NOT
+  // configurable: a knob here would let a record reach a different computer
+  // set than its equivalent Event, which is the one thing this path must
+  // never do. Exposed so the parity test asserts the two agree instead of
+  // restating the literal.
+  static const std::string& recordEventType();
+
   // Public hook that IEventComputer implementations call to deliver a computed
   // value to listeners subscribed on (symbol, field). Snapshot semantics — the
   // listener lock is held only while copying subscriber shared_ptrs.
@@ -135,6 +212,18 @@ public:
                        double value);
 
 private:
+  // ENC-1486. THE ingress body — the whole of what used to be the tail of
+  // `onTick`, with every JSON read replaced by a `FieldSource` call. Both
+  // `onTick` and `onRecord` are adapters over this and add nothing of their
+  // own, which is what makes "a graph cannot tell which entry point fed it" a
+  // structural property instead of a hope (SPEC
+  // specs/2026-10-14-gma-data-layer/SPEC.md D1).
+  //
+  // `eventType` selects the computer sets, exactly as `Event::type` did.
+  void ingest(const std::string& symbol,
+              const std::string& eventType,
+              const engine::FieldSource& fields);
+
   // ENC-1005 / SPEC D3. The single routing decision for every value this
   // Dispatcher hands to a subscriber: pool post (the default, unchanged) or an
   // inline call for a node that re-posts onto its own serializing executor.
@@ -243,6 +332,34 @@ private:
   // has been admitted, and holds no values.
   std::unordered_map<std::string, std::unordered_set<std::string>> _rawAdmitted;
   mutable std::shared_mutex _rawMutex;
+
+  // ENC-1486. The record path's symbolId -> ticker resolver; null until
+  // `setSymbolTable()` is called, which is why `onRecord` is a no-op in that
+  // state. Atomic because installation and ingress are different phases and a
+  // torn read of a pointer is not worth the argument; the load is relaxed-cost
+  // and happens once per record, not once per field.
+  std::atomic<const data::SymbolTable*> _symbols{nullptr};
+
+  // ENC-1486. `onRecord`'s two refusals are ONCE-ONLY diagnostics, per
+  // Dispatcher.
+  //
+  // THE REASON IS BENCHMARK INTEGRITY, NOT LOG TIDINESS. Both refusals are
+  // reached per RECORD, and this path exists to carry MBO — tens of millions
+  // of records per symbol-day. A `Warn` per record costs a
+  // `std::to_string(symbolId)` and a `vector<Field>` allocation each time, so
+  // a misconfigured `SymbolTable` in a harness would not merely spam a log: it
+  // would DOMINATE the measurement, and ENC-1487 would report a plausible,
+  // wrong, unattributable rows/sec for step 2 and compare it against B1. SPEC
+  // specs/2026-10-14-gma-data-layer/SPEC.md D13 makes that number the one the
+  // whole project is sized by, so making B2 accidentally measure logging is
+  // precisely the failure class this slice exists to avoid.
+  //
+  // `Logger` has no rate limiting of its own (util/Logger.hpp is the whole
+  // API), so the flag is the mechanism. They are logged AT ALL because the
+  // alternative is worse: an unresolvable symbolId drops EVERY record, and a
+  // silently empty chart is a far longer debugging session than one warning.
+  std::atomic<bool> _warnedNoSymbolTable{false};
+  std::atomic<bool> _warnedUnresolvedSymbol{false};
 
   mutable std::shared_mutex _histMutex;
   mutable std::shared_mutex _listenerMutex;
