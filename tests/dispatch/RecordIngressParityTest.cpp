@@ -838,17 +838,29 @@ const std::vector<std::string>& jsonTokens() {
   return t;
 }
 
-// Matches a token only where it STARTS an identifier. Plain substring search
-// was wrong in a way worth recording, because it is the shape of a false
-// positive this gate would otherwise have shipped: `GetUint64` is a substring
-// of `tryGetUint64`, the FieldSource accessor, so RecordFieldSource.hpp
-// "named rapidjson" on its first run. Requiring the preceding character to be
-// a non-identifier one keeps `value.GetUint64()` (preceded by `.`) a hit and
-// `tryGetUint64` (preceded by `y`) a miss.
-bool identStart(const std::string& hay, std::size_t at) {
-  if (at == 0) return true;
-  const char p = hay[at - 1];
-  return !(std::isalnum(static_cast<unsigned char>(p)) || p == '_');
+// Matches a token only as a WHOLE IDENTIFIER. Both bounds are load-bearing
+// and each was added after a measured false positive, which is the argument
+// for keeping them:
+//
+//   * leading bound — plain substring search made `GetUint64` match inside
+//     `tryGetUint64`, the FieldSource accessor, so RecordFieldSource.hpp
+//     "named rapidjson" on this gate's very first run;
+//   * trailing bound — adding `Event` to the list (because an adversarial
+//     probe slipped `const Event& evAlias` past the old list) made it match
+//     inside `EventComputerRegistry`, which is ordinary engine code, so the
+//     shared `ingest` body "named JSON".
+//
+// With both, `value.GetUint64()` and `const Event&` are hits while
+// `tryGetUint64` and `EventComputerRegistry` are not.
+bool identChar(char c) {
+  return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+bool wholeIdentifierAt(const std::string& hay, std::size_t at, std::size_t len) {
+  if (at != 0 && identChar(hay[at - 1])) return false;
+  const std::size_t after = at + len;
+  if (after < hay.size() && identChar(hay[after])) return false;
+  return true;
 }
 
 std::vector<std::string> jsonTokensIn(const std::string& scrubbed) {
@@ -856,7 +868,10 @@ std::vector<std::string> jsonTokensIn(const std::string& scrubbed) {
   for (const auto& tok : jsonTokens()) {
     for (std::size_t at = scrubbed.find(tok); at != std::string::npos;
          at = scrubbed.find(tok, at + 1)) {
-      if (identStart(scrubbed, at)) { found.push_back(tok); break; }
+      if (wholeIdentifierAt(scrubbed, at, tok.size())) {
+        found.push_back(tok);
+        break;
+      }
     }
   }
   return found;
