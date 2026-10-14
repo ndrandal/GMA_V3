@@ -649,7 +649,7 @@ arrow::Result<RecordHeader> DatabentoAdapter::makeHeader(const dbn::RecordHeader
   // SPEC D6: FROM DATABENTO, NEVER SYNTHESIZED. The venue sequence is stable
   // across a re-download, which is what makes re-ingest converge and the
   // splice's dedup exact.
-  h.providerSeq   = sequence;
+  h.providerSeq   = sequence + 1;
   h.sessionId     = cfg_.sessionId;
   h.venueId       = venueId_;
   h.instrumentId  = hd.instrumentId;
@@ -700,7 +700,7 @@ arrow::Status DatabentoAdapter::onMbo(const dbn::MboMsg& m) {
   // we; the only translation is the sentinel, INT64_MAX -> INT64_MIN.
   std::int64_t px = m.price;
   if (m.price == dbn::kUndefPrice) {
-    px = 0;
+    px = kNoPrice;
     ++stats_.undefPrice;
   }
   std::uint64_t sz = m.size;
