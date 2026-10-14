@@ -660,9 +660,14 @@ tiny.)
 different company. `valid_from`/`valid_to` lets you **detect** it; what a continuous series
 should do about it is reference data and out of scope.
 
-**Unverified:** the exact DBN field names, and whether `instrument_id` is stable within a
-dataset-day, are from memory. **T5 confirms them against a real file** rather than this
-document asserting them.
+**~~Unverified~~ — half of it is now measured (T4, ENC-1482).** The exact DBN field names
+and the whole record/metadata layout were established against real vendor DBN bytes committed
+at `data/tests/fixtures/dbn/`; they are written down in `dbn::` in
+`data/include/gma/data/DatabentoAdapter.hpp` and in SPEC §5 under Q14, and the names there are
+the vendor's own spellings — `instrument_id` included, so this section's field name is right.
+**Whether `instrument_id` is stable within a dataset-day is still open**: a two-record public
+sample naming one instrument proves nothing about reassignment, so **T5 confirms that against
+a real 7-day file.**
 
 ### 8.10 Codecs
 
@@ -1034,8 +1039,9 @@ wire to support rebasing? I lean accept — rebasing means solving ENC-1101's bu
 **Q11 — persist derived series as a cache?** Optional now. If yes, invalidation key is graph
 identity.
 
-**Q14 — Databento client library, or decode DBN directly?** DBN is the schema reference
-either way. *T4 decides it in passing.*
+**Q14 — ~~Databento client library, or decode DBN directly?~~ RESOLVED by T4 (ENC-1482):
+decode it ourselves.** The reasoning, the cost stated in both directions, and the mitigations
+are **§15.2**; the facts the real DBN bytes settled are SPEC §5 under Q14.
 
 **Q15 — the C13 double-count refusal.** Confirm the planner should **refuse** a graph
 reading `trades` and `book_events` for the same symbol and window, rather than attempt

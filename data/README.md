@@ -85,7 +85,9 @@ row is the gate's **positive control**: its closure must trip a forbidden patter
 | `include/gma/data/Schema.hpp` + `src/Schema.cpp` | **real** — the three first-slice Arrow schemas, `quotes`, and the column-wise codec |
 | `../include/gma/data/Record.hpp` | **real** — the engine-facing PODs (in `gma_engine`) |
 | `../include/gma/data/SymbolTable.hpp` | **real** — ticker/venue interning (in `gma_engine`) |
-| `include/gma/data/IProviderAdapter.hpp` | sketch — ENC-1482 (Databento DBN) |
+| `include/gma/data/DatabentoAdapter.hpp` + `src/DatabentoAdapter.cpp` | **real** — the DBN decoder and the DBN→canonical mapping (ENC-1482) |
+| `tests/fixtures/dbn/` | **real Databento DBN bytes**, Apache-2.0 — see `PROVENANCE.md` there |
+| `include/gma/data/IProviderAdapter.hpp` | sketch — the `IProviderAdapter` / `INormalizer` interfaces. `DatabentoAdapter` deliberately does **not** implement it yet: that interface carries `subscribeFrame` / `snapshotRequestFrame` / `fetchHistory`, which are live-gateway and HTTP concerns outside ENC-1482's scope |
 | `include/gma/data/Shim.hpp` | sketch — ENC-1485 and the post-measurement plan |
 | `include/gma/data/IHistoryBackend.hpp` | sketch — `IL1Store`, ClickHouse + fixture impls |
 | `include/gma/data/ISource.hpp` | sketch — `ISource`, `LiveSource`, `ReplaySource`, `SplicedSource` |
@@ -95,6 +97,23 @@ row is the gate's **positive control**: its closure must trip a forbidden patter
 The sketches use forward-declared Arrow types (`arrow::RecordBatch`, `arrow::Schema`) behind
 `shared_ptr` so they read without an Arrow install. `Schema.hpp` no longer needs to: it is
 compiled.
+
+## The Databento adapter in one paragraph
+
+`DatabentoAdapter` turns DBN bytes into `TickRecord`/`BookRecord` vectors and, through
+`Schema.hpp`, into canonical Arrow batches. It decodes and maps; it computes nothing. **Q14 is
+resolved in favour of decoding DBN ourselves** rather than linking `databento-cpp` — which
+needs OpenSSL, zstd, nlohmann_json, cpp-httplib, HowardHinnant/date *and a Rust toolchain*
+(it delegates DBN decoding to the Rust `dbn` crate's C-FFI) for a 90%-unused HTTP client;
+the full trade-off, stated in both directions, is `../docs/data-layer.md` §15.2. zstd is
+deliberately not a dependency: `.dbn.zst` is decompressed by the ingest job, and feeding a
+zstd frame here is refused by name. The mapping is a re-encoding of `ItchAdapter`'s tested
+MBO vocabulary, and the three invariants it preserves are the book-neutral print, the
+epoch bump on a clear, and `Cancel` being a **delta** that needs the resting size. The DBN
+layout is established by five committed files of **real vendor bytes** (`tests/fixtures/dbn/`,
+Apache-2.0) rather than by assertion — the test's first act is to prove a DBN encoder
+reproduces each of them byte for byte, and only then uses it to reach the actions a
+two-record sample cannot.
 
 ## The schema in one paragraph
 
