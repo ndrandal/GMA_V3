@@ -68,7 +68,10 @@ void Dispatcher::onRecord(const data::TickRecord& rec) {
     // than a loud nothing. Warn, not Error, because the only way to reach it
     // is a wiring mistake that the first record reports.
     //
-    // ONCE per Dispatcher, not once per record — see the flag's declaration.
+    // ONCE per Dispatcher, not once per record. The reason is benchmark
+    // integrity rather than log tidiness — at MBO rates a per-record Warn
+    // would dominate ENC-1487's step-2 measurement — see the flag's
+    // declaration in Dispatcher.hpp for the full argument.
     if (!_warnedNoSymbolTable.exchange(true, std::memory_order_relaxed)) {
       gma::util::logger().log(
           gma::util::LogLevel::Warn,
@@ -103,10 +106,18 @@ void Dispatcher::onRecord(const data::TickRecord& rec) {
     // `onTick` has always dropped an empty stream key; this is the same rule
     // reached from the other side.
     //
-    // Said out loud, once, because the failure is total and otherwise
-    // invisible: a normalizer interning into a different table than the one
-    // installed here drops EVERY record, and a silently empty chart is a much
-    // longer debugging session than one warning.
+    // THE RULING on route 3: an empty ticker is a REFUSAL, not a valid
+    // stream key. `SymbolTable` is right not to fold `intern("")` onto
+    // kInvalidSymbolId — that would hide a provider bug — and this is right to
+    // refuse the id it issues, because the engine keys every listener,
+    // history buffer and store entry on the ticker string. Admitting "" gives
+    // every such record one shared bucket that no subscription can name.
+    //
+    // Said out loud, once (same benchmark-integrity reason as above), because
+    // the failure is total and otherwise invisible: a normalizer interning
+    // into a different table than the one installed here drops EVERY record,
+    // and a silently empty chart is a much longer debugging session than one
+    // warning.
     if (!_warnedUnresolvedSymbol.exchange(true, std::memory_order_relaxed)) {
       gma::util::logger().log(
           gma::util::LogLevel::Warn,
