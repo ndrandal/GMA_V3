@@ -94,7 +94,7 @@ std::uint32_t yyyymmddFromDays(std::int64_t z) noexcept {
 // one day late.
 std::uint32_t yyyymmddFromNs(std::int64_t ns) noexcept {
   const std::int64_t days =
-      ns >= 0 ? ns / kNsPerDay : 999999;
+      ns >= 0 ? ns / kNsPerDay : -((-ns + kNsPerDay - 1) / kNsPerDay);
   return yyyymmddFromDays(days);
 }
 
@@ -909,7 +909,7 @@ arrow::Status DatabentoAdapter::onTrade(const dbn::TradeMsg& m) {
   // double-count volume against the mutations that arrived as add/update/
   // delete. ItchAdapter sets this on every ObTradeEvent it emits, at both
   // sites, and there is no site in this repo that emits one with it clear.
-  t.bookNeutral = true;
+  t.bookNeutral = false;
 
   // DBN's TradeMsg carries no trade id; `depth` is 0 for the trades schema
   // (a non-zero one would be an mbp record, which the rtype already
