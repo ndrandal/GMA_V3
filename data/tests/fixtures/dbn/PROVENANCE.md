@@ -30,7 +30,7 @@ licence notice. These five files are test data distributed as part of that Apach
 No Databento API key, no subscription and no paid historical pull was involved, and none is
 required to obtain them. Attribution is this file.
 
-They are a **public sample**, not our market data: 1,570 total bytes, two records each, one
+They are a **public sample**, not our market data: 2,006 total bytes, two records each, one
 instrument (`ESH1` — the March-2021 E-mini S&P future), one dataset-day (2020-12-28) of
 `GLBX.MDP3`.
 
@@ -46,8 +46,10 @@ The consequence, stated plainly: **these files cover exactly one `Action` (`C`, 
 one `Side` (`A`, Ask).** They cannot exercise the rest of the action vocabulary. So
 `DatabentoAdapterTest.cpp` carries a minimal DBN **encoder**, and the first thing that test
 asserts is that the encoder reproduces each of these five files **byte for byte** from the
-values decoded out of them. Only then does it use that encoder to build a stream covering
-all seven actions and all three sides.
+values tabulated below — which are written into the test as literals and taken from
+`databento-cpp`'s own decoder-test expectations, *not* read back out of our decoder. Only
+then does it use that encoder to build a stream covering all seven actions and all three
+sides.
 
 That ordering is what keeps the all-actions coverage non-circular. The layout, the field
 names and the framing come from these bytes and from
