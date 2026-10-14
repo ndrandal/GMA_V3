@@ -71,15 +71,20 @@ Where events come from, end-to-end, using the market connector as the example:
                                   │
                                   ▼
                 ┌─── Dispatcher.onTick(event) ───┐
+                │   (wraps the DOM in a          │
+                │    JsonFieldSource and calls   │
+                │    the private ingest(); see   │
+                │    "Two ingress shapes" below) │
                 │                                │
                 │  1. For each IEventComputer c: │
                 │       if c.eventType() ==      │
                 │          event.type, run       │
-                │          c.compute(event, ctx) │
+                │          c.compute(symbol,     │
+                │            fields, ctx)        │
                 │                                │
                 │     MarketTickComputer:        │
                 │       - extract price/vol/bid/ │
-                │         ask from payload       │
+                │         ask from the fields    │
                 │       - update per-symbol      │
                 │         TickEntry history      │
                 │       - run computeAll-        │
