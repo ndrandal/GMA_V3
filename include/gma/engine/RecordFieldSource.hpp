@@ -165,6 +165,10 @@ private:
     double             value = 0.0;
   };
 
+  // `name` MUST have static storage duration — an `Entry` keeps a POINTER to
+  // it, which is what makes handing a `const std::string&` to the sink free.
+  // Every caller passes a `recordfields::` object; a temporary here would
+  // dangle the moment the constructor returned.
   void addPrice(const std::string& name, std::int64_t fixed) noexcept {
     fields_[n_++] = Entry{&name, data::toDouble(fixed)};
   }
