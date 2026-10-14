@@ -322,17 +322,35 @@ MarketTickComputer::MarketTickComputer(const util::Config& cfg,
   initSkipFields(_skipFields);
 }
 
-void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx) {
-  if (!ctx.store || !tick.payload) return;
-
-  const auto& doc = *tick.payload;
+// ENC-1486 — reads its inputs through an `engine::FieldSource` rather than a
+// rapidjson DOM, so this ONE implementation is what both `Dispatcher::onTick`
+// (JSON) and `Dispatcher::onRecord` (`data::TickRecord`) reach. SPEC
+// specs/2026-10-14-gma-data-layer/SPEC.md D1: one implementation of every
+// operator, and the field extraction below is as much one as the TA suite is.
+//
+// EVERY READ IS A 1:1 SUBSTITUTION of the DOM pair it replaces, chosen so the
+// JSON path cannot move:
+//
+//   doc.HasMember(f) && doc[f].IsNumber() -> ... = doc[f].GetDouble()
+//        becomes      fields.tryGetNumber(f, out)
+//   doc.HasMember(f) && doc[f].IsUint64() -> ... = doc[f].GetUint64()
+//        becomes      fields.tryGetUint64(f, out)
+//
+// `tryGetUint64` keeps rapidjson's `IsUint64()` semantics deliberately: a
+// value stored as a double does not answer it, which is how the timestamp
+// read has always behaved. No arithmetic, no accumulation order and no
+// emission order below this point changed — forbidden by D1, and the §6
+// performance budget is transport-only.
+void MarketTickComputer::compute(const std::string& symbol,
+                                 const engine::FieldSource& fields,
+                                 engine::ComputeContext& ctx) {
+  if (!ctx.store) return;
 
   // Extract price via configured field aliases.
   double price = 0.0;
   bool hasPrice = false;
   for (const auto& pf : _fieldMap.priceFields) {
-    if (doc.HasMember(pf.c_str()) && doc[pf.c_str()].IsNumber()) {
-      price = doc[pf.c_str()].GetDouble();
+    if (fields.tryGetNumber(pf, price)) {
       hasPrice = true;
       break;
     }
@@ -342,29 +360,18 @@ void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx)
   // Extract optional volume / bid / ask / timestamp.
   double volume = 0.0;
   for (const auto& vf : _fieldMap.volumeFields) {
-    if (doc.HasMember(vf.c_str()) && doc[vf.c_str()].IsNumber()) {
-      volume = doc[vf.c_str()].GetDouble();
-      break;
-    }
+    if (fields.tryGetNumber(vf, volume)) break;
   }
   double bid = 0.0, ask = 0.0;
   std::uint64_t tsNs = 0;
   for (const auto& bf : _fieldMap.bidFields) {
-    if (doc.HasMember(bf.c_str()) && doc[bf.c_str()].IsNumber()) {
-      bid = doc[bf.c_str()].GetDouble();
-      break;
-    }
+    if (fields.tryGetNumber(bf, bid)) break;
   }
   for (const auto& af : _fieldMap.askFields) {
-    if (doc.HasMember(af.c_str()) && doc[af.c_str()].IsNumber()) {
-      ask = doc[af.c_str()].GetDouble();
-      break;
-    }
+    if (fields.tryGetNumber(af, ask)) break;
   }
-  if (!_fieldMap.timestampField.empty() &&
-      doc.HasMember(_fieldMap.timestampField.c_str()) &&
-      doc[_fieldMap.timestampField.c_str()].IsUint64()) {
-    tsNs = doc[_fieldMap.timestampField.c_str()].GetUint64();
+  if (!_fieldMap.timestampField.empty()) {
+    fields.tryGetUint64(_fieldMap.timestampField, tsNs);
   }
 
   // Update symbol history under lock; snapshot into contiguous vec for TA.
@@ -375,26 +382,26 @@ void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx)
   std::vector<TickEntry> histVec;
   {
     std::unique_lock<std::shared_mutex> lock(_histMutex);
-    if (_symbolHistories.find(tick.symbol) == _symbolHistories.end() &&
+    if (_symbolHistories.find(symbol) == _symbolHistories.end() &&
         _symbolHistories.size() >= _maxSymbols) {
       return;
     }
-    auto& hist = _symbolHistories[tick.symbol];
+    auto& hist = _symbolHistories[symbol];
     hist.push_back(TickEntry{price, volume, bid, ask, tsNs});
     if (hist.size() > _maxHistory) hist.pop_front();
     histVec.assign(hist.begin(), hist.end());
   }
 
   // Symbol admitted — now safe to publish the base atomics.
-  if (bid > 0.0) ctx.store->set(tick.symbol, "bid", bid);
-  if (ask > 0.0) ctx.store->set(tick.symbol, "ask", ask);
-  if (bid > 0.0 && ask > 0.0) ctx.store->set(tick.symbol, "spread", ask - bid);
-  if (tsNs > 0) ctx.store->set(tick.symbol, "timestamp", std::to_string(tsNs));
+  if (bid > 0.0) ctx.store->set(symbol, "bid", bid);
+  if (ask > 0.0) ctx.store->set(symbol, "ask", ask);
+  if (bid > 0.0 && ask > 0.0) ctx.store->set(symbol, "spread", ask - bid);
+  if (tsNs > 0) ctx.store->set(symbol, "timestamp", std::to_string(tsNs));
 
   // Run TA suite or fall back to lightweight base metrics.
   std::vector<std::pair<std::string, ArgType>> taResults;
   if (_fieldMap.taEnabled) {
-    taResults = computeAllAtomicValues(tick.symbol, histVec, *ctx.store, _cfg);
+    taResults = computeAllAtomicValues(symbol, histVec, *ctx.store, _cfg);
   } else {
     taResults.emplace_back("lastPrice", price);
     taResults.emplace_back("volume", volume);
@@ -408,7 +415,7 @@ void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx)
       taResults.emplace_back("highPrice", high);
       taResults.emplace_back("lowPrice", low);
     }
-    ctx.store->setBatch(tick.symbol, taResults);
+    ctx.store->setBatch(symbol, taResults);
   }
 
   if (taResults.empty() || !ctx.dispatcher) return;
@@ -424,7 +431,7 @@ void MarketTickComputer::compute(const Event& tick, engine::ComputeContext& ctx)
       else if constexpr (std::is_same_v<T, int>) return static_cast<double>(x);
       else return 0.0;
     }, val);
-    ctx.dispatcher->notifyListeners(tick.symbol, key, v);
+    ctx.dispatcher->notifyListeners(symbol, key, v);
   }
 }
 
