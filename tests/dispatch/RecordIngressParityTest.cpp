@@ -907,3 +907,62 @@ TEST(RecordFieldSourceMappingTest, LookupAgreesWithEmission) {
   EXPECT_EQ(src.fieldCountHint(), 3u);
   EXPECT_TRUE(src.isObject());
 }
+
+// ===========================================================================
+// 5. REFUSAL — a record with no resolvable stream key goes nowhere
+// ===========================================================================
+//
+// `onTick` has always dropped an event with an empty stream key. A record
+// names a `symbolId` and nothing else, so the record path reaches the same
+// rule from the other side, and there are three ways to arrive at it: no
+// `SymbolTable` installed at all, `kInvalidSymbolId`, and an id the table
+// never issued. All three must be NOTHING — not a delivery under "", which
+// would collapse every symbol into one bucket and make every subscription
+// miss. A silent wrong answer is worse than a loud nothing.
+//
+// Pinned because it is otherwise invisible: perturbing the refusal away left
+// every parity and mapping assertion in this file green.
+
+TEST(RecordIngressRefusalTest, UnresolvableSymbolDeliversNothing) {
+  const auto cfg = defaultCfg();
+
+  const auto drove = [&cfg](bool installTable, data::SymbolId id) {
+    Rig rig(cfg);
+    if (!installTable) rig.disp.setSymbolTable(nullptr);
+    data::TickRecord r = makeRecord(id, 100.25, 10, 100.20, 100.30);
+    rig.disp.onRecord(r);
+    rig.quiesce();
+    return std::make_pair(rig.log.rows().size(),
+                          rig.store.get(kTicker, "price").has_value());
+  };
+
+  // POSITIVE CONTROL FIRST: the rig does deliver for a resolvable id, so the
+  // three zeros below are refusals and not a broken rig.
+  {
+    Rig rig(cfg);
+    data::TickRecord r = makeRecord(rig.symbolId, 100.25, 10, 100.20, 100.30);
+    rig.disp.onRecord(r);
+    rig.quiesce();
+    ASSERT_GT(rig.log.rows().size(), 0u) << "the rig cannot deliver at all";
+    ASSERT_TRUE(rig.store.get(kTicker, "price").has_value());
+  }
+
+  // No table installed.
+  {
+    auto [deliveries, stored] = drove(/*installTable=*/false, 2);
+    EXPECT_EQ(deliveries, 0u);
+    EXPECT_FALSE(stored);
+  }
+  // kInvalidSymbolId — "this record names no symbol".
+  {
+    auto [deliveries, stored] = drove(true, data::kInvalidSymbolId);
+    EXPECT_EQ(deliveries, 0u);
+    EXPECT_FALSE(stored);
+  }
+  // An id this table never issued.
+  {
+    auto [deliveries, stored] = drove(true, 99'999);
+    EXPECT_EQ(deliveries, 0u);
+    EXPECT_FALSE(stored);
+  }
+}
