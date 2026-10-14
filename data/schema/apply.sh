@@ -22,13 +22,14 @@
 # without reading docs/data-layer.md §8.6.
 set -euo pipefail
 
-cd "$(dirname "$(readlink -f "$0")")"
+SELF="$(readlink -f "$0")"      # resolve before the cd, or --help cannot read it
+cd "$(dirname "$SELF")"
 URL="${CH_HTTP_URL:-http://127.0.0.1:8123/}"
 FRESH=""
 for arg in "$@"; do
   case "$arg" in
     --fresh) FRESH="--fresh" ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$SELF"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
