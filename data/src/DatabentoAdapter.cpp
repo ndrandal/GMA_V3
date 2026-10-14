@@ -700,7 +700,7 @@ arrow::Status DatabentoAdapter::onMbo(const dbn::MboMsg& m) {
   // we; the only translation is the sentinel, INT64_MAX -> INT64_MIN.
   std::int64_t px = m.price;
   if (m.price == dbn::kUndefPrice) {
-    px = kNoPrice;
+    px = 0;
     ++stats_.undefPrice;
   }
   std::uint64_t sz = m.size;
