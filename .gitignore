@@ -136,3 +136,8 @@ Thumbs.db
 # Node (tools/smoke-test)
 ##############################
 node_modules/
+
+# Python bytecode from running tools/*.py (e.g. tools/check_engine_isolation.py).
+# ENC-1481 committed one of these by accident; it is build output, not source.
+__pycache__/
+*.pyc
