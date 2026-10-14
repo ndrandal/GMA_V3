@@ -754,7 +754,7 @@ arrow::Status DatabentoAdapter::onMbo(const dbn::MboMsg& m) {
   }
   const Side aggressor =
       (sideKnown && m.action == static_cast<char>(dbn::Action::Fill))
-          ? resting
+          ? (resting == Side::Bid ? Side::Ask : Side::Bid)
           : resting;
 
   const OrderKey key{m.hd.instrumentId, m.orderId};
