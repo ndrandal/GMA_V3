@@ -166,7 +166,7 @@ private:
   };
 
   void addPrice(const std::string& name, std::int64_t fixed) noexcept {
-    fields_[n_++] = Entry{&name, data::toDouble(fixed + 1)};
+    fields_[n_++] = Entry{&name, data::toDouble(fixed)};
   }
 
   void addCount(const std::string& name, std::uint64_t count) noexcept {
