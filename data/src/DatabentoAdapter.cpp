@@ -70,7 +70,11 @@ std::string readCstr(const std::byte* p, std::size_t width) {
 // passes through it and nothing it returns reaches a price, a size or a
 // timestamp column. It decides which TICKER a row carries. Integer-only, and
 // `std::chrono`'s calendar types are avoided so the arithmetic is visible.
-// Howard Hinnant's `civil_from_days`, which is public domain.
+// Howard Hinnant's `civil_from_days`, which is public domain — kept verbatim
+// rather than specialised to non-negative days, so it stays diffable against
+// the reference. Its `era` branch for negative days is therefore unreachable
+// from this file's only caller; that is a deliberate property of copying a
+// reference algorithm, not untested logic of ours.
 // ---------------------------------------------------------------------------
 
 inline constexpr std::int64_t kNsPerDay = 86'400'000'000'000LL;
@@ -90,12 +94,15 @@ std::uint32_t yyyymmddFromDays(std::int64_t z) noexcept {
                                     static_cast<std::int64_t>(d));
 }
 
-// Floor division, so a pre-1970 timestamp lands on the right day rather than
-// one day late.
-std::uint32_t yyyymmddFromNs(std::int64_t ns) noexcept {
-  const std::int64_t days =
-      ns >= 0 ? ns / kNsPerDay : -((-ns + kNsPerDay - 1) / kNsPerDay);
-  return yyyymmddFromDays(days);
+// UNSIGNED, and that is not laziness. The only caller is `resolveSymbol`, and
+// `makeHeader` has already refused `ts_event == kUndefTimestamp` and
+// `ts_event > INT64_MAX` before it runs, so the input is a non-negative
+// nanosecond count by construction. An earlier version carried a
+// floor-division branch for pre-1970 timestamps; it was unreachable, and
+// replacing it with garbage left the suite green — so it is gone rather than
+// kept as untested insurance against a case the signature now forbids.
+std::uint32_t yyyymmddFromNs(std::uint64_t ns) noexcept {
+  return yyyymmddFromDays(static_cast<std::int64_t>(ns / static_cast<std::uint64_t>(kNsPerDay)));
 }
 
 // ---------------------------------------------------------------------------
@@ -256,9 +263,13 @@ std::optional<std::uint64_t> DatabentoAdapter::restingSize(std::uint32_t instrum
 }
 
 void DatabentoAdapter::trackOrder(const OrderKey& k, std::uint64_t size) {
-  // ItchAdapter::routeAddOrder's M4 bound, verbatim in intent: evict the
-  // oldest bucket entry once the cap is hit. Dropping tracking only forfeits
-  // delta resolution for that order; memory stays bounded.
+  // ItchAdapter::routeAddOrder's M4 bound, verbatim in intent: once the cap is
+  // hit, evict AN ARBITRARY entry. `std::unordered_map::begin()` is bucket
+  // order, not insertion order, so this is not "the oldest" however the
+  // equivalent ItchAdapter comment words it. Erase-then-insert, in that order,
+  // is what keeps `orders_.size() <= maxTrackedOrders` — the invariant
+  // `DbnActionMappingTest.TheOrderMapIsBounded` asserts, because a no-op
+  // eviction that still bumps `evictedOrders` satisfies a counter check.
   if (orders_.size() >= cfg_.maxTrackedOrders && orders_.find(k) == orders_.end()) {
     orders_.erase(orders_.begin());
     ++stats_.evictedOrders;
@@ -668,7 +679,7 @@ arrow::Result<SymbolId> DatabentoAdapter::resolveSymbol(std::uint32_t instrument
         " instrument(s); a record for one it does not name cannot be given a ticker, "
         "and `symbol` is L1's leading key column (SPEC D7).");
   }
-  const std::uint32_t day = yyyymmddFromNs(static_cast<std::int64_t>(tsEventNs));
+  const std::uint32_t day = yyyymmddFromNs(tsEventNs);
   for (const auto& w : it->second) {
     if (day >= w.startDate && day < w.endDate) return w.id;  // half-open
   }
@@ -695,6 +706,16 @@ arrow::Status DatabentoAdapter::onMbo(const dbn::MboMsg& m) {
   }
 
   ARROW_ASSIGN_OR_RAISE(const RecordHeader h, makeHeader(m.hd, m.tsRecv, m.sequence));
+
+  // The two fields DBN carries that no canonical column holds. Recorded rather
+  // than dropped — `channel_id` is the scope `sequence` is monotonic within
+  // (ENC-1483/T6), and `ts_in_delta` is the only signed-32 load in either
+  // record, so without this nothing could gate that offset. See
+  // `DatabentoAdapter::Gateway`.
+  gw_.channelId    = m.channelId;
+  gw_.tsInDelta    = m.tsInDelta;
+  gw_.minChannelId = std::min(gw_.minChannelId, m.channelId);
+  gw_.maxChannelId = std::max(gw_.maxChannelId, m.channelId);
 
   // SPEC D8: an assignment, not a conversion. DBN is int64 at 1e-9 and so are
   // we; the only translation is the sentinel, INT64_MAX -> INT64_MIN.
@@ -892,6 +913,10 @@ arrow::Status DatabentoAdapter::onTrade(const dbn::TradeMsg& m) {
   }
 
   ARROW_ASSIGN_OR_RAISE(const RecordHeader h, makeHeader(m.hd, m.tsRecv, m.sequence));
+
+  // TradeMsg has no channel_id; ts_in_delta is at a DIFFERENT offset from
+  // MboMsg's, so recording it here is what gates that second signed-32 load.
+  gw_.tsInDelta = m.tsInDelta;
 
   TickRecord t;
   t.header = h;
