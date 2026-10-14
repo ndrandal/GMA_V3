@@ -123,6 +123,11 @@ struct DbnWriter {
   std::vector<std::byte> records;
   // Set to truncate/corrupt the declared metadata length for a refusal test.
   std::optional<std::uint32_t> forceMetadataLen;
+  // Extra metadata tail bytes beyond the natural v3 alignment padding, and the
+  // byte value the whole tail is filled with. Both default to "exactly what a
+  // real encoder writes"; the refusal tests move them.
+  std::size_t  extraTail = 0;
+  std::uint8_t padByte   = 0;
 
   std::size_t scl() const {
     return version == 1 ? dbn::kSymbolCstrLenV1 : symbolCstrLen;
@@ -206,7 +211,9 @@ struct DbnWriter {
     putU8(out, 'B');
     putU8(out, 'N');
     putU8(out, version);
-    putU32(out, forceMetadataLen.value_or(static_cast<std::uint32_t>(needed + pad)));
+    const std::size_t tail = pad + extraTail;
+    putU32(out,
+           forceMetadataLen.value_or(static_cast<std::uint32_t>(needed + tail)));
 
     const std::size_t fixedStart = out.size();
     putCstr(out, dataset, dbn::kDatasetCstrLen);
@@ -224,7 +231,7 @@ struct DbnWriter {
         << "the writer's own fixed metadata block is the wrong size";
 
     out.insert(out.end(), var.begin(), var.end());
-    putZeros(out, pad);
+    for (std::size_t i = 0; i < tail; ++i) putU8(out, padByte);
     out.insert(out.end(), records.begin(), records.end());
     return out;
   }
@@ -1098,6 +1105,67 @@ TEST(DbnFramingTest, AMetadataLengthThatCutsTheVariableSectionIsRefused) {
   Harness h;
   const arrow::Status st = h.feed(w.build());
   EXPECT_TRUE(st.IsInvalid()) << st.ToString();
+}
+
+TEST(DbnFramingTest, TheMetadataTailIsOnlyEverV3AlignmentPadding) {
+  // The guard this exercises was the ONE thing the mutation sweep for this
+  // ticket found untested: flipping `if (version < kFirstAlignedVersion || ...)`
+  // to `if (false)` broke nothing. These four cases are why it is a guard.
+
+  // (a) The natural v3 tail — 353 bytes of metadata rounded up to 360 — is
+  //     ACCEPTED, and reported rather than swallowed.
+  {
+    DbnWriter w = plainWriter();
+    w.version = 3;
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Add),
+                 static_cast<char>(dbn::Side::Bid), 1, 1'000'000'000LL, 1));
+    Harness h;
+    ASSERT_TRUE(h.run(w).ok());
+    ASSERT_TRUE(h.a->metadata().has_value());
+    EXPECT_EQ(h.a->metadata()->endPadding, 7u);
+  }
+  // (b) v1 and v2 pad nothing, so ANY tail there is a layout we do not
+  //     understand rather than padding we may skip.
+  for (const std::uint8_t version : {std::uint8_t{1}, std::uint8_t{2}}) {
+    SCOPED_TRACE(static_cast<int>(version));
+    DbnWriter w   = plainWriter();
+    w.version     = version;
+    w.recordCount = 1;
+    w.extraTail   = 3;
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Add),
+                 static_cast<char>(dbn::Side::Bid), 1, 1'000'000'000LL, 1));
+    Harness h;
+    const arrow::Status st = h.feed(w.build());
+    ASSERT_TRUE(st.IsInvalid()) << st.ToString();
+    EXPECT_NE(st.message().find("trailing byte"), std::string::npos) << st.ToString();
+  }
+  // (c) A v3 tail of 8 or more bytes is not alignment padding either — the
+  //     encoder pads by 1..7 and never by a whole word.
+  {
+    DbnWriter w = plainWriter();
+    w.version   = 3;
+    w.extraTail = 1;  // natural 7 + 1 == 8
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Add),
+                 static_cast<char>(dbn::Side::Bid), 1, 1'000'000'000LL, 1));
+    Harness h;
+    const arrow::Status st = h.feed(w.build());
+    ASSERT_TRUE(st.IsInvalid()) << st.ToString();
+    EXPECT_NE(st.message().find("trailing byte"), std::string::npos) << st.ToString();
+  }
+  // (d) v3 padding that is not zero is refused: a non-zero tail is data in a
+  //     field we are about to skip, and skipping data is how a layout change
+  //     becomes a silent misparse.
+  {
+    DbnWriter w = plainWriter();
+    w.version   = 3;
+    w.padByte   = 0xFF;
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Add),
+                 static_cast<char>(dbn::Side::Bid), 1, 1'000'000'000LL, 1));
+    Harness h;
+    const arrow::Status st = h.feed(w.build());
+    ASSERT_TRUE(st.IsInvalid()) << st.ToString();
+    EXPECT_NE(st.message().find("not zero"), std::string::npos) << st.ToString();
+  }
 }
 
 // ===========================================================================
