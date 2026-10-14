@@ -451,7 +451,9 @@ TEST(RecordIngressParityTest, AtomicStoreContentsAreIdentical) {
   ASSERT_FALSE(json.store.empty())
       << "the JSON path wrote no atomic — the comparison below is vacuous";
   // Enough keys to be a real comparison: the raw fields, the subscribed
-  // builtins, and the TA suite MarketTickComputer writes.
+  // builtins, and the whole TA suite MarketTickComputer writes. This is now a
+  // TOTAL enumeration, so the floor is a statement about the rig rather than
+  // about which names the test remembered to ask for.
   ASSERT_GT(json.store.size(), 10u);
   EXPECT_EQ(json.store, rec.store);
 }
@@ -515,6 +517,110 @@ TEST(RecordIngressParityTest, NoFieldAnswersTryGetUint64OnEitherPath) {
     EXPECT_TRUE(jsonFields.tryGetNumber(n, db)) << n;
     EXPECT_EQ(describeDouble(da), describeDouble(db)) << n;
   }
+}
+
+TEST(RecordIngressParityTest, IdenticalWithFieldNamespacedDerivedAtomics) {
+  // `atomicKeyNamespaceByField` is the one Config flag that changes what the
+  // shared `ingest` body writes: derived builtins move from `<fn>` to
+  // `<field>.<fn>` (ENC-1008). Parity ought to hold trivially BECAUSE the body
+  // is shared — which is exactly the kind of "ought" this ticket is not
+  // allowed to leave unmeasured.
+  auto cfg = defaultCfg();
+  cfg.atomicKeyNamespaceByField = true;
+  const Observed json = drive(Path::Json, cfg);
+  const Observed rec  = drive(Path::Record, cfg);
+  ASSERT_FALSE(json.store.empty());
+
+  // The flag must actually have moved something, or this is a second run of
+  // the default-config test wearing a different name.
+  bool sawNamespacedKey = false;
+  for (const auto& row : json.store) {
+    if (row.find(" / price.") != std::string::npos ||
+        row.find(" / size.")  != std::string::npos) {
+      sawNamespacedKey = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(sawNamespacedKey)
+      << "atomicKeyNamespaceByField wrote no <field>.<fn> key — this test is "
+         "not exercising the state it names";
+
+  EXPECT_EQ(json.store, rec.store);
+  EXPECT_EQ(json.deliveries, rec.deliveries);
+}
+
+TEST(RecordIngressParityTest, IdenticalWhenTheFieldCapTruncatesAdmission) {
+  // THE PLACE FIELD EMISSION ORDER IS OBSERVABLE THROUGH THE DISPATCHER, and
+  // the reason `RecordFieldSource.hpp`'s comment no longer claims there is
+  // only one such place.
+  //
+  // Past `maxFieldsPerSymbol` the raw-admission ledger refuses NEW fields and
+  // the history map refuses new ones, so the surviving set is a PREFIX of the
+  // arrival order. Three drives, one cap:
+  //
+  //   record path            vs  mapping-order JSON   -> must be IDENTICAL
+  //   record path            vs  reverse-order JSON   -> must DIFFER
+  //
+  // The second row is what makes the first one mean something: it shows the
+  // cap really does expose order, so "identical" is a result and not an
+  // artefact of order being unobservable.
+  auto cfg = defaultCfg();
+  cfg.maxFieldsPerSymbol = 3;   // < the 6 fields the mapping can emit
+
+  const Observed rec      = drive(Path::Record, cfg);
+  const Observed fwd      = drive(Path::Json, cfg);
+  const Observed rev      = drive(Path::JsonReversed, cfg);
+  const Observed uncapped = drive(Path::Json, defaultCfg());
+
+  // The cap must bite, or all three agree for the wrong reason.
+  ASSERT_LT(fwd.store.size(), uncapped.store.size())
+      << "maxFieldsPerSymbol=3 admitted as much as no cap — the cap is not "
+         "being enforced and this test proves nothing";
+
+  EXPECT_EQ(rec.store, fwd.store);
+  EXPECT_EQ(rec.deliveries, fwd.deliveries);
+
+  // Order IS observable here. If this ever becomes EQ, the paragraph in
+  // RecordFieldSource.hpp about "the equivalent tick" being order-sensitive is
+  // no longer true and should be corrected, not deleted.
+  EXPECT_NE(rec.store, rev.store)
+      << "a reverse-order JSON tick produced identical store contents under a "
+         "field cap — emission order is not observable after all";
+}
+
+TEST(RecordIngressParityTest, NonObjectJsonPayloadIsEmptyRatherThanFatal) {
+  // The ONE deliberate behaviour change to the JSON path, pinned so it is a
+  // decision rather than an accident. Before ENC-1486 a non-object payload
+  // reaching a symbol with a live subscription hit rapidjson's `HasMember`,
+  // which asserts `IsObject()` — i.e. aborted the process. `JsonFieldSource`
+  // guards every accessor, so it is now an empty field set.
+  //
+  // No test covered that path and nothing in the shipped ingress can produce
+  // it; an abort was not a behaviour worth preserving.
+  const auto cfg = defaultCfg();
+  Rig rig(cfg);
+
+  auto arr = std::make_shared<rapidjson::Document>();
+  arr->SetArray();
+  rig.disp.onTick(Event{kTicker, arr});
+
+  auto scalar = std::make_shared<rapidjson::Document>();
+  scalar->SetInt(5);
+  rig.disp.onTick(Event{kTicker, scalar});
+
+  auto emptyObj = std::make_shared<rapidjson::Document>();
+  emptyObj->SetObject();
+  rig.disp.onTick(Event{kTicker, emptyObj});
+
+  rig.quiesce();
+  EXPECT_TRUE(rig.log.rows().empty());
+  EXPECT_TRUE(dumpStore(rig.store).empty());
+
+  // Positive control: the same rig DOES deliver for a real tick, so the two
+  // emptiness assertions above are refusals and not a dead rig.
+  rig.disp.onRecord(makeRecord(rig.symbolId, 100.25, 10, 100.20, 100.30));
+  rig.quiesce();
+  EXPECT_FALSE(rig.log.rows().empty());
 }
 
 // ===========================================================================
