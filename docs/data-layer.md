@@ -660,9 +660,14 @@ tiny.)
 different company. `valid_from`/`valid_to` lets you **detect** it; what a continuous series
 should do about it is reference data and out of scope.
 
-**Unverified:** the exact DBN field names, and whether `instrument_id` is stable within a
-dataset-day, are from memory. **T5 confirms them against a real file** rather than this
-document asserting them.
+**~~Unverified~~ — half of it is now measured (T4, ENC-1482).** The exact DBN field names
+and the whole record/metadata layout were established against real vendor DBN bytes committed
+at `data/tests/fixtures/dbn/`; they are written down in `dbn::` in
+`data/include/gma/data/DatabentoAdapter.hpp` and in SPEC §5 under Q14, and the names there are
+the vendor's own spellings — `instrument_id` included, so this section's field name is right.
+**Whether `instrument_id` is stable within a dataset-day is still open**: a two-record public
+sample naming one instrument proves nothing about reassignment, so **T5 confirms that against
+a real 7-day file.**
 
 ### 8.10 Codecs
 
@@ -859,7 +864,8 @@ wall-clock cadence by construction; formerly Q13), and multi-symbol graphs where
 | ClickHouse client (`clickhouse-cpp` **or** HTTP) | the only transport to L1 | required; which is **B1** |
 | Parquet | — | **dropped** |
 | DuckDB | — | **dropped.** Largest dependency; existed only to query Parquet |
-| Databento client | avoidable by decoding DBN directly | **Q14** |
+| Databento client (`databento-cpp`) | avoidable by decoding DBN directly | **dropped — Q14 resolved by ENC-1482.** See §15.2 |
+| zstd | `.dbn.zst` decompression | **not in `gma_data`** — the ingest job decompresses; feeding a zstd frame to the adapter is refused by name |
 
 D14's client profile has two variants and they do not cost the same. The **over-the-wire**
 variant (C10) needs Arrow plus a wire client and no store — far smaller than
@@ -932,6 +938,87 @@ Arrow kernel to produce a value, not by the kernels being absent from the archiv
 knowing before someone reads "compute is off" as a structural guarantee: it is a
 scope-of-linkage fact, and the structural guarantee for D1 remains the SQL lint (§5.4).
 
+### 15.2 Databento: decode it ourselves — ENC-1482, 2026-10-14
+
+**Q14 resolved: `gma_data` decodes DBN itself and does not link `databento-cpp`.** The
+deciding number is dependency weight, and it is bigger than "one more library":
+
+| what `databento-cpp` requires | why we do not need it |
+|---|---|
+| OpenSSL, cpp-httplib | the historical/live **HTTP** API — ENC-1483's ingest job owns the download |
+| nlohmann_json | the JSON half of that API |
+| HowardHinnant/date | metadata date formatting |
+| zstd | `.dbn.zst`, which the ingest job decompresses before gma sees it |
+| **a Rust toolchain** | `databento-cpp` delegates DBN decoding to the Rust `dbn` crate's C-FFI (`src/detail/dbn_fsm.cpp` is a wrapper around `DbnDecoder_*`) |
+
+That last row is the one that settles it: a Rust toolchain inside a C++20/CMake project that
+vendors its dependencies under `third_party/` is a much larger step than Arrow was (§15.1 —
+17 MB, 45 s), and D14 has just dropped Parquet and DuckDB *specifically* to keep the client
+profile small. Meanwhile 90% of the SDK — `historical.cpp` (56 KB), `publishers.cpp` (61 KB),
+`live_blocking.cpp` (22 KB) — is API surface the engine process would never call.
+
+What we actually need is small and static: two packed PODs (56 and 48 bytes,
+**byte-identical across DBN v1/v2/v3** — the vendor aliases `v1::MboMsg = v2::MboMsg =
+v3::MboMsg`), a 100-byte fixed metadata block, and one variable-length symbology section.
+`data/src/DatabentoAdapter.cpp` is 926 lines, of which roughly a third is comments recording
+where each layout fact came from, and the header is 564. The word `double` appears in neither
+except inside the phrase "double-count" — D8's integer path is a property of DBN's own
+encoding, not something the adapter has to achieve.
+
+**The honest cost.** DBN is a wire format we do not own and now have to track: a v4 lands on
+us rather than on a vendor bump, and metadata/symbology is precisely where a hand-rolled
+decoder goes wrong. Three mitigations, in the build rather than in a comment:
+
+1. **The framing is measured, not remembered.** Five files of real Databento DBN bytes are
+   committed at `data/tests/fixtures/dbn/` (Apache-2.0, from `databento-cpp`'s own test data —
+   provenance and licensing in `PROVENANCE.md` there), and the test's first assertion is that
+   a DBN **encoder** written in the test file reproduces each of them **byte for byte** from
+   the values we believe they hold. One assertion, three facts: the layout is right, the
+   values are right, the encoder is right — and only then is that encoder used to build the
+   all-actions streams the two-record samples cannot reach. Expectations are cross-checked
+   against `databento-cpp`'s `DbnDecoderSchemaTests`, so they have a second independent
+   source.
+2. **An unknown DBN version is refused, never guessed** — as are an undeclared `rtype`,
+   `action` or `side`, a wrong record length, a zstd frame, `ts_out`, a non-zero metadata
+   tail, and a partial record at end-of-stream (which is a *gap*, not an EOF).
+3. **Acceptance is tested per enumerator, not just rejection.** Every declared `Action`,
+   `Side` and `RType` is asserted to be accepted, enumerated from the arrays rather than
+   spot-checked — a suite that only tests rejection cannot catch a bound that over-rejects a
+   now-legal value, which is the bug ENC-1481 shipped and fixed.
+
+**Two independent adversarial sweeps** — one by the implementer, one by a separate session
+that did not write the code — put **42 mutations** through the decoder: swapped field offsets,
+a `Cancel` that stops subtracting, the `Fill` side flip removed and leaked, `bookNeutral`
+cleared, a 99-byte metadata block, a synthesized `provider_seq`, a closed symbology window, a
+no-op eviction that still bumps its counter, zeroed `ts_in_delta` loads, a deleted `Clear`
+erase loop. What they found is worth recording in full, because the mix is the argument for
+doing this at all:
+
+- **One real behavioural bug.** With `Config::fillReducesRestingOrder`, the aggressor-side
+  flip a `Fill` print needs leaked onto the `Update`/`Delete` row the same record emits —
+  putting the two meanings `BookRecord::side` carries into one column, which is precisely what
+  its own comment warned about. Nothing caught it because no test asserted the `side` of a
+  mutation row at all; inverting *every* mutation row's side was green.
+- **A bound asserted by its counter instead of its invariant.** `TheOrderMapIsBounded` checked
+  `evictedOrders > 0`, which a no-op eviction still satisfies.
+- **Two decoded fields no test could reach** (`channel_id`, `ts_in_delta`), so the only
+  signed-32 load path in the decoder was unexercised, and **one unreachable branch** whose
+  comment described behaviour that could not run.
+- **Two comments asserting mechanisms that do not exist** — an epoch in a key that has two
+  members, and a repo-wide `bookNeutral` invariant that is actually two production sites.
+
+All fixed, the bug's test written red before the fix, and every one of the 42 mutations is now
+caught. Note what *survived*: no out-of-bounds read, no overflow, no compaction defect, and
+every vendor layout claim independently confirmed — which is the part of Q14's cost that was
+genuinely feared and did not materialise. What did materialise was in the *mapping* and in the
+*comments*, not in the byte parsing.
+
+**What the DBN files taught us that this document had wrong or missing** is recorded in
+SPEC §5 under Q14: the exact field names and offsets, the per-version metadata layout, and
+**DBN v3's 8-byte metadata alignment padding** (7 zero bytes in the committed v3 fixture, 0
+in the v2 one) — a detail nothing in this design anticipated and which would otherwise have
+made every record read at a 7-byte offset.
+
 **No system Arrow is available on this box**, which is why the source path is the measured
 one. `pkg-config --modversion arrow` fails and no `/usr/lib64/cmake/arrow` exists. Fedora
 44 *does* package it (`libarrow-devel` 23.0.1 — so the common claim that `dnf` only has the
@@ -976,8 +1063,9 @@ wire to support rebasing? I lean accept — rebasing means solving ENC-1101's bu
 **Q11 — persist derived series as a cache?** Optional now. If yes, invalidation key is graph
 identity.
 
-**Q14 — Databento client library, or decode DBN directly?** DBN is the schema reference
-either way. *T4 decides it in passing.*
+**Q14 — ~~Databento client library, or decode DBN directly?~~ RESOLVED by T4 (ENC-1482):
+decode it ourselves.** The reasoning, the cost stated in both directions, and the mitigations
+are **§15.2**; the facts the real DBN bytes settled are SPEC §5 under Q14.
 
 **Q15 — the C13 double-count refusal.** Confirm the planner should **refuse** a graph
 reading `trades` and `book_events` for the same symbol and window, rather than attempt
