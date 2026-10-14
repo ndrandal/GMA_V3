@@ -748,3 +748,229 @@ TEST(RecordPathIsJsonFreeTest, RecordFieldSourceHeaderNamesNoJsonButJsonOneDoes)
       << "RecordFieldSource.hpp names a JSON type: "
       << (found.empty() ? std::string{} : found[0]);
 }
+
+// ===========================================================================
+// 4. THE MAPPING, PINNED ABSOLUTELY
+// ===========================================================================
+//
+// WHY THE PARITY TESTS ABOVE ARE NOT ENOUGH, measured rather than assumed.
+//
+// `equivalentEvent` derives the JSON tick from the record through
+// `RecordFieldSource` — deliberately, so a new field enters both sides of the
+// comparison together and the parity test keeps testing the two ENTRY POINTS
+// instead of slowly becoming a test of a stale field list. The cost of that
+// choice is exact and was measured by perturbing the shipped code:
+//
+//   perturbation of RecordFieldSource          parity tests
+//   -----------------------------------------  --------------------------
+//   stop emitting `size`                       GREEN (control caught it)
+//   `toDouble(fixed + 1)` on every price       GREEN
+//   swap the emission order of `bid`/`ask`     GREEN
+//
+// A mapping change lands on BOTH sides, so a relative comparison cannot see
+// it. (The first row did redden `ComparatorSeesAMissingField`, because that
+// negative control's own perturbation stopped being a divergence — the suite
+// noticed, which is the point of having it, but it named the wrong thing.)
+//
+// So the mapping is pinned here ABSOLUTELY: field names, values and emission
+// ORDER, against literals. Parity keeps the two paths honest about each other;
+// this keeps the mapping honest about the record. All three perturbations
+// above redden this suite.
+
+namespace {
+
+// `name=value;` in emission order — the full observable content of a source.
+std::string flatten(const engine::FieldSource& fields) {
+  struct Dump final : engine::NumericFieldSink {
+    std::string out;
+    void field(const std::string& name, double value) override {
+      out += name + "=" + describeDouble(value) + ";";
+    }
+  } dump;
+  fields.forEachNumber(dump);
+  return dump.out;
+}
+
+data::TickRecord bare(data::RecordKind kind) {
+  data::TickRecord r;
+  r.header.symbolId = 1;
+  r.kind = kind;
+  return r;
+}
+
+}  // namespace
+
+TEST(RecordFieldSourceMappingTest, TradeWithBothQuoteSides) {
+  data::TickRecord r = bare(data::RecordKind::Trade);
+  r.price = data::toFixed(100.25);
+  r.size  = 10;
+  r.bidPx = data::toFixed(100.20);
+  r.askPx = data::toFixed(100.30);
+  r.bidSz = 11;
+  r.askSz = 13;
+
+  // Order is part of the contract: price, size, bid, ask, bidSize, askSize.
+  EXPECT_EQ(flatten(engine::RecordFieldSource(r)),
+            "price=100.25;size=10;bid=100.2;ask=100.3;bidSize=11;askSize=13;");
+}
+
+TEST(RecordFieldSourceMappingTest, TradeOnly) {
+  data::TickRecord r = bare(data::RecordKind::Trade);
+  r.price = data::toFixed(42.5);
+  r.size  = 7;
+  EXPECT_EQ(flatten(engine::RecordFieldSource(r)), "price=42.5;size=7;");
+}
+
+TEST(RecordFieldSourceMappingTest, QuoteKindSuppressesPriceAndSize) {
+  // One struct serves a trade and an L1 quote; `kind` says which half is
+  // meaningful (include/gma/data/Record.hpp).
+  data::TickRecord r = bare(data::RecordKind::Quote);
+  r.price = data::toFixed(42.5);   // set, and must NOT be emitted
+  r.size  = 7;                     // ditto
+  r.bidPx = data::toFixed(42.0);
+  r.askPx = data::toFixed(43.0);
+  r.bidSz = 100;
+  r.askSz = 200;
+  EXPECT_EQ(flatten(engine::RecordFieldSource(r)),
+            "bid=42;ask=43;bidSize=100;askSize=200;");
+}
+
+TEST(RecordFieldSourceMappingTest, AbsentAndZeroFieldsAreOmittedNotZeroed) {
+  // A default record names no symbol and carries kNoPrice everywhere, so it
+  // must emit NOTHING — not a row of zeros, which would clock every listener
+  // and push a 0 into every history buffer.
+  EXPECT_EQ(flatten(engine::RecordFieldSource(bare(data::RecordKind::Trade))), "");
+
+  // A trade with a price but no size emits one field.
+  data::TickRecord r = bare(data::RecordKind::Trade);
+  r.price = data::toFixed(1.5);
+  EXPECT_EQ(flatten(engine::RecordFieldSource(r)), "price=1.5;");
+
+  // A quote with one side only. bidSize is gated on bidPx being present, so a
+  // size with no price beside it is not emitted on its own.
+  data::TickRecord q = bare(data::RecordKind::Quote);
+  q.askPx = data::toFixed(9.0);
+  q.askSz = 5;
+  q.bidSz = 77;            // bidPx is kNoPrice -> bidSize is suppressed
+  EXPECT_EQ(flatten(engine::RecordFieldSource(q)), "ask=9;askSize=5;");
+}
+
+TEST(RecordFieldSourceMappingTest, PriceDecodesExactlyAtTheGlobalScale) {
+  // SPEC D8: Int64 at a fixed global 1e-9. A price read must be the record's
+  // integer divided by exactly that, with no per-symbol tick size involved.
+  data::TickRecord r = bare(data::RecordKind::Trade);
+  r.price = 1'234'567'890LL;             // 1.23456789 at 1e-9
+  const engine::RecordFieldSource src(r);
+  double px = 0.0;
+  ASSERT_TRUE(src.tryGetNumber(engine::recordfields::kPrice, px));
+  EXPECT_EQ(describeDouble(px), describeDouble(1.23456789));
+
+  // Negative prices are legal (OrderBookManager::setAllowNegativePrices) and
+  // kNoPrice is INT64_MIN rather than 0 for that reason.
+  r.price = -1'500'000'000LL;
+  double neg = 0.0;
+  ASSERT_TRUE(engine::RecordFieldSource(r).tryGetNumber(
+      engine::recordfields::kPrice, neg));
+  EXPECT_EQ(describeDouble(neg), describeDouble(-1.5));
+}
+
+TEST(RecordFieldSourceMappingTest, LookupAgreesWithEmission) {
+  // `has`/`tryGetNumber` and `forEachNumber` must describe the same field set.
+  // They are separate code paths over one array, and the Dispatcher uses BOTH
+  // (admission enumerates, listener fan-out looks up), so a disagreement would
+  // admit a field that no listener can read or the reverse.
+  data::TickRecord r = bare(data::RecordKind::Trade);
+  r.price = data::toFixed(5.0);
+  r.size  = 2;
+  r.askPx = data::toFixed(5.5);
+  const engine::RecordFieldSource src(r);
+
+  std::vector<std::string> emitted;
+  {
+    struct Collect final : engine::NumericFieldSink {
+      std::vector<std::string>* out;
+      void field(const std::string& name, double) override { out->push_back(name); }
+    } c;
+    c.out = &emitted;
+    src.forEachNumber(c);
+  }
+  ASSERT_EQ(emitted.size(), 3u);
+  for (const auto& n : emitted) EXPECT_TRUE(src.has(n)) << n;
+
+  for (const auto& n : {std::string("bid"), std::string("bidSize"),
+                        std::string("nonsense")}) {
+    EXPECT_FALSE(src.has(n)) << n;
+    double d = -1.0;
+    EXPECT_FALSE(src.tryGetNumber(n, d)) << n;
+    EXPECT_EQ(d, -1.0) << "out param must be untouched on a miss";
+  }
+  EXPECT_EQ(src.fieldCountHint(), 3u);
+  EXPECT_TRUE(src.isObject());
+}
+
+// ===========================================================================
+// 5. REFUSAL — a record with no resolvable stream key goes nowhere
+// ===========================================================================
+//
+// `onTick` has always dropped an event with an empty stream key. A record
+// names a `symbolId` and nothing else, so the record path reaches the same
+// rule from the other side, and there are three ways to arrive at it: no
+// `SymbolTable` installed at all, `kInvalidSymbolId`, and an id the table
+// never issued. All three must be NOTHING — not a delivery under "", which
+// would collapse every symbol into one bucket and make every subscription
+// miss. A silent wrong answer is worse than a loud nothing.
+//
+// Pinned because it is otherwise invisible: perturbing the refusal away left
+// every parity and mapping assertion in this file green.
+
+TEST(RecordIngressRefusalTest, UnresolvableSymbolDeliversNothing) {
+  const auto cfg = defaultCfg();
+
+  const auto drove = [&cfg](bool installTable, data::SymbolId id) {
+    Rig rig(cfg);
+    if (!installTable) rig.disp.setSymbolTable(nullptr);
+    data::TickRecord r = makeRecord(id, 100.25, 10, 100.20, 100.30);
+    rig.disp.onRecord(r);
+    rig.quiesce();
+    // BOTH halves matter. "no delivery to PARITY" alone is satisfied by a
+    // path that routes everything under the EMPTY stream key — nothing is
+    // subscribed there, so the listener log stays empty while the AtomicStore
+    // quietly accumulates a `""` symbol. That is the actual failure mode of
+    // dropping the refusal, and perturbing the refusal away left a check on
+    // the first half alone completely green.
+    const bool leaked = rig.store.get(kTicker, "price").has_value() ||
+                        rig.store.get("", "price").has_value() ||
+                        rig.store.get("", "size").has_value();
+    return std::make_pair(rig.log.rows().size(), leaked);
+  };
+
+  // POSITIVE CONTROL FIRST: the rig does deliver for a resolvable id, so the
+  // three zeros below are refusals and not a broken rig.
+  {
+    Rig rig(cfg);
+    data::TickRecord r = makeRecord(rig.symbolId, 100.25, 10, 100.20, 100.30);
+    rig.disp.onRecord(r);
+    rig.quiesce();
+    ASSERT_GT(rig.log.rows().size(), 0u) << "the rig cannot deliver at all";
+    ASSERT_TRUE(rig.store.get(kTicker, "price").has_value());
+  }
+
+  // No table installed.
+  {
+    auto [deliveries, leaked] = drove(/*installTable=*/false, 2);
+    EXPECT_EQ(deliveries, 0u);
+    EXPECT_FALSE(leaked);
+  }
+  // kInvalidSymbolId — "this record names no symbol".
+  {
+    auto [deliveries, leaked] = drove(true, data::kInvalidSymbolId);
+    EXPECT_EQ(deliveries, 0u);
+    EXPECT_FALSE(leaked);
+  }
+  // An id this table never issued.
+  {
+    auto [deliveries, leaked] = drove(true, 99'999);
+    EXPECT_EQ(deliveries, 0u);
+    EXPECT_FALSE(leaked);
+  }
+}
