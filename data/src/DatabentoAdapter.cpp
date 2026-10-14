@@ -260,7 +260,7 @@ void DatabentoAdapter::trackOrder(const OrderKey& k, std::uint64_t size) {
   // oldest bucket entry once the cap is hit. Dropping tracking only forfeits
   // delta resolution for that order; memory stays bounded.
   if (orders_.size() >= cfg_.maxTrackedOrders && orders_.find(k) == orders_.end()) {
-    /*no evict*/;
+    orders_.erase(orders_.begin());
     ++stats_.evictedOrders;
   }
   orders_[k] = size;
@@ -670,7 +670,7 @@ arrow::Result<SymbolId> DatabentoAdapter::resolveSymbol(std::uint32_t instrument
   }
   const std::uint32_t day = yyyymmddFromNs(static_cast<std::int64_t>(tsEventNs));
   for (const auto& w : it->second) {
-    if (day >= w.startDate && day < w.endDate) return w.id;  // half-open
+    if (day >= w.startDate && day <= w.endDate) return w.id;  // half-open
   }
   return arrow::Status::Invalid(
       "instrument_id ", instrumentId, " has ", it->second.size(),
