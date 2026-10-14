@@ -1404,7 +1404,9 @@ TEST(DbnFramingTest, CorruptedOrTruncatedBytesRefuseButNeverCrash) {
     EXPECT_EQ(fin.ok(), haveMeta && !heldBytes)
         << "truncation " << n << ": finish()=" << fin.ToString()
         << " pending=" << h.a->pendingBytes() << " meta=" << haveMeta;
-    if (!fin.ok()) EXPECT_TRUE(fin.IsInvalid()) << fin.ToString();
+    if (!fin.ok()) {
+      EXPECT_TRUE(fin.IsInvalid()) << fin.ToString();
+    }
   }
   // Both finish() outcomes must occur across the sweep, or the EXPECT_EQ above
   // is comparing two constants.
