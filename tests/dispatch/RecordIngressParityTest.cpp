@@ -356,7 +356,7 @@ std::set<std::string> candidateKeys(const util::Config& cfg,
     for (int i = 0; i < 8; ++i) {
       hist.push_back(TickEntry{100.0 + i, 10.0 + i, 99.0 + i, 101.0 + i, 0});
     }
-    for (const auto& [k, v] : market::computeAllAtomicValues("SCRATCH", hist,
+    for (const auto& [k, v] : computeAllAtomicValues("SCRATCH", hist,
                                                              scratch, cfg)) {
       (void)v;
       keys.insert(k);
