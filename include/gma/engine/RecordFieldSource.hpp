@@ -104,11 +104,11 @@ public:
         addCount(recordfields::kSize, rec.size);
       }
     }
-    if (rec.askPx != data::kNoPrice) {
-      addPrice(recordfields::kAsk, rec.askPx);
-    }
     if (rec.bidPx != data::kNoPrice) {
       addPrice(recordfields::kBid, rec.bidPx);
+    }
+    if (rec.askPx != data::kNoPrice) {
+      addPrice(recordfields::kAsk, rec.askPx);
     }
     if (rec.bidPx != data::kNoPrice && rec.bidSz != 0) {
       addCount(recordfields::kBidSize, rec.bidSz);
