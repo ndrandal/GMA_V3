@@ -425,6 +425,159 @@ def cmd_prove_verify(args):
         ch("DROP DATABASE IF EXISTS %s SYNC" % PROBE_DB, args.url)
 
 
+# ---------------------------------------------------------------------------
+# self-test — the comparison has to be seen reporting each shape of difference
+# ---------------------------------------------------------------------------
+
+def _tbl(columns=None, indexes=None, **clauses):
+    base = {"ENGINE": "MergeTree", "PARTITION BY": "toYYYYMMDD(ts)",
+            "ORDER BY": "(symbol,ts)", "SETTINGS": {"index_granularity": "8192"}}
+    base.update(clauses)
+    if columns is None:
+        columns = [("ts", "DateTime64(9,'UTC')", "", "CODEC(DoubleDelta,ZSTD(1))"),
+                   ("symbol", "LowCardinality(String)", "", ""),
+                   ("updated_at", "DateTime64(3,'UTC')", "DEFAULT now64(3)", "")]
+    return {"table": "gma.t", "columns": list(columns),
+            "indexes": list(indexes or []), "clauses": base}
+
+
+def _diff_cases():
+    """(label, want, got, min_diffs). min_diffs 0 means "must report nothing"."""
+    cols = _tbl()["columns"]
+    no_default = [c if c[0] != "updated_at"
+                  else (c[0], c[1], "", c[3]) for c in cols]
+    other_codec = [c if c[0] != "ts"
+                   else (c[0], c[1], c[2], "CODEC(ZSTD(9))") for c in cols]
+    return [
+        ("identical", _tbl(), _tbl(), 0),
+        # Derived clauses are not differences: the server prints PRIMARY KEY
+        # even though the file never sets one.
+        ("server derives PRIMARY KEY", _tbl(),
+         _tbl(**{"PRIMARY KEY": "(symbol,ts)"}), 0),
+        # THE REGRESSION THIS SELF-TEST EXISTS FOR. The first implementation
+        # reported DIFFS: [] here, and `apply` is IF NOT EXISTS-only so it can
+        # never add either clause to an existing table.
+        ("file has TTL + SAMPLE BY, server has neither",
+         _tbl(**{"TTL": "toDateTime(ts)+toIntervalDay(30)",
+                 "SAMPLE BY": "symbol"}), _tbl(), 2),
+        ("server has a TTL the file does not", _tbl(),
+         _tbl(**{"TTL": "toDateTime(ts)+toIntervalDay(30)"}), 1),
+        ("file sets a SETTINGS key the server does not",
+         _tbl(SETTINGS={"index_granularity": "8192", "ttl_only_drop_parts": "1"}),
+         _tbl(), 1),
+        ("server sets a SETTINGS key the file does not", _tbl(),
+         _tbl(SETTINGS={"index_granularity": "8192", "ttl_only_drop_parts": "1"}),
+         1),
+        ("SETTINGS value differs", _tbl(),
+         _tbl(SETTINGS={"index_granularity": "1024"}), 1),
+        ("ENGINE differs", _tbl(), _tbl(ENGINE="ReplacingMergeTree(updated_at)"), 1),
+        ("ORDER BY differs", _tbl(), _tbl(**{"ORDER BY": "(ts,symbol)"}), 1),
+        ("PARTITION BY differs", _tbl(),
+         _tbl(**{"PARTITION BY": "toYYYYMMDD(updated_at)"}), 1),
+        # The DEFAULT case: a missing column default is invisible to a type
+        # comparison, and on gma.ingest_windows.updated_at it is the
+        # zero-valued-clock defect.
+        ("column DEFAULT missing on the server", _tbl(),
+         _tbl(columns=no_default), 1),
+        ("column DEFAULT missing in the file", _tbl(columns=no_default),
+         _tbl(), 1),
+        ("column codec differs", _tbl(), _tbl(columns=other_codec), 1),
+        ("column missing on the server", _tbl(),
+         _tbl(columns=cols[:-1]), 1),
+        ("column missing in the file", _tbl(columns=cols[:-1]), _tbl(), 1),
+        ("index missing on the server",
+         _tbl(indexes=["INDEX ix_ts ts TYPE minmax GRANULARITY 4"]), _tbl(), 1),
+    ]
+
+
+def cmd_self_test(_args):
+    print("apply.py self-test — the comparison must be seen reporting every "
+          "shape of difference, and nothing when there is none:")
+    failures = 0
+    for label, want, got, min_diffs in _diff_cases():
+        diffs = _diff_table("gma.t", want, got)
+        ok = (len(diffs) == 0) if min_diffs == 0 else (len(diffs) >= min_diffs)
+        print("  [%s] %-46s -> %d diff(s), want %s"
+              % ("ok" if ok else "FAIL", label, len(diffs),
+                 "0" if min_diffs == 0 else ">=%d" % min_diffs))
+        if not ok:
+            failures += 1
+            for d in diffs:
+                print("        %s" % d)
+
+    # _bare_name must refuse an unqualified table rather than raise IndexError.
+    try:
+        _bare_name("trades")
+        print("  [FAIL] unqualified table name                     -> accepted")
+        failures += 1
+    except CouldNotRun:
+        print("  [ok] %-46s -> CouldNotRun (exit 2, not a traceback)"
+              % "unqualified table name")
+    if _bare_name("gma.trades") != "trades":
+        print("  [FAIL] qualified table name mis-parsed")
+        failures += 1
+
+    # resolve_target must track STACK_PORT_OFFSET the way tools/stack.sh does.
+    saved = {k: os.environ.get(k) for k in
+             ("STACK_PORT_OFFSET", "CH_HTTP_URL", "CH_HTTP_PORT")}
+    try:
+        for k in saved:
+            os.environ.pop(k, None)
+        checks = [
+            ({}, "http://127.0.0.1:8123/", False),
+            ({"STACK_PORT_OFFSET": "0"}, "http://127.0.0.1:8123/", False),
+            ({"STACK_PORT_OFFSET": "270"}, "http://127.0.0.1:8393/", False),
+            ({"STACK_PORT_OFFSET": "0070"}, "http://127.0.0.1:8193/", False),
+            ({"STACK_PORT_OFFSET": "270", "CH_HTTP_PORT": "9999"},
+             "http://127.0.0.1:9999/", False),
+            ({"STACK_PORT_OFFSET": "270", "CH_HTTP_URL": "http://h:1/"},
+             "http://h:1/", True),
+        ]
+        for env, want_url, want_explicit in checks:
+            for k in saved:
+                os.environ.pop(k, None)
+            os.environ.update(env)
+            url, how, off, was_set, explicit = resolve_target(None)
+            ok = url == want_url and explicit == want_explicit
+            print("  [%s] resolve %-37s -> %s"
+                  % ("ok" if ok else "FAIL",
+                     env or "{no offset exported}", url))
+            if not ok:
+                failures += 1
+                print("        wanted %s (explicit=%s)" % (want_url, want_explicit))
+        # And the destructive guard must refuse the accident it exists for.
+        for k in saved:
+            os.environ.pop(k, None)
+        os.environ["STACK_PORT_OFFSET"] = "270"
+        url, how, off, was_set, explicit = resolve_target(None)
+        try:
+            guard_fresh(url, how, off, was_set, explicit)
+            print("  [FAIL] --fresh guard at offset 270 without an explicit "
+                  "target -> ALLOWED")
+            failures += 1
+        except CouldNotRun:
+            print("  [ok] %-46s -> refused" % "--fresh at offset 270, no explicit target")
+        os.environ["CH_HTTP_URL"] = url
+        url, how, off, was_set, explicit = resolve_target(None)
+        try:
+            guard_fresh(url, how, off, was_set, explicit)
+            print("  [ok] %-46s -> allowed" % "--fresh at offset 270, target named")
+        except CouldNotRun as exc:
+            print("  [FAIL] --fresh refused even with an explicit target: %s" % exc)
+            failures += 1
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+
+    if failures:
+        print("SELF-TEST FAILED: %d case(s)" % failures)
+        return 1
+    print("self-test: every case behaved as specified")
+    return 0
+
+
 def cmd_resolve_target(args):
     print(describe_target(args.url, args.how, args.offset))
     print("explicit: %s   (an explicit target is what `apply --fresh` requires "
