@@ -295,6 +295,33 @@ Event equivalentEvent(const std::string& symbol, const data::TickRecord& rec) {
   return Event{symbol, std::move(doc)};
 }
 
+// The same tick with its JSON members in REVERSE order. Not an "equivalent
+// tick" under the mapping — which fixes an order — but one a JSON producer
+// could legitimately emit, and the only way to show that `maxFieldsPerSymbol`
+// makes order observable.
+Event reversedEvent(const std::string& symbol, const data::TickRecord& rec) {
+  std::vector<std::pair<std::string, double>> fs;
+  struct Collect final : engine::NumericFieldSink {
+    std::vector<std::pair<std::string, double>>* out;
+    void field(const std::string& name, double value) override {
+      out->emplace_back(name, value);
+    }
+  } collect;
+  collect.out = &fs;
+  engine::RecordFieldSource(rec).forEachNumber(collect);
+
+  auto doc = std::make_shared<rapidjson::Document>();
+  doc->SetObject();
+  for (auto it = fs.rbegin(); it != fs.rend(); ++it) {
+    auto& alloc = doc->GetAllocator();
+    doc->AddMember(rapidjson::Value(it->first.c_str(),
+                                    static_cast<rapidjson::SizeType>(it->first.size()),
+                                    alloc),
+                   rapidjson::Value(it->second), alloc);
+  }
+  return Event{symbol, std::move(doc)};
+}
+
 // Four ticks, not one. A single tick cannot see a history buffer, a rolling
 // builtin or the cap bookkeeping; `sma_5` needs depth and `stddev` of one
 // sample is not a test of anything.
@@ -308,72 +335,30 @@ std::vector<data::TickRecord> corpus(data::SymbolId sym) {
 }
 
 // ---------------------------------------------------------------------------
-// The AtomicStore comparison, over a DERIVED key set
+// The AtomicStore comparison — TOTAL, not over a guessed key set
 // ---------------------------------------------------------------------------
-
-// `AtomicStore` has no enumeration accessor, so the comparison needs a
-// candidate key list. Hardcoding one is how a store comparison silently stops
-// covering a key, so every key here is derived from the engine:
 //
-//   * every field `RecordFieldSource` can emit, from the source itself;
-//   * every `FunctionMap` builtin, bare AND `<field>.<fn>` (the ENC-1008 key
-//     shape), for every raw field;
-//   * every key `market::computeAllAtomicValues` writes, by running it on a
-//     scratch store — which is the whole TA suite under the active Config,
-//     without this file naming one indicator;
-//   * MarketTickComputer's own base atomics.
-std::set<std::string> candidateKeys(const util::Config& cfg,
-                                    const data::TickRecord& sample) {
-  std::set<std::string> keys;
-
-  std::vector<std::string> rawFields;
-  {
-    struct Collect final : engine::NumericFieldSink {
-      std::vector<std::string>* out;
-      void field(const std::string& name, double) override { out->push_back(name); }
-    } collect;
-    collect.out = &rawFields;
-    const engine::RecordFieldSource fields(sample);
-    fields.forEachNumber(collect);
-  }
-  for (const auto& f : rawFields) keys.insert(f);
-  for (const auto& f : listenedFields()) keys.insert(f);
-
-  FunctionMap::instance().forEach([&](const std::string& fn, const Func&) {
-    keys.insert(fn);
-    for (const auto& f : rawFields) keys.insert(f + "." + fn);
-  });
-
-  // MarketTickComputer's base atomics (MarketTA.cpp, "Symbol admitted" block).
-  keys.insert("bid");
-  keys.insert("ask");
-  keys.insert("spread");
-  keys.insert("timestamp");
-
-  // The TA suite, enumerated by running it rather than by listing it.
-  {
-    AtomicStore scratch;
-    std::vector<TickEntry> hist;
-    for (int i = 0; i < 8; ++i) {
-      hist.push_back(TickEntry{100.0 + i, 10.0 + i, 99.0 + i, 101.0 + i, 0});
-    }
-    for (const auto& [k, v] : computeAllAtomicValues("SCRATCH", hist,
-                                                             scratch, cfg)) {
-      (void)v;
-      keys.insert(k);
-    }
-  }
-  return keys;
-}
-
-// Renders a store as one line per present key, for the candidate set.
-std::vector<std::string> dumpStore(const AtomicStore& store,
-                                   const std::set<std::string>& keys) {
+// THE FIRST VERSION OF THIS COMPARISON WAS BLIND, and an adversarial probe
+// proved it rather than argued it. `AtomicStore` had no enumeration accessor,
+// so the comparison ran over a CANDIDATE key list the test derived from
+// `FunctionMap`, `computeAllAtomicValues` and the record→field mapping. That
+// covers every key either path is *supposed* to write — and therefore covers
+// nothing else. A one-line perturbation on the record path only,
+//
+//     if (_store) _store->set(symbol, "zzGhost", 1.0);
+//
+// left all three parity assertions GREEN, because `zzGhost` was not a name the
+// test knew to ask for. A parity assertion that can only see keys it already
+// guessed is not a parity assertion; it is a spot check wearing one's name.
+//
+// `AtomicStore::snapshot()` (ENC-1486) now enumerates everything the store
+// holds, so the comparison is total: ANY key, under ANY stream key, written by
+// one path and not the other, fails. That also removes the derived key set and
+// the drift risk that came with it.
+std::vector<std::string> dumpStore(const AtomicStore& store) {
   std::vector<std::string> out;
-  for (const auto& k : keys) {
-    auto v = store.get(kTicker, k);
-    if (!v) continue;
-    out.push_back(k + " = " + describe(*v));
+  for (const auto& [streamKey, field, value] : store.snapshot()) {
+    out.push_back(streamKey + " / " + field + " = " + describe(value));
   }
   return out;
 }
@@ -389,7 +374,11 @@ struct Observed {
   std::vector<std::string> computers;
 };
 
-enum class Path { Json, Record };
+// `JsonReversed` is the same tick — same field names, same values — with its
+// JSON members added in the opposite order. Semantically identical; observably
+// different once `maxFieldsPerSymbol` truncates admission. It exists so the
+// cap test can prove field order is observable instead of asserting it.
+enum class Path { Json, Record, JsonReversed };
 
 // `mutate` runs on each record before it is driven, so a negative control can
 // perturb ONE path's input while leaving the drive identical.
@@ -399,17 +388,17 @@ Observed drive(Path path, const util::Config& cfg,
   auto recs = corpus(rig.symbolId);
   for (auto& rec : recs) {
     if (mutate) mutate(rec);
-    if (path == Path::Record) {
-      rig.disp.onRecord(rec);
-    } else {
-      rig.disp.onTick(equivalentEvent(kTicker, rec));
+    switch (path) {
+      case Path::Record:       rig.disp.onRecord(rec); break;
+      case Path::Json:         rig.disp.onTick(equivalentEvent(kTicker, rec)); break;
+      case Path::JsonReversed: rig.disp.onTick(reversedEvent(kTicker, rec)); break;
     }
   }
   rig.quiesce();
 
   Observed o;
   o.deliveries = rig.log.rows();
-  o.store      = dumpStore(rig.store, candidateKeys(cfg, recs.front()));
+  o.store      = dumpStore(rig.store);
   o.computers  = rig.computerLog;
   return o;
 }
@@ -459,14 +448,51 @@ TEST(RecordIngressParityTest, AtomicStoreContentsAreIdentical) {
   const Observed json = drive(Path::Json, cfg);
   const Observed rec  = drive(Path::Record, cfg);
 
-  ASSERT_FALSE(json.store.empty())
-      << "the JSON path wrote no atomic — the comparison below is vacuous";
-  // Enough keys to be a real comparison: the raw fields, the subscribed
-  // builtins, and the TA suite MarketTickComputer writes.
-  ASSERT_GT(json.store.size(), 10u);
+  // ANTI-VACUITY ON THE KEY SET, BY NAME — not on its size.
+  //
+  // `ASSERT_GT(size, 10u)` was the first version and it is the wrong shape: a
+  // comparison that has silently stopped covering a key still has eleven of
+  // them, so the floor is cleared by a run that proves nothing. (Same defect
+  // as ENC-1480's order-map test asserting a counter the mutation kept
+  // feeding, and ENC-1481's floor that a dead walk cleared.) So name the keys
+  // the three delivery routes must each have produced, and fail on the one
+  // that is missing rather than on a total.
+  const auto storeHas = [](const std::vector<std::string>& rows,
+                           const std::string& key) {
+    for (const auto& r : rows) {
+      if (r == std::string(kTicker) + " / " + key ||
+          r.rfind(std::string(kTicker) + " / " + key + " = ", 0) == 0) return true;
+    }
+    return false;
+  };
+  for (const char* required : {
+           "price",      // raw admission, record-mapped field
+           "size",       // raw admission, the second mapped field
+           "mean",       // Dispatcher::computeAndStoreAtomics (subscribed builtin)
+           "sum",        //   "
+           "stddev",     //   "
+           "lastPrice",  // MarketTickComputer's TA suite
+           "sma_5",      //   "
+       }) {
+    EXPECT_TRUE(storeHas(json.store, required))
+        << "JSON path wrote no `" << required << "` — this comparison is no "
+           "longer covering the route that key represents, so an equality "
+           "against the record path proves less than it claims";
+    EXPECT_TRUE(storeHas(rec.store, required))
+        << "record path wrote no `" << required << "`";
+  }
+
   EXPECT_EQ(json.store, rec.store);
 }
 
+// READ THE SCOPE OF THIS ONE NARROWLY. It covers what a computer is HANDED —
+// the symbol, the field set and the ComputeContext — and nothing about how the
+// field set answers queries, because `ComputerProbe` only ever calls
+// `forEachNumber`. Measured: perturbing `RecordFieldSource::has()` to return
+// false reddened `DeliveriesAreIdenticalInOrder`,
+// `AtomicStoreContentsAreIdentical`, `LookupAgreesWithEmission` and
+// `UnresolvableSymbolDeliversNothing` — and left THIS test green, because no
+// computer in the repo calls `has()`. Do not read it as covering lookup.
 TEST(RecordIngressParityTest, ComputerInvocationsAreIdentical) {
   const auto cfg = defaultCfg();
   const Observed json = drive(Path::Json, cfg);
@@ -516,16 +542,140 @@ TEST(RecordIngressParityTest, NoFieldAnswersTryGetUint64OnEitherPath) {
   }
   ASSERT_FALSE(names.empty()) << "the record emitted no field — vacuous";
 
+  // THE LOAD-BEARING PROPERTY behind every rewritten extraction loop in
+  // MarketTickComputer: `tryGet*` must leave `out` UNTOUCHED on a miss. The
+  // old code was `if (doc.HasMember(f) && doc[f].IsNumber()) x = doc[f].Get…`,
+  // i.e. `x` kept its previous value when the alias did not match, and the
+  // alias loops rely on that to fall through to the next candidate. If either
+  // source wrote a zero on a miss, the loops would silently stop falling
+  // through and every field-map alias after the first would break.
+  for (const auto& miss : {std::string("nope"), std::string("timestamp")}) {
+    double d = -7.5;
+    std::uint64_t u = 77;
+    EXPECT_FALSE(recFields.tryGetNumber(miss, d));
+    EXPECT_FALSE(jsonFields.tryGetNumber(miss, d));
+    EXPECT_EQ(d, -7.5) << "tryGetNumber wrote to `out` on a miss: " << miss;
+    EXPECT_FALSE(recFields.tryGetUint64(miss, u));
+    EXPECT_FALSE(jsonFields.tryGetUint64(miss, u));
+    EXPECT_EQ(u, 77u) << "tryGetUint64 wrote to `out` on a miss: " << miss;
+  }
+
   for (const auto& n : names) {
     std::uint64_t a = 1, b = 1;
     EXPECT_FALSE(recFields.tryGetUint64(n, a)) << n;
     EXPECT_FALSE(jsonFields.tryGetUint64(n, b)) << n;
+    EXPECT_EQ(a, 1u) << "tryGetUint64 wrote to `out` on a refusal: " << n;
+    EXPECT_EQ(b, 1u) << "tryGetUint64 wrote to `out` on a refusal: " << n;
     // And both still read as numbers, so nothing is simply missing.
     double da = 0.0, db = 0.0;
     EXPECT_TRUE(recFields.tryGetNumber(n, da)) << n;
     EXPECT_TRUE(jsonFields.tryGetNumber(n, db)) << n;
     EXPECT_EQ(describeDouble(da), describeDouble(db)) << n;
   }
+}
+
+TEST(RecordIngressParityTest, IdenticalWithFieldNamespacedDerivedAtomics) {
+  // `atomicKeyNamespaceByField` is the one Config flag that changes what the
+  // shared `ingest` body writes: derived builtins move from `<fn>` to
+  // `<field>.<fn>` (ENC-1008). Parity ought to hold trivially BECAUSE the body
+  // is shared — which is exactly the kind of "ought" this ticket is not
+  // allowed to leave unmeasured.
+  auto cfg = defaultCfg();
+  cfg.atomicKeyNamespaceByField = true;
+  const Observed json = drive(Path::Json, cfg);
+  const Observed rec  = drive(Path::Record, cfg);
+  ASSERT_FALSE(json.store.empty());
+
+  // The flag must actually have moved something, or this is a second run of
+  // the default-config test wearing a different name.
+  bool sawNamespacedKey = false;
+  for (const auto& row : json.store) {
+    if (row.find(" / price.") != std::string::npos ||
+        row.find(" / size.")  != std::string::npos) {
+      sawNamespacedKey = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(sawNamespacedKey)
+      << "atomicKeyNamespaceByField wrote no <field>.<fn> key — this test is "
+         "not exercising the state it names";
+
+  EXPECT_EQ(json.store, rec.store);
+  EXPECT_EQ(json.deliveries, rec.deliveries);
+}
+
+TEST(RecordIngressParityTest, IdenticalWhenTheFieldCapTruncatesAdmission) {
+  // THE PLACE FIELD EMISSION ORDER IS OBSERVABLE THROUGH THE DISPATCHER, and
+  // the reason `RecordFieldSource.hpp`'s comment no longer claims there is
+  // only one such place.
+  //
+  // Past `maxFieldsPerSymbol` the raw-admission ledger refuses NEW fields and
+  // the history map refuses new ones, so the surviving set is a PREFIX of the
+  // arrival order. Three drives, one cap:
+  //
+  //   record path            vs  mapping-order JSON   -> must be IDENTICAL
+  //   record path            vs  reverse-order JSON   -> must DIFFER
+  //
+  // The second row is what makes the first one mean something: it shows the
+  // cap really does expose order, so "identical" is a result and not an
+  // artefact of order being unobservable.
+  auto cfg = defaultCfg();
+  cfg.maxFieldsPerSymbol = 3;   // < the 6 fields the mapping can emit
+
+  const Observed rec      = drive(Path::Record, cfg);
+  const Observed fwd      = drive(Path::Json, cfg);
+  const Observed rev      = drive(Path::JsonReversed, cfg);
+  const Observed uncapped = drive(Path::Json, defaultCfg());
+
+  // The cap must bite, or all three agree for the wrong reason.
+  ASSERT_LT(fwd.store.size(), uncapped.store.size())
+      << "maxFieldsPerSymbol=3 admitted as much as no cap — the cap is not "
+         "being enforced and this test proves nothing";
+
+  EXPECT_EQ(rec.store, fwd.store);
+  EXPECT_EQ(rec.deliveries, fwd.deliveries);
+
+  // Order IS observable here. If this ever becomes EQ, the paragraph in
+  // RecordFieldSource.hpp about "the equivalent tick" being order-sensitive is
+  // no longer true and should be corrected, not deleted.
+  EXPECT_NE(rec.store, rev.store)
+      << "a reverse-order JSON tick produced identical store contents under a "
+         "field cap — emission order is not observable after all";
+}
+
+TEST(RecordIngressParityTest, NonObjectJsonPayloadIsEmptyRatherThanFatal) {
+  // The ONE deliberate behaviour change to the JSON path, pinned so it is a
+  // decision rather than an accident. Before ENC-1486 a non-object payload
+  // reaching a symbol with a live subscription hit rapidjson's `HasMember`,
+  // which asserts `IsObject()` — i.e. aborted the process. `JsonFieldSource`
+  // guards every accessor, so it is now an empty field set.
+  //
+  // No test covered that path and nothing in the shipped ingress can produce
+  // it; an abort was not a behaviour worth preserving.
+  const auto cfg = defaultCfg();
+  Rig rig(cfg);
+
+  auto arr = std::make_shared<rapidjson::Document>();
+  arr->SetArray();
+  rig.disp.onTick(Event{kTicker, arr});
+
+  auto scalar = std::make_shared<rapidjson::Document>();
+  scalar->SetInt(5);
+  rig.disp.onTick(Event{kTicker, scalar});
+
+  auto emptyObj = std::make_shared<rapidjson::Document>();
+  emptyObj->SetObject();
+  rig.disp.onTick(Event{kTicker, emptyObj});
+
+  rig.quiesce();
+  EXPECT_TRUE(rig.log.rows().empty());
+  EXPECT_TRUE(dumpStore(rig.store).empty());
+
+  // Positive control: the same rig DOES deliver for a real tick, so the two
+  // emptiness assertions above are refusals and not a dead rig.
+  rig.disp.onRecord(makeRecord(rig.symbolId, 100.25, 10, 100.20, 100.30));
+  rig.quiesce();
+  EXPECT_FALSE(rig.log.rows().empty());
 }
 
 // ===========================================================================
@@ -582,6 +732,16 @@ TEST(RecordIngressParityTest, ComparatorSeesAQuoteSideDisappearing) {
 // Comments and string literals are stripped before the search. Prose about
 // JSON is not a JSON dependency, and a token-counting gate that cannot tell
 // the difference is one this workspace has already been bitten by.
+//
+// WHAT THIS GATE DOES NOT CATCH, stated because an unstated limit is how a
+// gate gets trusted past its range: it is textual and per-file, so moving DOM
+// construction into a THIRD translation unit that `onRecord` merely calls
+// would evade it. What it does catch is the regression that actually threatens
+// this path — someone "unifying" the two entry points by synthesizing an
+// `Event` inside `onRecord` — and it catches the shared `ingest` body too,
+// which is where such a change would otherwise hide. A link-time or
+// symbol-level check would close the rest; it is not built, and this comment
+// is the honest statement of that rather than a claim that it is.
 
 namespace {
 
@@ -653,24 +813,54 @@ std::string functionBody(const std::string& scrubbed, const std::string& name) {
   return {};
 }
 
+// Every rapidjson-shaped name the record path could plausibly reach for, plus
+// `Event` (the DOM-carrying ingress type) and `JsonFieldSource` (the adapter).
+//
+// THE LIST WAS TOO SHORT ON ITS FIRST RUN and an adversarial probe measured
+// it: inserting `const Event& evAlias = …` into `onRecord` left all four gate
+// tests green, because `Event` was not on it, and neither were `SetObject`,
+// `AddMember`, `Parse`, `GetString`, `IsNumber` or `IsObject`. A synthesized
+// DOM did go red, on `payload` — so the gate was effectively adequate and
+// nominally sloppy, which is the state in which a gate stops being adequate
+// without anyone noticing.
+//
+// Case matters and is load-bearing: rapidjson's `IsObject`/`IsNumber` are
+// capital-I, while `FieldSource`'s own `isObject`/`tryGetNumber` are not, so
+// the record path's legitimate calls do not trip these.
 const std::vector<std::string>& jsonTokens() {
   static const std::vector<std::string> t = {
-      "rapidjson", "Document", "payload", "HasMember", "MemberBegin",
-      "MemberEnd", "GetDouble", "GetUint64", "JsonFieldSource"};
+      "rapidjson", "Document", "payload", "Event",
+      "HasMember", "MemberBegin", "MemberEnd", "FindMember", "AddMember",
+      "SetObject", "GetAllocator", "Parse",
+      "GetDouble", "GetUint64", "GetString", "GetStringLength",
+      "IsNumber", "IsObject", "IsString", "IsUint64",
+      "JsonFieldSource"};
   return t;
 }
 
-// Matches a token only where it STARTS an identifier. Plain substring search
-// was wrong in a way worth recording, because it is the shape of a false
-// positive this gate would otherwise have shipped: `GetUint64` is a substring
-// of `tryGetUint64`, the FieldSource accessor, so RecordFieldSource.hpp
-// "named rapidjson" on its first run. Requiring the preceding character to be
-// a non-identifier one keeps `value.GetUint64()` (preceded by `.`) a hit and
-// `tryGetUint64` (preceded by `y`) a miss.
-bool identStart(const std::string& hay, std::size_t at) {
-  if (at == 0) return true;
-  const char p = hay[at - 1];
-  return !(std::isalnum(static_cast<unsigned char>(p)) || p == '_');
+// Matches a token only as a WHOLE IDENTIFIER. Both bounds are load-bearing
+// and each was added after a measured false positive, which is the argument
+// for keeping them:
+//
+//   * leading bound — plain substring search made `GetUint64` match inside
+//     `tryGetUint64`, the FieldSource accessor, so RecordFieldSource.hpp
+//     "named rapidjson" on this gate's very first run;
+//   * trailing bound — adding `Event` to the list (because an adversarial
+//     probe slipped `const Event& evAlias` past the old list) made it match
+//     inside `EventComputerRegistry`, which is ordinary engine code, so the
+//     shared `ingest` body "named JSON".
+//
+// With both, `value.GetUint64()` and `const Event&` are hits while
+// `tryGetUint64` and `EventComputerRegistry` are not.
+bool identChar(char c) {
+  return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+bool wholeIdentifierAt(const std::string& hay, std::size_t at, std::size_t len) {
+  if (at != 0 && identChar(hay[at - 1])) return false;
+  const std::size_t after = at + len;
+  if (after < hay.size() && identChar(hay[after])) return false;
+  return true;
 }
 
 std::vector<std::string> jsonTokensIn(const std::string& scrubbed) {
@@ -678,7 +868,10 @@ std::vector<std::string> jsonTokensIn(const std::string& scrubbed) {
   for (const auto& tok : jsonTokens()) {
     for (std::size_t at = scrubbed.find(tok); at != std::string::npos;
          at = scrubbed.find(tok, at + 1)) {
-      if (identStart(scrubbed, at)) { found.push_back(tok); break; }
+      if (wholeIdentifierAt(scrubbed, at, tok.size())) {
+        found.push_back(tok);
+        break;
+      }
     }
   }
   return found;
@@ -906,6 +1099,127 @@ TEST(RecordFieldSourceMappingTest, LookupAgreesWithEmission) {
   }
   EXPECT_EQ(src.fieldCountHint(), 3u);
   EXPECT_TRUE(src.isObject());
+}
+
+// ===========================================================================
+// 4b. TWO BEHAVIOURS LABELLED, NOT FIXED
+// ===========================================================================
+//
+// Both were found by adversarial passes. Neither is a parity break, and a test
+// that called either one a parity failure would be asserting something false.
+// They are pinned so the next reader does not have to rediscover which they
+// are.
+
+TEST(RecordIngressParityTest, IdenticalForAFieldlessTick) {
+  // A RESOURCE QUIRK ON A PATH BUILT FOR HIGH-CARDINALITY MBO INGEST — not a
+  // parity break.
+  //
+  // `ingest` creates the `_rawAdmitted[symbol]` ledger entry before knowing
+  // whether any field will be admitted, so a record that emits NOTHING (all
+  // `kNoPrice`, zero size) still consumes one of `maxSymbols` and can block
+  // raw admission for a later, real symbol. The JSON equivalent of that record
+  // is `{}`, which does exactly the same — only a NON-OBJECT payload escapes,
+  // because `isObject()` gates the whole block. So the two entry points agree,
+  // which is what this ticket is responsible for; the quirk itself is
+  // pre-existing on the JSON path and inherited, and deferring the ledger
+  // insert would change the JSON path's cap accounting and needs its own
+  // ticket.
+  auto cfg = defaultCfg();
+  cfg.maxSymbols = 1;
+
+  const auto drove = [&cfg](Path path) {
+    Rig rig(cfg);
+    const auto other = rig.symbols.intern("OTHER");
+
+    data::TickRecord fieldless;            // emits no field at all
+    fieldless.header.symbolId = other;
+    data::TickRecord real =
+        makeRecord(rig.symbolId, 100.25, 10, 100.20, 100.30);
+
+    for (const auto* r : {&fieldless, &real}) {
+      if (path == Path::Record) {
+        rig.disp.onRecord(*r);
+      } else {
+        const std::string sym = rig.symbols.name(r->header.symbolId);
+        rig.disp.onTick(equivalentEvent(sym, *r));
+      }
+    }
+    rig.quiesce();
+    return std::make_pair(rig.log.rows(), dumpStore(rig.store));
+  };
+
+  const auto [dj, sj] = drove(Path::Json);
+  const auto [dr, sr] = drove(Path::Record);
+
+  // The fieldless tick really did burn the slot — otherwise this test is
+  // comparing two unconstrained runs and says nothing about the cap.
+  bool parityRawAdmitted = false;
+  for (const auto& row : sj) {
+    if (row.rfind(std::string(kTicker) + " / price = ", 0) == 0) {
+      parityRawAdmitted = true;
+      break;
+    }
+  }
+  EXPECT_FALSE(parityRawAdmitted)
+      << "the fieldless tick did NOT burn the only _rawAdmitted slot — the "
+         "quirk this test documents no longer exists, so delete the paragraph "
+         "in Dispatcher.cpp rather than this assertion";
+
+  EXPECT_EQ(dj, dr);
+  EXPECT_EQ(sj, sr);
+}
+
+TEST(RecordIngressParityTest, DuplicateJsonMembersAreAPreExistingJsonOnlyQuirk) {
+  // A JSON-ONLY QUIRK, PRE-EXISTING AND NOT A REGRESSION. The record path
+  // cannot express it at all — `RecordFieldSource` emits each name at most
+  // once — so it is outside the parity claim entirely, and that is why this
+  // test asserts the quirk rather than an equality.
+  //
+  // For `{"price":1.0,"price":2.0}`: the LISTENER sees 1.0, because
+  // `FindMember` returns the first match (as `HasMember`/`operator[]` did at
+  // HEAD~2); the STORE ends at 2.0, because raw admission enumerates every
+  // member and `setBatch` applies them in order. Identical before this ticket.
+  const auto cfg = defaultCfg();
+  Rig rig(cfg);
+
+  auto doc = std::make_shared<rapidjson::Document>();
+  doc->SetObject();
+  auto& alloc = doc->GetAllocator();
+  doc->AddMember("price", rapidjson::Value(1.0), alloc);
+  doc->AddMember("price", rapidjson::Value(2.0), alloc);
+  rig.disp.onTick(Event{kTicker, doc});
+  rig.quiesce();
+
+  bool sawFirst = false;
+  for (const auto& row : rig.log.rows()) {
+    if (row.rfind("price |", 0) == 0) {
+      EXPECT_NE(row.find(describeDouble(1.0)), std::string::npos)
+          << "the listener no longer reads the FIRST duplicate member: " << row;
+      sawFirst = true;
+    }
+  }
+  EXPECT_TRUE(sawFirst) << "no `price` delivery at all — vacuous";
+
+  const auto stored = rig.store.get(kTicker, "price");
+  ASSERT_TRUE(stored.has_value());
+  EXPECT_EQ(describe(*stored), "d:" + describeDouble(2.0))
+      << "the store no longer ends at the LAST duplicate member";
+
+  // And the record path cannot produce the situation, which is the actual
+  // parity-relevant statement here.
+  const data::TickRecord r = makeRecord(rig.symbolId, 100.25, 10, 100.20, 100.30);
+  std::vector<std::string> names;
+  {
+    struct Collect final : engine::NumericFieldSink {
+      std::vector<std::string>* out;
+      void field(const std::string& name, double) override { out->push_back(name); }
+    } c;
+    c.out = &names;
+    engine::RecordFieldSource(r).forEachNumber(c);
+  }
+  std::set<std::string> unique(names.begin(), names.end());
+  EXPECT_EQ(unique.size(), names.size())
+      << "RecordFieldSource emitted a duplicate field name";
 }
 
 // ===========================================================================

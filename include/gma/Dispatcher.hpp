@@ -340,6 +340,27 @@ private:
   // and happens once per record, not once per field.
   std::atomic<const data::SymbolTable*> _symbols{nullptr};
 
+  // ENC-1486. `onRecord`'s two refusals are ONCE-ONLY diagnostics, per
+  // Dispatcher.
+  //
+  // THE REASON IS BENCHMARK INTEGRITY, NOT LOG TIDINESS. Both refusals are
+  // reached per RECORD, and this path exists to carry MBO — tens of millions
+  // of records per symbol-day. A `Warn` per record costs a
+  // `std::to_string(symbolId)` and a `vector<Field>` allocation each time, so
+  // a misconfigured `SymbolTable` in a harness would not merely spam a log: it
+  // would DOMINATE the measurement, and ENC-1487 would report a plausible,
+  // wrong, unattributable rows/sec for step 2 and compare it against B1. SPEC
+  // specs/2026-10-14-gma-data-layer/SPEC.md D13 makes that number the one the
+  // whole project is sized by, so making B2 accidentally measure logging is
+  // precisely the failure class this slice exists to avoid.
+  //
+  // `Logger` has no rate limiting of its own (util/Logger.hpp is the whole
+  // API), so the flag is the mechanism. They are logged AT ALL because the
+  // alternative is worse: an unresolvable symbolId drops EVERY record, and a
+  // silently empty chart is a far longer debugging session than one warning.
+  std::atomic<bool> _warnedNoSymbolTable{false};
+  std::atomic<bool> _warnedUnresolvedSymbol{false};
+
   mutable std::shared_mutex _histMutex;
   mutable std::shared_mutex _listenerMutex;
   gma::rt::ThreadPool* _threadPool;
