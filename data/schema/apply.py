@@ -37,7 +37,90 @@ import ddl  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCHEMA = os.path.join(HERE, "clickhouse.sql")
-DEFAULT_URL = os.environ.get("CH_HTTP_URL", "http://127.0.0.1:8123/")
+
+# The base port tools/stack.sh derives ClickHouse's HTTP port from:
+#   CH_HTTP_PORT := $(stack_port 8123) == 8123 + STACK_PORT_OFFSET
+CH_HTTP_BASE_PORT = 8123
+
+
+class CouldNotRun(Exception):
+    """The tool cannot act, as distinct from finding a difference. Exit 2."""
+
+
+def resolve_target(explicit_url=None):
+    """Work out which ClickHouse this invocation is talking to.
+
+    ⚠ THIS IS A SAFETY-CRITICAL FUNCTION, not plumbing. `apply --fresh` runs
+    `DROP DATABASE gma`, and the first version of this file hardcoded
+    `http://127.0.0.1:8123/`. tools/stack.sh resolves
+    `CH_HTTP_PORT := 8123 + STACK_PORT_OFFSET`, so a worktree at
+    STACK_PORT_OFFSET=270 runs its own server on 8393 — and the hardcoded
+    default meant `./apply.sh --fresh` from that worktree dropped the
+    OFFSET-ZERO database, i.e. somebody else's L1 store. ENC-1480's own
+    acceptance run did exactly that; it was harmless only because nothing is
+    ingested yet, and it stops being harmless the moment ENC-1483 lands seven
+    days of MBO.
+
+    Precedence, highest first: an explicit --url, CH_HTTP_URL, CH_HTTP_PORT,
+    then 8123 + STACK_PORT_OFFSET. The returned `explicit` flag is what the
+    --fresh guard keys on.
+
+    -> (url, how, offset, offset_was_set, explicit)
+    """
+    raw = os.environ.get("STACK_PORT_OFFSET", "").strip()
+    if raw == "":
+        offset, offset_was_set = 0, False
+    else:
+        if not raw.isdigit():
+            raise CouldNotRun(
+                "STACK_PORT_OFFSET must be a non-negative integer (got %r) — "
+                "same rule as tools/stack.sh, which would die on this too." % raw)
+        offset, offset_was_set = int(raw, 10), True   # mirrors stack.sh's 10#$
+
+    if explicit_url:
+        return explicit_url, "--url", offset, offset_was_set, True
+    env_url = os.environ.get("CH_HTTP_URL", "").strip()
+    if env_url:
+        return env_url, "CH_HTTP_URL", offset, offset_was_set, True
+    env_port = os.environ.get("CH_HTTP_PORT", "").strip()
+    if env_port:
+        if not env_port.isdigit():
+            raise CouldNotRun("CH_HTTP_PORT must be a port number (got %r)"
+                              % env_port)
+        return ("http://127.0.0.1:%s/" % env_port, "CH_HTTP_PORT", offset,
+                offset_was_set, False)
+    return ("http://127.0.0.1:%d/" % (CH_HTTP_BASE_PORT + offset),
+            "8123 + STACK_PORT_OFFSET(%d)" % offset, offset, offset_was_set,
+            False)
+
+
+def describe_target(url, how, offset):
+    return "target: %s  (via %s; STACK_PORT_OFFSET=%d)" % (url, how, offset)
+
+
+def guard_fresh(url, how, offset, offset_was_set, explicit):
+    """Refuse a destructive --fresh that is only correct by accident.
+
+    Two independent refusals, because the hazard has two shapes:
+
+      1. A NON-ZERO OFFSET WITHOUT AN EXPLICIT TARGET. A destructive default
+         must not be reachable by being in the wrong directory. Even though the
+         port is now derived, requiring the operator to name the server is the
+         difference between "I meant this one" and "this is what my shell
+         happened to export".
+      2. ROWS IN THE TARGET. The reason the original defect was survivable is
+         that nothing is ingested yet. That expires with ENC-1483, and a guard
+         that only works while the store is empty is not a guard.
+    """
+    if offset_was_set and offset != 0 and not explicit:
+        raise CouldNotRun(
+            "refusing --fresh: STACK_PORT_OFFSET=%d but no explicit target.\n"
+            "  --fresh runs DROP DATABASE gma, and a destructive default must "
+            "not be reachable by being in the wrong directory.\n"
+            "  Derived target would be %s. Name it on purpose:\n"
+            "      CH_HTTP_URL=%s ./apply.sh --fresh\n"
+            "  or, for the offset-zero store, run with STACK_PORT_OFFSET=0."
+            % (offset, url, url))
 
 
 def ch(sql, url):
