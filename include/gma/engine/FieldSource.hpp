@@ -37,6 +37,7 @@
 // a `double`.
 //
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
