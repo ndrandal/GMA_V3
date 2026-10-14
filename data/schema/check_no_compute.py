@@ -309,8 +309,8 @@ MUTANTS = [
      "book_events ORDER BY"),
     ("gma.quotes uncommented",
      ("-- CREATE TABLE IF NOT EXISTS gma.quotes",
-      "CREATE TABLE IF NOT EXISTS gma.quotes_probe (x UInt8) ENGINE = MergeTree ORDER BY x;\n-- CREATE TABLE IF NOT EXISTS gma.quotes"),
-     None),
+      "CREATE TABLE IF NOT EXISTS gma.quotes (ts_event DateTime64(9, 'UTC'), symbol LowCardinality(String), bid_px Int64, ask_px Int64) ENGINE = MergeTree ORDER BY (symbol, ts_event);\n-- CREATE TABLE IF NOT EXISTS gma.quotes"),
+     "gma.quotes is created"),
     ("a live projection",
      ("CREATE DATABASE IF NOT EXISTS gma;",
       "CREATE DATABASE IF NOT EXISTS gma;\nALTER TABLE gma.trades ADD PROJECTION IF NOT EXISTS p_time_symbol ( SELECT * ORDER BY (ts_event, symbol) );"),
@@ -327,17 +327,19 @@ def _mutant_text(schema_text, label, pair):
     old_s, new_s = pair
     if label.startswith("book_events sort key"):
         # Needs a positional edit: only book_events' ORDER BY, not every
-        # table's. Find the statement and rewrite its sort key.
-        marker = "CREATE TABLE IF NOT EXISTS gma.book_events"
-        i = schema_text.index(marker)
-        j = schema_text.index(";", i)
-        stmt = schema_text[i:j]
-        mutated_stmt = stmt.replace(
-            "ORDER BY (symbol, ts_event, provider_seq)",
-            "ORDER BY (symbol, ts_event, provider_seq, action, order_id)")
-        if mutated_stmt == stmt:
+        # table's. Anchored on the sort key followed by SETTINGS, because
+        # scanning to the next `;` lands inside a column comment that contains
+        # one ("-- Level index for AGGREGATED (L2) feeds; 0 for per-order").
+        i = schema_text.index("CREATE TABLE IF NOT EXISTS gma.book_events")
+        anchor = "ORDER BY (symbol, ts_event, provider_seq)\nSETTINGS"
+        j = schema_text.index(anchor, i)
+        out = (schema_text[:j]
+               + "ORDER BY (symbol, ts_event, provider_seq, action, order_id)"
+                 "\nSETTINGS"
+               + schema_text[j + len(anchor):])
+        if out == schema_text:
             raise AssertionError("mutation %r was a no-op" % label)
-        return schema_text[:i] + mutated_stmt + schema_text[j:]
+        return out
     if old_s not in schema_text:
         raise AssertionError("mutation %r has no anchor in the schema" % label)
     out = schema_text.replace(old_s, new_s, 1)
