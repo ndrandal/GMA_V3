@@ -749,7 +749,7 @@ arrow::Status DatabentoAdapter::onMbo(const dbn::MboMsg& m) {
     BookRecord r;
     r.header   = h;
     r.action   = action;
-    r.side     = out;
+    r.side     = (action == BookAction::Update || action == BookAction::Delete) ? (out == Side::Bid ? Side::Ask : Side::Bid) : out;
     r.price    = price;
     r.size     = size;
     r.orderId  = m.orderId;
