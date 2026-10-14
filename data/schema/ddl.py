@@ -255,12 +255,25 @@ def parse_create_table(stmt: str) -> dict:
 
 
 _CODEC_RE = re.compile(r"\bCODEC\s*\(", re.IGNORECASE)
+# DEFAULT / MATERIALIZED / ALIAS / EPHEMERAL all introduce a column expression.
+# Only DEFAULT is permitted by SPEC D2 (it computes nothing about the market —
+# see gma.ingest_windows.updated_at), but the parser recognises all four so that
+# a forbidden one is reported as an expression rather than silently absorbed
+# into the column's type string, where a type comparison would never see it.
+_EXPR_RE = re.compile(r"\b(DEFAULT|MATERIALIZED|ALIAS|EPHEMERAL)\b", re.IGNORECASE)
 
 
 def _parse_column(item: str) -> list:
-    """One column definition -> list of (name, type, codec) triples.
+    """One column definition -> list of (name, type, expr, codec) tuples.
 
-    A list rather than a single triple only because of `Nested`."""
+    `expr` is the normalized `DEFAULT …` / `MATERIALIZED …` clause, or "". It is
+    a separate element rather than part of `type` because a column default is
+    exactly the kind of difference a type comparison cannot see: ClickHouse
+    renders `updated_at DateTime64(3, 'UTC') DEFAULT now64(3)`, and without the
+    default an omitted column silently stores epoch 0 (measured — it is the
+    zero-valued-clock defect gma.ingest_windows was rewritten to eliminate).
+
+    A list rather than a single tuple only because of `Nested`."""
     bits = item.split(None, 1)
     name = bits[0].replace("`", "")
     rest = bits[1].strip() if len(bits) > 1 else ""
@@ -271,6 +284,14 @@ def _parse_column(item: str) -> list:
         cclose = _matching_paren(rest, rest.index("(", cm.end() - 1))
         codec = norm(rest[cm.start():cclose + 1])
         rest = (rest[:cm.start()] + rest[cclose + 1:]).strip()
+
+    # ClickHouse renders `<type> DEFAULT <expr> CODEC(...)`, so the expression is
+    # what is left at the tail once the codec is removed.
+    expr = ""
+    em = _EXPR_RE.search(rest)
+    if em:
+        expr = norm(rest[em.start():])
+        rest = rest[:em.start()].strip()
     ctype = norm(rest)
 
     if ctype.upper().startswith("NESTED("):
@@ -282,9 +303,10 @@ def _parse_column(item: str) -> list:
             # column list, so re-split on the type boundary the normalizer made.
             if not ftype:
                 fname, ftype = re.match(r"([A-Za-z0-9_]+)(.*)", f).groups()
-            out.append((name + "." + fname.strip(), "Array(%s)" % norm(ftype), codec))
+            out.append((name + "." + fname.strip(), "Array(%s)" % norm(ftype),
+                        expr, codec))
         return out
-    return [(name, ctype, codec)]
+    return [(name, ctype, expr, codec)]
 
 
 def read_statements(path: str):
