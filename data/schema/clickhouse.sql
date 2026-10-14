@@ -77,7 +77,8 @@
 --   Databento supplies its own seq, so this path is for feed-simulator and
 --   future providers, not for Databento.
 --
---   ReplacingMergeTree MAKES RE-INGEST IDEMPOTENT (docs §8.6). Bulk ingest
+--   RE-INGEST IS `DROP PARTITION` + RELOAD, NOT DEDUP (docs §8.6, SPEC D5).
+--   Plain MergeTree. ReplacingMergeTree was revision 2 and is REFUSED: Bulk ingest
 --   means re-pulling windows — a gap, a correction, a re-download — WILL
 --   happen. ReplacingMergeTree collapses rows with an equal sort key, and
 --   because Databento's provider_seq is stable across downloads, re-ingesting a
@@ -122,7 +123,7 @@ CREATE TABLE IF NOT EXISTS gma.trades
     trade_id      UInt64                CODEC(ZSTD(1)),
     flags         UInt16                CODEC(ZSTD(1))
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts_event)
 ORDER BY (symbol, ts_event, provider_seq)
 SETTINGS index_granularity = 8192;
@@ -156,7 +157,7 @@ CREATE TABLE IF NOT EXISTS gma.quotes
     ask_ct        UInt32                CODEC(T64, ZSTD(1)),
     flags         UInt16                CODEC(ZSTD(1))
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts_event)
 ORDER BY (symbol, ts_event, provider_seq)
 SETTINGS index_granularity = 8192;
@@ -197,7 +198,7 @@ CREATE TABLE IF NOT EXISTS gma.book_events
     epoch         UInt32                CODEC(DoubleDelta, ZSTD(1)),
     flags         UInt16                CODEC(ZSTD(1))
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts_event)
 -- DISCRIMINATED SORT KEY — see the C12 warning in the header. `action` and
 -- `order_id` separate the several events one DBN message can produce, so
@@ -243,7 +244,7 @@ CREATE TABLE IF NOT EXISTS gma.book_snapshots
         order_count UInt32
     ) CODEC(ZSTD(3))
 )
-ENGINE = ReplacingMergeTree
+ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts_event)
 ORDER BY (symbol, ts_event, provider_seq)
 SETTINGS index_granularity = 1024;   -- snapshots are wide and rare
