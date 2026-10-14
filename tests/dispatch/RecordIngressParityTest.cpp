@@ -72,6 +72,7 @@
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
 
+#include <cctype>
 #include <cstdio>
 #include <memory>
 #include <mutex>
@@ -659,10 +660,26 @@ const std::vector<std::string>& jsonTokens() {
   return t;
 }
 
+// Matches a token only where it STARTS an identifier. Plain substring search
+// was wrong in a way worth recording, because it is the shape of a false
+// positive this gate would otherwise have shipped: `GetUint64` is a substring
+// of `tryGetUint64`, the FieldSource accessor, so RecordFieldSource.hpp
+// "named rapidjson" on its first run. Requiring the preceding character to be
+// a non-identifier one keeps `value.GetUint64()` (preceded by `.`) a hit and
+// `tryGetUint64` (preceded by `y`) a miss.
+bool identStart(const std::string& hay, std::size_t at) {
+  if (at == 0) return true;
+  const char p = hay[at - 1];
+  return !(std::isalnum(static_cast<unsigned char>(p)) || p == '_');
+}
+
 std::vector<std::string> jsonTokensIn(const std::string& scrubbed) {
   std::vector<std::string> found;
   for (const auto& tok : jsonTokens()) {
-    if (scrubbed.find(tok) != std::string::npos) found.push_back(tok);
+    for (std::size_t at = scrubbed.find(tok); at != std::string::npos;
+         at = scrubbed.find(tok, at + 1)) {
+      if (identStart(scrubbed, at)) { found.push_back(tok); break; }
+    }
   }
   return found;
 }
