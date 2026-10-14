@@ -986,11 +986,32 @@ decoder goes wrong. Three mitigations, in the build rather than in a comment:
    spot-checked — a suite that only tests rejection cannot catch a bound that over-rejects a
    now-legal value, which is the bug ENC-1481 shipped and fixed.
 
-A 16-mutation adversarial sweep over the decoder (swapped field offsets, a Cancel that stops
-subtracting, a Fill side flip removed, `bookNeutral` cleared, a 99-byte metadata block, a
-synthesized `provider_seq`, a closed symbology window, an unbounded order map) found **one**
-guard with no test behind it — the metadata-tail check — which is now covered; every other
-mutation was caught.
+**Two independent adversarial sweeps** — one by the implementer, one by a separate session
+that did not write the code — put **42 mutations** through the decoder: swapped field offsets,
+a `Cancel` that stops subtracting, the `Fill` side flip removed and leaked, `bookNeutral`
+cleared, a 99-byte metadata block, a synthesized `provider_seq`, a closed symbology window, a
+no-op eviction that still bumps its counter, zeroed `ts_in_delta` loads, a deleted `Clear`
+erase loop. What they found is worth recording in full, because the mix is the argument for
+doing this at all:
+
+- **One real behavioural bug.** With `Config::fillReducesRestingOrder`, the aggressor-side
+  flip a `Fill` print needs leaked onto the `Update`/`Delete` row the same record emits —
+  putting the two meanings `BookRecord::side` carries into one column, which is precisely what
+  its own comment warned about. Nothing caught it because no test asserted the `side` of a
+  mutation row at all; inverting *every* mutation row's side was green.
+- **A bound asserted by its counter instead of its invariant.** `TheOrderMapIsBounded` checked
+  `evictedOrders > 0`, which a no-op eviction still satisfies.
+- **Two decoded fields no test could reach** (`channel_id`, `ts_in_delta`), so the only
+  signed-32 load path in the decoder was unexercised, and **one unreachable branch** whose
+  comment described behaviour that could not run.
+- **Two comments asserting mechanisms that do not exist** — an epoch in a key that has two
+  members, and a repo-wide `bookNeutral` invariant that is actually two production sites.
+
+All fixed, the bug's test written red before the fix, and every one of the 42 mutations is now
+caught. Note what *survived*: no out-of-bounds read, no overflow, no compaction defect, and
+every vendor layout claim independently confirmed — which is the part of Q14's cost that was
+genuinely feared and did not materialise. What did materialise was in the *mapping* and in the
+*comments*, not in the byte parsing.
 
 **What the DBN files taught us that this document had wrong or missing** is recorded in
 SPEC §5 under Q14: the exact field names and offsets, the per-version metadata layout, and
