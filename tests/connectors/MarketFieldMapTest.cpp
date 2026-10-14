@@ -169,7 +169,7 @@ TEST(MarketFieldMapTest, CustomFieldMapIgnoresUnmappedPayload) {
     {
         Event ev = makeTick("ETH_ISO", {{"lastPrice", 3000.0}, {"volume", 10.0}});
         ev.type = "tick";
-        computer.compute(ev, ctx);
+        computer.computeEvent(ev, ctx);
     }
     EXPECT_FALSE(store.get("ETH_ISO", "lastPrice").has_value())
         << "custom map (price='trade_px') must ignore an unmapped payload";
@@ -180,7 +180,7 @@ TEST(MarketFieldMapTest, CustomFieldMapIgnoresUnmappedPayload) {
     {
         Event ev = makeTick("ETH_ISO", {{"trade_px", 3000.0}});
         ev.type = "tick";
-        computer.compute(ev, ctx);
+        computer.computeEvent(ev, ctx);
     }
     pool.shutdown();
 
@@ -265,7 +265,7 @@ TEST(MarketFieldMapTest, TaDisabledSkipsTAIndicatorWrites) {
     for (int i = 1; i <= 15; ++i) {
         Event ev = makeTick("TA_OFF", {{"lastPrice", 100.0 + i}, {"volume", 10.0}});
         ev.type = "tick";
-        computer.compute(ev, ctx);
+        computer.computeEvent(ev, ctx);
     }
     pool.shutdown();
 

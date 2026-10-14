@@ -205,7 +205,7 @@ TEST(MarketTANumericTest, MarketTickComputerEndToEndSma) {
 
   for (double p : {10.0, 20.0, 30.0, 40.0, 50.0}) {
     Event ev = makeTick("E2E", p);
-    computer.compute(ev, ctx);
+    computer.computeEvent(ev, ctx);
   }
   pool.shutdown();
 
