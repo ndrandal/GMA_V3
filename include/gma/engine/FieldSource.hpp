@@ -85,6 +85,10 @@ public:
   // Hands every NUMERIC field to `sink`, in the source's natural order.
   // Non-numeric fields are skipped, exactly as the pre-ENC-1486 raw-admission
   // loop skipped them.
+  //
+  // THE NAME REFERENCE IS VALID ONLY FOR THE DURATION OF THE CALL. The JSON
+  // source reuses one buffer across members, so a sink that stores the
+  // reference stores a name that is about to change. Copy it if you keep it.
   virtual void forEachNumber(NumericFieldSink& sink) const = 0;
 };
 

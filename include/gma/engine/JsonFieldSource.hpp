@@ -74,12 +74,16 @@ public:
 
   void forEachNumber(NumericFieldSink& sink) const override {
     if (!payload_.IsObject()) return;
+    // ONE reused buffer, not a fresh `std::string` per member. The pre-ENC-1486
+    // loop constructed a `std::string name(it->name.GetString(), ...)` per
+    // member per tick — the cost docs/data-layer.md §C6 names — and the sink
+    // copies the name anyway when it admits it, so constructing a second one
+    // here would be pure waste. `assign` reuses the capacity, so a tick costs
+    // at most one allocation for names rather than one per member.
+    std::string name;
     for (auto it = payload_.MemberBegin(); it != payload_.MemberEnd(); ++it) {
       if (!it->name.IsString() || !it->value.IsNumber()) continue;
-      // The per-member std::string the record path exists to remove
-      // (docs/data-layer.md §C6). Kept here because the sink contract is
-      // `const std::string&` and because this path already paid for it.
-      const std::string name(it->name.GetString(), it->name.GetStringLength());
+      name.assign(it->name.GetString(), it->name.GetStringLength());
       sink.field(name, it->value.GetDouble());
     }
   }
