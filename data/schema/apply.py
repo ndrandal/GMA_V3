@@ -193,10 +193,16 @@ def cmd_apply(args):
         print("could not run: 0 statements parsed from %s" % SCHEMA, file=sys.stderr)
         return 2
     print("  " + describe_target(args.url, args.how, args.offset))
-    print("server:  %s" % ch("SELECT version() FORMAT TSVRaw", args.url).strip())
+    # The offset guard runs BEFORE the first network call, on purpose. A
+    # destructive-intent check that only fires after a successful connect is not
+    # a guard — point it at an unreachable endpoint and it reports "connection
+    # refused" without ever having had an opinion about whether you meant that
+    # endpoint at all.
     if args.fresh:
         guard_fresh(args.url, args.how, args.offset, args.offset_was_set,
                     args.explicit)
+    print("server:  %s" % ch("SELECT version() FORMAT TSVRaw", args.url).strip())
+    if args.fresh:
         guard_fresh_rows(args.url, args.yes_destroy_rows)
         print("--fresh: DROP DATABASE gma on %s  (destroys every L1 row)"
               % args.url)
