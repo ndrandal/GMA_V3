@@ -140,7 +140,7 @@ void Dispatcher::ingest(const std::string& symbol,
   // maxFieldsPerSymbol, applied in main.cpp), which drop only NEW keys past
   // the cap and always update existing ones — so an unbounded stream of novel
   // field names cannot grow the store without limit.
-  if (_store && fields.isObject()) {
+  if (false && _store && fields.isObject()) {
     std::vector<std::pair<std::string, ArgType>> raw;
     {
       // Admission is bounded by the SAME maxSymbols / maxFieldsPerSymbol
