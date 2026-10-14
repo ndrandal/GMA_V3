@@ -2,10 +2,25 @@
 -- GMA_V3 canonical market-data schema — ClickHouse L1 DDL
 --
 -- Design: specs/2026-10-14-gma-data-layer/SPEC.md (D2, D4, D5, D6, D7, D8, D11)
--- and docs/data-layer.md §8 (revision 3). Column names and types mirror the
--- engine-facing PODs in `namespace gma::data` one for one — today
--- data/include/gma/data/Schema.hpp, moving to include/gma/data/Record.hpp with
--- ENC-1481.
+-- and docs/data-layer.md §8 (revision 3).
+--
+-- RELATIONSHIP TO THE C++ PODs, STATED EXACTLY, BECAUSE IT IS NOT ONE-FOR-ONE.
+-- The engine-facing PODs in `namespace gma::data` (today
+-- data/include/gma/data/Schema.hpp; moving to include/gma/data/Record.hpp with
+-- ENC-1481) are a SUBSET of these columns, not a mirror of them:
+--
+--   * every POD field has a column here, with the same name in snake_case and a
+--     type that round-trips without loss;
+--   * these tables additionally carry STORAGE AND PROVENANCE columns no POD has
+--     — `instrument_id` on trades / book_events / book_snapshots / gaps (D7:
+--     retained provenance, deliberately not on the engine's value path), and
+--     every column of symbology, ingest_windows and gaps, none of which the
+--     engine ever sees;
+--   * the one value the two MUST agree on numerically is the price scale —
+--     see the next decision.
+--
+-- So: a POD field missing a column is a bug; a column with no POD field is
+-- expected and is the normal case for anything the engine does not compute on.
 --
 -- Apply it with data/schema/apply.sh. Every statement is IF NOT EXISTS, so
 -- applying it twice is a no-op; apply.sh proves that by doing exactly that.
@@ -87,9 +102,24 @@
 --
 --   PARTITION BY toYYYYMMDD(ts_event) — day partitions, because the re-ingest
 --   mechanism is DROP PARTITION (see below) and a trading day is the unit a
---   provider pull comes in. The two metadata tables (symbology and
---   ingest_windows) are unpartitioned: they are tiny and have no event time,
---   and gaps partitions on ts_detected because that is the only time it has.
+--   provider pull comes in. `gaps` partitions on toYYYYMMDD(ts_from), i.e. the
+--   day of the HOLE, so that the same DROP PARTITION reaches it; see that
+--   table for why the detection day was wrong. The two metadata tables
+--   (symbology and ingest_windows) are unpartitioned: they are tiny and have
+--   no event time of their own.
+--
+--   ⚠ AND THE PARTITION IS DAY-ONLY WHILE COMPLETENESS IS PER SYMBOL, which
+--   makes a DROP PARTITION hit symbols nobody asked to re-ingest. Dropping day
+--   D to reload symbol A also deletes symbol B's rows for D, and B's
+--   completeness row still says state=1 — so isComplete(B, D) answers true over
+--   an empty partition. The full invariant, and who owns it, is written at
+--   gma.ingest_windows; docs §8.6 records the reload COST of day-granular
+--   partitions but not this invalidation. Moot at one symbol, which is the
+--   reason to write it down now instead of meeting it at the universe. The
+--   finer-grained alternative docs §8.6 names (DELETE WHERE symbol = … AND
+--   ts_event IN range, then insert) avoids the collateral damage entirely and
+--   is the right move once per-symbol re-pulls are common; it is not the
+--   committed mechanism today because at one symbol it buys nothing.
 --
 --   CODECS (docs §8.10). DoubleDelta on monotonic columns (ts_event, ts_recv,
 --   provider_seq): second-order differences of a near-linear series are near
