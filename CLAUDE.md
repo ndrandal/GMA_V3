@@ -119,7 +119,12 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture including 
   from source by `data/cmake/GmaDataArrow.cmake`. A cold configure downloads a 17 MB
   archive (2m33s on this link) and the build costs 45s Debug / 63s Release on 16 cores;
   measured numbers and the full `ARROW_*=OFF` rationale are in `docs/data-layer.md` §15.1.
-  `-DGMA_BUILD_DATA=OFF` skips all of it.
+  **`GMA_BUILD_DATA` defaults to `GMA_BUILD_TESTS`**, so a bare
+  `cmake -B build -DCMAKE_BUILD_TYPE=Release` fetches no Arrow at all and still builds
+  `gma_server`, while `-DGMA_BUILD_TESTS=ON` builds and tests the data layer. An explicit
+  `-DGMA_BUILD_DATA=ON|OFF` always wins and the configure says which way it resolved.
+  `-DGMA_DATA_ARROW_FORCE_FETCH=ON` skips `find_package` when an installed Arrow is
+  present but unusable.
 - **Boost.Asio / Beast** — networking + WebSocket
 - **RapidJSON** — JSON parsing and validation
 - **GoogleTest** — unit + integration tests
@@ -131,8 +136,12 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture including 
 - Engine CMake target (`gma_engine`) must not depend on any connector headers
 - **`gma_engine` must not depend on Arrow, the ClickHouse client, or `gma_data` (ENC-1481).**
   `gma_data` depends on `gma_engine`, never the reverse. This is a shipping constraint, not
-  taste: the data-layer SPEC's D14 client profile is live-only and omits the library, so
-  `cmake -DGMA_BUILD_DATA=OFF` must build and link `gma_server` with no Arrow anywhere.
+  taste — and the constraint is about **`gma_engine`**, not about the product. The
+  data-layer SPEC's D14 client profile reads *"live-only **or** reads a central L1 over the
+  wire with no local store"*: the **live-only** variant omits the library, so
+  `cmake -DGMA_BUILD_DATA=OFF` must build and link `gma_server` with no Arrow anywhere,
+  while the over-the-wire variant needs Arrow IPC and therefore does ship `gma_data`. Don't
+  shorten that to "the client profile omits the library" — that is true of one variant.
   **The engine-facing PODs are the one thing that crosses**, and they cross deliberately:
   `include/gma/data/Record.hpp` and `include/gma/data/SymbolTable.hpp` are in `gma_engine`,
   Arrow-free, because `Dispatcher::onRecord` is engine code and has to name a record. Every
@@ -140,7 +149,11 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture including 
   asserted by `tools/check_engine_isolation.py` as the ctest cases `gma_engine_isolation`
   (four checks, refuses to pass on vacuous input) and `gma_engine_isolation_selftest` (runs
   each predicate against an input that violates it). Run them before claiming a layering
-  change is safe; `--selftest` needs no build.
+  change is safe; `--selftest` needs no build. **Checks C and D walk the transitive link
+  closure**, because `gma_server` links only the `gma` umbrella: one
+  `target_link_libraries(gma INTERFACE gma_data)` breaks the live-only build while both
+  roots' own link properties stay clean. CMake emits a `link.<target>` manifest row per
+  first-party target — add one when you add a library target.
 - Namespace: `gma::` for public types, `gma::engine::` for engine contracts, `gma::market::` / `gma::synthetic::` for connector code
 - Globals: `gma::gThreadPool` (shared_ptr<ThreadPool>, set up in main.cpp)
 - Runtime config: INI-style key=value files (see `src/util/gma.conf`)

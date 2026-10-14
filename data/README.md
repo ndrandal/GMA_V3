@@ -35,9 +35,15 @@ operator, which D1 forbids outright.
 
 `gma_engine` depends on **neither** `gma_data` nor any connector, and **Arrow and the
 ClickHouse client must never become engine dependencies** (`docs/data-layer.md` §4 rule 6,
-SPEC D14). That is a shipping constraint, not a preference: SPEC D14's **client deployment
-profile is live-only** and omits this library entirely, so `cmake -DGMA_BUILD_DATA=OFF`
-must build and link `gma_server` with no Arrow anywhere. It does, and that is checked.
+SPEC D14). That is a shipping constraint, not a preference. Read D14 as it is written,
+though: the client profile is **"live-only *or* reads a central L1 over the wire with no
+local store"** — two variants, not one. The **live-only** variant omits this library
+entirely, so `cmake -DGMA_BUILD_DATA=OFF` must build and link `gma_server` with no Arrow
+anywhere; it does, and that is checked. The **over-the-wire** variant needs Arrow IPC to
+read `FORMAT ArrowStream`, so it *does* ship `gma_data` — "the client profile omits this
+library" is true of one variant and not of D14. The invariant is unaffected either way,
+because it constrains **`gma_engine`**, not the product: `gma_data` is linked into a
+deployment or it is not, and `gma_engine` must build in both cases.
 
 **The engine-facing PODs are deliberately NOT in this directory.** `RecordHeader`,
 `TickRecord`, `BookRecord` and `SnapshotRecord` live in
@@ -59,10 +65,18 @@ code" but:
 that, as the ctest cases `gma_engine_isolation` and `gma_engine_isolation_selftest`. It
 checks four things — no forbidden include in engine code or in the composition root, no
 `data/`-only or connector header reached from the engine, `gma_engine`'s in-repo include
-path is `include/` only, and neither `gma_engine` nor `gma_server` links a data-layer
-library — refuses to report a pass on vacuous input, and ships a `--selftest` that runs
-each predicate against an input that violates it. Every way of breaking this invariant
-otherwise still compiles and still passes every existing test.
+path is `include/` only, and no data-layer library anywhere in `gma_engine`'s or
+`gma_server`'s **transitive** link closure — refuses to report a pass on vacuous input, and
+ships a `--selftest` that runs each predicate against an input that violates it. Every way
+of breaking this invariant otherwise still compiles and still passes every existing test.
+
+The last of the four is transitive because the direct property is the wrong place to look:
+`gma_server` links the `gma` umbrella and nothing else, so one
+`target_link_libraries(gma INTERFACE gma_data)` would make `GMA_BUILD_DATA=OFF` unlinkable
+while `gma_engine`'s and `gma_server`'s own link libraries stayed spotless. CMake emits one
+`link.<target>` row per first-party target and the checker walks the graph. `gma_data`'s own
+row is the gate's **positive control**: its closure must trip a forbidden pattern (it links
+`gma::arrow`), or the patterns match nothing in this build and a clean verdict means nothing.
 
 ## What is real and what is still a sketch
 
@@ -102,17 +116,33 @@ the largest single dependency in the design and existed only to query Parquet (S
 
 ## Build
 
+**`GMA_BUILD_DATA` defaults to `GMA_BUILD_TESTS`.** With tests on, `gma_data`,
+`gma_data_tests` and both engine-isolation cases are all built and run — nothing is
+silently skipped where tests run, which a fixed default could not give you in both
+directions. With tests off, a bare Release configure fetches **no** Arrow and still builds
+`gma_server`, so the quickstart works offline. An explicit `-DGMA_BUILD_DATA=ON|OFF` always
+wins, and the configure prints which way it resolved and why.
+
 ```bash
-# Default: gma_data is built (Arrow is found or fetched).
+# Tests on => gma_data on by default (Arrow is found or fetched).
 cmake -B build -DCMAKE_BUILD_TYPE=Debug -DGMA_BUILD_TESTS=ON
 cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 
-# SPEC D14's live-only client profile: no local store, no Arrow fetched at all.
+# The quickstart: tests off => gma_data off by default => no Arrow download.
+cmake -B build-release -DCMAKE_BUILD_TYPE=Release
+
+# SPEC D14's live-only client variant, with tests: no local store, no Arrow at all.
 cmake -B build-liveonly -DCMAKE_BUILD_TYPE=Debug -DGMA_BUILD_TESTS=ON -DGMA_BUILD_DATA=OFF
+
+# The data layer without the engine test suite.
+cmake -B build-dataonly -DCMAKE_BUILD_TYPE=Debug -DGMA_BUILD_DATA=ON
 
 # Point the Arrow fallback at an already-downloaded archive instead of the network.
 cmake -B build -DGMA_DATA_ARROW_URL=/path/to/apache-arrow-23.0.1.tar.gz
+
+# Ignore an installed-but-unusable Arrow and build it from source regardless.
+cmake -B build -DGMA_BUILD_DATA=ON -DGMA_DATA_ARROW_FORCE_FETCH=ON
 ```
 
 Arrow's measured cost on this toolchain is in `docs/data-layer.md` §15 — it is far cheaper

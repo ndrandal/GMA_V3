@@ -891,6 +891,16 @@ The download dominates, and it is a one-time cost per build tree; a warm tree pa
 it. Debug `libarrow.a` is an order of magnitude larger than Release because it is `-O0`
 with full debug info — size the client profile off the Release row.
 
+**Who pays it: `GMA_BUILD_DATA` defaults to `GMA_BUILD_TESTS`.** `-DGMA_BUILD_TESTS=ON` —
+the acceptance command and every gate configuration — builds `gma_data` and runs both
+engine-isolation cases plus `gma_data_tests`, so nothing is silently skipped where tests
+run. A bare `cmake -B build -DCMAKE_BUILD_TYPE=Release` fetches **nothing** and still
+builds `gma_server`, which is what the documented quickstart needs offline (before this
+library existed, a default configure fetched nothing at all — googletest sits behind
+`GMA_BUILD_TESTS=OFF` too — and a fixed `GMA_BUILD_DATA=ON` had made that configure
+hard-fail at the download behind a firewall). An explicit `-DGMA_BUILD_DATA=ON|OFF` always
+wins, and the configure prints which way it resolved and why.
+
 **What is off, and which entries are decisions rather than tweaks.** Arrow 23 already
 defaults most of this off, but every one is set explicitly, because a default is something
 a future release is free to change and a decision is not:
@@ -925,6 +935,10 @@ one. `pkg-config --modversion arrow` fails and no `/usr/lib64/cmake/arrow` exist
 unrelated `arrows` package is wrong), but installing it needs a sudo password this
 environment does not have. `find_package(Arrow CONFIG QUIET)` is tried first and kept
 working for machines that have one; it is **untested here** for that reason.
+`-DGMA_DATA_ARROW_FORCE_FETCH=ON` skips it — the escape hatch for an installed Arrow that
+is present but unusable (a config package exporting target names outside the candidate
+list makes the module a `FATAL_ERROR`, and that error used to name this flag before it
+existed).
 
 ---
 

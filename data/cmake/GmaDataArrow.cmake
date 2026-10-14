@@ -17,6 +17,8 @@
 #      only the unrelated `arrows` package is wrong), installing it needs a
 #      sudo password this environment does not have. So route 1 is untested
 #      here and route 2 is what the measured number in SPEC §5 describes.
+#      `-DGMA_DATA_ARROW_FORCE_FETCH=ON` skips it, which is the only way past
+#      an installed-but-unusable Arrow.
 #
 #   2. FetchContent of the Apache source release, trimmed hard.
 #
@@ -64,10 +66,27 @@ option(GMA_DATA_ARROW_IPC_CODECS
   "Build Arrow's LZ4 and ZSTD codecs. ON because ClickHouse's ArrowStream output compresses with lz4_frame by DEFAULT (output_format_arrow_compression_method), so a codec-free Arrow cannot read ENC-1485's stream at all without a per-query SETTINGS override."
   ON)
 
+# Skips route 1 entirely. This exists because route 1 can fail in a way the
+# user cannot otherwise get past: an installed Arrow whose config package
+# exports a target name outside the candidate list below makes this file a
+# FATAL_ERROR, and before this option was implemented that error named a flag
+# that did not exist anywhere in the repo. It is also the honest way to ignore
+# a too-old or misconfigured system Arrow without uninstalling it.
+option(GMA_DATA_ARROW_FORCE_FETCH
+  "Skip find_package(Arrow) and always build Arrow from source. Use when an installed Arrow is unusable (wrong target names, wrong version) — the source build is the measured path (docs/data-layer.md §15.1)."
+  OFF)
+
 # ---------------------------------------------------------------------------
 # Route 1 — an installed Arrow.
 # ---------------------------------------------------------------------------
-find_package(Arrow CONFIG QUIET)
+if (GMA_DATA_ARROW_FORCE_FETCH)
+  message(STATUS
+    "gma_data: GMA_DATA_ARROW_FORCE_FETCH=ON — skipping find_package(Arrow); "
+    "Arrow ${GMA_DATA_ARROW_VERSION} will be built from source.")
+  set(Arrow_FOUND FALSE)
+else()
+  find_package(Arrow CONFIG QUIET)
+endif()
 
 if (Arrow_FOUND)
   set(_gma_arrow_impl "")
@@ -84,10 +103,10 @@ if (Arrow_FOUND)
       "Refusing to guess a target name — set -DGMA_DATA_ARROW_FORCE_FETCH=ON to "
       "build Arrow from source instead.")
   endif()
-  # GLOBAL: an IMPORTED target is directory-scoped by default, and this module is
-# included from data/, so without it `gma::arrow` would be invisible to any
-# consumer defined at the root — including a future benchmark target.
-add_library(gma::arrow INTERFACE IMPORTED GLOBAL)
+  # GLOBAL: an IMPORTED target is directory-scoped by default, and this module
+  # is included from data/, so without it `gma::arrow` would be invisible to
+  # any consumer defined at the root — including a future benchmark target.
+  add_library(gma::arrow INTERFACE IMPORTED GLOBAL)
   target_link_libraries(gma::arrow INTERFACE ${_gma_arrow_impl})
   set(GMA_DATA_ARROW_PROVENANCE "system (find_package, ${ARROW_VERSION}, target ${_gma_arrow_impl})"
       CACHE INTERNAL "" FORCE)

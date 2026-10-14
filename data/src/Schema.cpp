@@ -189,12 +189,62 @@ arrow::Result<const ArrayType*> column(const arrow::RecordBatch& batch,
   return typed;
 }
 
+// ---------------------------------------------------------------------------
+// Enum domain checks
+// ---------------------------------------------------------------------------
+//
+// The column TYPE for `action`, `side` and `aggressor` is uint8, which is
+// legal for every one of the 256 values a byte can hold — so the schema check
+// above cannot catch an out-of-domain one, and `static_cast<Side>(7)` is a
+// `Side` matching no enumerator. That value then reaches §4.6's dispatch onto
+// OrderBookManager::onAdd/onUpdate/onDelete/onReset, hits no case, and the
+// event is SILENTLY DROPPED while the decode reported OK. A batch arriving
+// over `FORMAT ArrowStream` (ENC-1485's transport) is not under our control,
+// so this is a wire input, not an internal invariant.
+//
+// The bounds mirror include/gma/data/Record.hpp. Adding an enumerator there
+// means raising the bound here; `EnumDomainBoundsMatchRecordHpp` in
+// data/tests/SchemaRoundTripTest.cpp reddens if the two drift.
+inline constexpr std::uint8_t kMaxSideValue       = 1;  // Side::Ask
+inline constexpr std::uint8_t kMaxAggressorValue  = 2;  // Aggressor::Sell
+inline constexpr std::uint8_t kMaxBookActionValue = 5;  // BookAction::Clear
+
+template <typename Enum>
+arrow::Result<Enum> enumAt(const arrow::UInt8Array& column, std::int64_t row,
+                           std::uint8_t maxValue, const char* what) {
+  const std::uint8_t raw = column.Value(row);
+  if (raw > maxValue) {
+    return arrow::Status::Invalid(
+        "gma::data: row ", row, " column '", what, "' holds ",
+        static_cast<unsigned>(raw), ", which is outside the declared domain "
+        "0..", static_cast<unsigned>(maxValue),
+        " — refusing to produce a record whose enum matches no enumerator "
+        "(it would be dropped silently by the dispatch downstream)");
+  }
+  return static_cast<Enum>(raw);
+}
+
 // Refuses a batch whose schema is not the one asked for. Metadata is excluded
 // from the comparison on purpose: the version lives there and is checked
 // separately, with a message that says so.
-arrow::Status requireSchema(const arrow::RecordBatch& batch,
-                            const std::shared_ptr<arrow::Schema>& expected,
-                            const char* what) {
+//
+// It also refuses a batch that is merely INTERNALLY INCONSISTENT, which is
+// where the out-of-bounds reads were. `arrow::RecordBatch::Make` does not
+// validate, and the IPC reader does not run ValidateFull, so a batch whose
+// num_rows exceeds a column's length is constructible — and every decoder
+// below trusts num_rows as its loop bound, which turns a truncated or corrupt
+// ArrowStream into `price->Value(i)` reading past the Arrow buffer. That is an
+// out-of-bounds read, not a Status, so it is checked before the first Value()
+// call rather than after. Validate() is O(columns), not O(rows).
+//
+// Nulls are refused for the same reason one level up: every field in every
+// canonical schema is declared non-nullable (see Schema.hpp), so a column with
+// a null is not a batch this codec has a representation for — TickRecord has
+// no "absent" state for a price. Validate() checks lengths and types but not
+// nullability against the schema, so this is a separate loop.
+arrow::Status requireCanonicalBatch(const arrow::RecordBatch& batch,
+                                    const std::shared_ptr<arrow::Schema>& expected,
+                                    const char* what) {
   if (expected == nullptr) {
     return arrow::Status::Invalid("gma::data: no canonical schema for ", what);
   }
@@ -210,6 +260,17 @@ arrow::Status requireSchema(const arrow::RecordBatch& batch,
         "gma::data: batch declares ", kSchemaVersionKey, "=", version,
         " but this build understands ", kSchemaVersion,
         " — refusing to guess a column layout");
+  }
+  ARROW_RETURN_NOT_OK(batch.Validate());
+  for (int c = 0; c < batch.num_columns(); ++c) {
+    const auto& col = *batch.column(c);
+    if (col.null_count() != 0) {
+      return arrow::Status::Invalid(
+          "gma::data: ", what, " column '", batch.schema()->field(c)->name(),
+          "' holds ", col.null_count(),
+          " null(s), but every column of every canonical schema is declared "
+          "non-nullable and the PODs have no absent state");
+    }
   }
   return arrow::Status::OK();
 }
@@ -562,8 +623,9 @@ arrow::Status decodeTicks(const arrow::RecordBatch& batch, RecordKind kind,
         "gma::data: decodeTicks handles Trade and Quote only; "
         "book kinds go through decodeBookEvents / decodeBookSnapshots");
   }
-  ARROW_RETURN_NOT_OK(requireSchema(batch, schemaFor(kind),
-                                    kind == RecordKind::Trade ? "trades" : "quotes"));
+  ARROW_RETURN_NOT_OK(requireCanonicalBatch(
+      batch, schemaFor(kind),
+      kind == RecordKind::Trade ? "trades" : "quotes"));
   HeaderColumns hdr;
   ARROW_RETURN_NOT_OK(hdr.bind(batch, symbols, venues));
 
@@ -605,7 +667,9 @@ arrow::Status decodeTicks(const arrow::RecordBatch& batch, RecordKind kind,
     if (trades) {
       r.price = price->Value(i);
       r.size = size->Value(i);
-      r.aggressor = static_cast<Aggressor>(aggressor->Value(i));
+      ARROW_ASSIGN_OR_RAISE(r.aggressor,
+                            enumAt<Aggressor>(*aggressor, i,
+                                              kMaxAggressorValue, "aggressor"));
       r.bookNeutral = bookNeutral->Value(i);
       r.tradeId = tradeId->Value(i);
     } else {
@@ -625,7 +689,7 @@ arrow::Status decodeTicks(const arrow::RecordBatch& batch, RecordKind kind,
 arrow::Status decodeBookEvents(const arrow::RecordBatch& batch,
                                SymbolTable& symbols, SymbolTable& venues,
                                std::vector<BookRecord>& out) {
-  ARROW_RETURN_NOT_OK(requireSchema(batch, bookEventsSchema(), "book_events"));
+  ARROW_RETURN_NOT_OK(requireCanonicalBatch(batch, bookEventsSchema(), "book_events"));
   HeaderColumns hdr;
   ARROW_RETURN_NOT_OK(hdr.bind(batch, symbols, venues));
 
@@ -643,8 +707,11 @@ arrow::Status decodeBookEvents(const arrow::RecordBatch& batch,
   for (std::int64_t i = 0; i < batch.num_rows(); ++i) {
     BookRecord r;
     ARROW_ASSIGN_OR_RAISE(r.header, hdr.at(i));
-    r.action = static_cast<BookAction>(action->Value(i));
-    r.side = static_cast<Side>(side->Value(i));
+    ARROW_ASSIGN_OR_RAISE(r.action,
+                          enumAt<BookAction>(*action, i, kMaxBookActionValue,
+                                             "action"));
+    ARROW_ASSIGN_OR_RAISE(r.side,
+                          enumAt<Side>(*side, i, kMaxSideValue, "side"));
     r.price = price->Value(i);
     r.size = size->Value(i);
     r.orderId = orderId->Value(i);
@@ -660,7 +727,7 @@ arrow::Status decodeBookEvents(const arrow::RecordBatch& batch,
 arrow::Status decodeBookSnapshots(const arrow::RecordBatch& batch,
                                   SymbolTable& symbols, SymbolTable& venues,
                                   std::vector<SnapshotRecord>& out) {
-  ARROW_RETURN_NOT_OK(requireSchema(batch, bookSnapshotsSchema(), "book_snapshots"));
+  ARROW_RETURN_NOT_OK(requireCanonicalBatch(batch, bookSnapshotsSchema(), "book_snapshots"));
   HeaderColumns hdr;
   ARROW_RETURN_NOT_OK(hdr.bind(batch, symbols, venues));
 
@@ -675,7 +742,8 @@ arrow::Status decodeBookSnapshots(const arrow::RecordBatch& batch,
     SnapshotRecord r;
     ARROW_ASSIGN_OR_RAISE(r.header, hdr.at(i));
     r.snapshotSeq = seq->Value(i);
-    r.level.side = static_cast<Side>(side->Value(i));
+    ARROW_ASSIGN_OR_RAISE(r.level.side,
+                          enumAt<Side>(*side, i, kMaxSideValue, "side"));
     r.level.price = price->Value(i);
     r.level.size = size->Value(i);
     r.level.orderCount = count->Value(i);

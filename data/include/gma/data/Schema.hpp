@@ -22,10 +22,12 @@
 //     this design explicitly does not take on.
 //
 // THIS HEADER IS WHERE ARROW STOPS. It is reachable only from `gma_data`;
-// `gma_engine` neither includes it nor links the library (SPEC D14 — a
-// live-only deployment profile omits `gma_data` entirely). The invariant is
-// asserted at build time by `tools/check_engine_isolation.py`, run as the
-// ctest case `gma_engine_isolation`.
+// `gma_engine` neither includes it nor links the library (SPEC D14 — the
+// live-only variant of the client profile omits `gma_data` entirely and must
+// still link; D14's other client variant reads a central L1 over the wire and
+// does need this header). The invariant is asserted at build time by
+// `tools/check_engine_isolation.py`, run as the ctest case
+// `gma_engine_isolation`.
 //
 // WHAT IS NOT HERE: the shim's planner, the SQL lint, transport, the DBN
 // adapter and `Dispatcher::onRecord`. Those are ENC-1482 / ENC-1485 /

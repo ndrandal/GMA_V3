@@ -18,9 +18,12 @@
 
 #include <arrow/array/array_base.h>
 #include <arrow/array/array_dict.h>
+#include <arrow/array/builder_primitive.h>
+#include <arrow/ipc/options.h>
 #include <arrow/ipc/reader.h>
 #include <arrow/ipc/writer.h>
 #include <arrow/io/memory.h>
+#include <arrow/util/compression.h>
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
@@ -28,6 +31,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -207,6 +212,58 @@ std::vector<SnapshotRecord> snapshotFixtures(const Tables& t) {
   return {a, b, c};
 }
 
+// --- batch surgery ---------------------------------------------------------
+//
+// The checks below need a batch whose COLUMN TYPES are canonical and whose
+// CONTENT is not: an out-of-domain enum byte, a null in a non-nullable column,
+// a num_rows that lies. None of those is reachable through the encoder — that
+// is the point, they model a batch arriving over ENC-1485's `FORMAT
+// ArrowStream` from something this codec does not control — so they are built
+// by replacing one column of a legally encoded batch.
+
+std::shared_ptr<arrow::RecordBatch> withColumnReplaced(
+    const arrow::RecordBatch& batch, const char* name,
+    const std::shared_ptr<arrow::Array>& replacement) {
+  const int idx = batch.schema()->GetFieldIndex(name);
+  EXPECT_GE(idx, 0) << "no column named " << name;
+  auto cols = batch.columns();
+  cols[static_cast<std::size_t>(idx)] = replacement;
+  return arrow::RecordBatch::Make(batch.schema(), batch.num_rows(), cols);
+}
+
+std::shared_ptr<arrow::Array> uint8Column(std::initializer_list<int> values) {
+  arrow::UInt8Builder b;
+  for (const int v : values) {
+    EXPECT_TRUE(b.Append(static_cast<std::uint8_t>(v)).ok());
+  }
+  std::shared_ptr<arrow::Array> out;
+  EXPECT_TRUE(b.Finish(&out).ok());
+  return out;
+}
+
+std::shared_ptr<arrow::Array> int64Column(std::initializer_list<std::int64_t> values) {
+  arrow::Int64Builder b;
+  for (const std::int64_t v : values) {
+    EXPECT_TRUE(b.Append(v).ok());
+  }
+  std::shared_ptr<arrow::Array> out;
+  EXPECT_TRUE(b.Finish(&out).ok());
+  return out;
+}
+
+// An int64 column with a null in the middle. `price` is declared non-nullable,
+// so this is not a batch the PODs have a representation for — and an unchecked
+// decode reads Value(i) on the null slot and gets a plausible zero.
+std::shared_ptr<arrow::Array> int64ColumnWithANull() {
+  arrow::Int64Builder b;
+  EXPECT_TRUE(b.Append(1).ok());
+  EXPECT_TRUE(b.AppendNull().ok());
+  EXPECT_TRUE(b.Append(3).ok());
+  std::shared_ptr<arrow::Array> out;
+  EXPECT_TRUE(b.Finish(&out).ok());
+  return out;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -262,8 +319,8 @@ TEST(SchemaTest, SchemaForCoversEveryKindAndSchemasAreStable) {
 
 TEST(SchemaTest, TheThreeTablesAreDistinct) {
   // A union table was explicitly rejected (docs/data-layer.md §8.4); if two of
-  // these ever compared equal, requireSchema() could not tell them apart and
-  // decoding a book batch as trades would read `action` as a price.
+  // these ever compared equal, requireCanonicalBatch() could not tell them
+  // apart and decoding a book batch as trades would read `action` as a price.
   EXPECT_FALSE(tradesSchema()->Equals(*bookEventsSchema()));
   EXPECT_FALSE(tradesSchema()->Equals(*quotesSchema()));
   EXPECT_FALSE(bookEventsSchema()->Equals(*bookSnapshotsSchema()));
@@ -585,41 +642,333 @@ TEST(CodecRefusalTest, AnUnknownSchemaVersionIsRefused) {
 // IPC — the only reason ARROW_IPC is ON (ENC-1485 measures FORMAT ArrowStream)
 // ---------------------------------------------------------------------------
 
-TEST(IpcTest, EachTableSurvivesAnIpcStreamRoundTrip) {
+namespace {
+
+// One Arrow IPC stream, written and read back. `compression` is
+// UNCOMPRESSED for the plain stream and a real codec otherwise —
+// `Codec::Create` fails outright when the codec was not built, so a codec case
+// here is a genuine assertion about the build and not about Arrow's enum.
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> ipcRoundTrip(
+    const arrow::RecordBatch& batch, arrow::Compression::type compression) {
+  auto options = arrow::ipc::IpcWriteOptions::Defaults();
+  if (compression != arrow::Compression::UNCOMPRESSED) {
+    ARROW_ASSIGN_OR_RAISE(auto codec, arrow::util::Codec::Create(compression));
+    options.codec = std::shared_ptr<arrow::util::Codec>(std::move(codec));
+  }
+  ARROW_ASSIGN_OR_RAISE(auto sink, arrow::io::BufferOutputStream::Create());
+  ARROW_ASSIGN_OR_RAISE(
+      auto writer, arrow::ipc::MakeStreamWriter(sink, batch.schema(), options));
+  ARROW_RETURN_NOT_OK(writer->WriteRecordBatch(batch));
+  ARROW_RETURN_NOT_OK(writer->Close());
+  ARROW_ASSIGN_OR_RAISE(auto buffer, sink->Finish());
+
+  auto source = std::make_shared<arrow::io::BufferReader>(buffer);
+  ARROW_ASSIGN_OR_RAISE(auto reader,
+                        arrow::ipc::RecordBatchStreamReader::Open(source));
+  // The schema metadata — and therefore kSchemaVersionKey — must survive the
+  // stream, or requireCanonicalBatch() would reject every batch that came
+  // over HTTP.
+  if (schemaVersionOf(*reader->schema()) != kSchemaVersion) {
+    return arrow::Status::Invalid(
+        "gma.schema_version did not survive the IPC stream (got ",
+        schemaVersionOf(*reader->schema()), ")");
+  }
+  std::shared_ptr<arrow::RecordBatch> got;
+  ARROW_RETURN_NOT_OK(reader->ReadNext(&got));
+  if (got == nullptr) {
+    return arrow::Status::Invalid("the IPC stream held no record batch");
+  }
+  return got;
+}
+
+// Encode -> stream -> decode, for one table. The header and both dictionary
+// columns are checked here for every table; `compare` adds that table's
+// payload fields.
+template <typename Record, typename Encode, typename Decode, typename Compare>
+void expectStreamRoundTrip(const Tables& t, const std::vector<Record>& in,
+                           arrow::Compression::type compression,
+                           Encode encode, Decode decode, Compare compare) {
+  auto batch = encode(in);
+  ASSERT_TRUE(batch.ok()) << batch.status().ToString();
+  auto got = ipcRoundTrip(**batch, compression);
+  ASSERT_TRUE(got.ok()) << got.status().ToString();
+
+  SymbolTable symbols, venues;
+  std::vector<Record> out;
+  const auto st = decode(**got, symbols, venues, out);
+  ASSERT_TRUE(st.ok()) << st.ToString();
+  ASSERT_EQ(out.size(), in.size());
+  for (std::size_t i = 0; i < in.size(); ++i) {
+    SCOPED_TRACE("row " + std::to_string(i));
+    // The dictionary columns are the part most likely to break in a stream:
+    // the index widths differ between the two (int32 for symbol, int16 for
+    // venue) and the dictionary travels as its own message ahead of the
+    // record batch.
+    EXPECT_EQ(symbols.name(out[i].header.symbolId),
+              t.symbols.name(in[i].header.symbolId));
+    EXPECT_EQ(venues.name(out[i].header.venueId),
+              t.venues.name(in[i].header.venueId));
+    EXPECT_EQ(out[i].header.tsEventNs, in[i].header.tsEventNs);
+    EXPECT_EQ(out[i].header.providerSeq, in[i].header.providerSeq);
+    EXPECT_EQ(out[i].header.instrumentId, in[i].header.instrumentId);
+    compare(out[i], in[i]);
+  }
+}
+
+}  // namespace
+
+// ALL FOUR TABLES, AND COMPRESSED AS WELL AS PLAIN. This used to exercise
+// `encodeBookEvents` alone under the name "EachTable", so trades, quotes and
+// snapshots had no IPC coverage at all — a regression in the int32 symbol
+// dictionary surviving a stream would have been caught by nothing. And nothing
+// read a COMPRESSED stream, which is the sole stated reason
+// GMA_DATA_ARROW_IPC_CODECS defaults ON: ClickHouse's
+// `output_format_arrow_compression_method` defaults to lz4_frame, so the one
+// thing that would break ENC-1485's transport was the untested one.
+TEST(IpcTest, EveryTableSurvivesAnIpcStreamRoundTrip) {
+  for (const auto compression : {arrow::Compression::UNCOMPRESSED,
+                                 arrow::Compression::LZ4_FRAME,
+                                 arrow::Compression::ZSTD}) {
+    SCOPED_TRACE("compression=" + std::to_string(static_cast<int>(compression)));
+    Tables t;
+
+    expectStreamRoundTrip<TickRecord>(
+        t, tradeFixtures(t), compression,
+        [&t](const std::vector<TickRecord>& in) {
+          return encodeTrades(in, t.symbols, t.venues);
+        },
+        [](const arrow::RecordBatch& b, SymbolTable& s, SymbolTable& v,
+           std::vector<TickRecord>& o) {
+          return decodeTicks(b, RecordKind::Trade, s, v, o);
+        },
+        [](const TickRecord& got, const TickRecord& want) {
+          EXPECT_EQ(got.price, want.price);
+          EXPECT_EQ(got.size, want.size);
+          EXPECT_EQ(got.aggressor, want.aggressor);
+          EXPECT_EQ(got.bookNeutral, want.bookNeutral);
+          EXPECT_EQ(got.tradeId, want.tradeId);
+          EXPECT_EQ(got.flags, want.flags);
+        });
+
+    expectStreamRoundTrip<TickRecord>(
+        t, quoteFixtures(t), compression,
+        [&t](const std::vector<TickRecord>& in) {
+          return encodeQuotes(in, t.symbols, t.venues);
+        },
+        [](const arrow::RecordBatch& b, SymbolTable& s, SymbolTable& v,
+           std::vector<TickRecord>& o) {
+          return decodeTicks(b, RecordKind::Quote, s, v, o);
+        },
+        [](const TickRecord& got, const TickRecord& want) {
+          EXPECT_EQ(got.bidPx, want.bidPx);
+          EXPECT_EQ(got.askPx, want.askPx);
+          EXPECT_EQ(got.bidSz, want.bidSz);
+          EXPECT_EQ(got.askSz, want.askSz);
+          EXPECT_EQ(got.bidCt, want.bidCt);
+          EXPECT_EQ(got.askCt, want.askCt);
+          EXPECT_EQ(got.flags, want.flags);
+        });
+
+    expectStreamRoundTrip<BookRecord>(
+        t, bookFixtures(t), compression,
+        [&t](const std::vector<BookRecord>& in) {
+          return encodeBookEvents(in, t.symbols, t.venues);
+        },
+        &decodeBookEvents,
+        [](const BookRecord& got, const BookRecord& want) {
+          EXPECT_EQ(got.action, want.action);
+          EXPECT_EQ(got.side, want.side);
+          EXPECT_EQ(got.price, want.price);
+          EXPECT_EQ(got.size, want.size);
+          EXPECT_EQ(got.orderId, want.orderId);
+          EXPECT_EQ(got.priority, want.priority);
+          EXPECT_EQ(got.depth, want.depth);
+          EXPECT_EQ(got.epoch, want.epoch);
+          EXPECT_EQ(got.flags, want.flags);
+        });
+
+    expectStreamRoundTrip<SnapshotRecord>(
+        t, snapshotFixtures(t), compression,
+        [&t](const std::vector<SnapshotRecord>& in) {
+          return encodeBookSnapshots(in, t.symbols, t.venues);
+        },
+        &decodeBookSnapshots,
+        [](const SnapshotRecord& got, const SnapshotRecord& want) {
+          EXPECT_EQ(got.snapshotSeq, want.snapshotSeq);
+          EXPECT_EQ(got.level.side, want.level.side);
+          EXPECT_EQ(got.level.price, want.level.price);
+          EXPECT_EQ(got.level.size, want.level.size);
+          EXPECT_EQ(got.level.orderCount, want.level.orderCount);
+        });
+  }
+}
+
+TEST(IpcTest, TheIpcCodecsClickHouseDefaultsToAreActuallyBuilt) {
+  // GMA_DATA_ARROW_IPC_CODECS defaults ON for exactly one reason: a codec-free
+  // Arrow cannot read ENC-1485's stream at all, because ClickHouse compresses
+  // ArrowStream output with lz4_frame unless told otherwise. Asserted against
+  // the built library rather than inferred from the CMake option, which is
+  // what "the link wiring is correct but unexercised" meant.
+  for (const auto compression : {arrow::Compression::LZ4_FRAME,
+                                 arrow::Compression::ZSTD}) {
+    SCOPED_TRACE("compression=" + std::to_string(static_cast<int>(compression)));
+    EXPECT_TRUE(arrow::util::Codec::IsAvailable(compression));
+    auto codec = arrow::util::Codec::Create(compression);
+    EXPECT_TRUE(codec.ok()) << codec.status().ToString();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wire-input validation — content the schema check CANNOT catch
+// ---------------------------------------------------------------------------
+//
+// Everything above this point feeds the decoder something the encoder made.
+// A batch off `FORMAT ArrowStream` is not: its column types can be exactly
+// canonical while its contents are not representable, and every case below is
+// one where the decode used to return Status::OK() and hand back a record that
+// is wrong rather than absent.
+
+TEST(CodecRefusalTest, EnumDomainBoundsMatchRecordHpp) {
+  // The codec bounds enum columns with three constants in Schema.cpp that
+  // mirror these enumerators. This pins the values those constants were
+  // derived from; the two tests below pin the behaviour, so adding an
+  // enumerator without raising the bound reddens there.
+  EXPECT_EQ(static_cast<std::uint8_t>(Side::Ask), 1);
+  EXPECT_EQ(static_cast<std::uint8_t>(Aggressor::Sell), 2);
+  EXPECT_EQ(static_cast<std::uint8_t>(BookAction::Clear), 5);
+}
+
+TEST(CodecRefusalTest, AnOutOfDomainBookActionOrSideIsRefused) {
   Tables t;
   auto batch = encodeBookEvents(bookFixtures(t), t.symbols, t.venues);
   ASSERT_TRUE(batch.ok()) << batch.status().ToString();
-
-  auto sink = arrow::io::BufferOutputStream::Create();
-  ASSERT_TRUE(sink.ok());
-  auto writer = arrow::ipc::MakeStreamWriter(*sink, (*batch)->schema());
-  ASSERT_TRUE(writer.ok()) << writer.status().ToString();
-  ASSERT_TRUE((*writer)->WriteRecordBatch(**batch).ok());
-  ASSERT_TRUE((*writer)->Close().ok());
-  auto buffer = (*sink)->Finish();
-  ASSERT_TRUE(buffer.ok());
-
-  auto source = std::make_shared<arrow::io::BufferReader>(*buffer);
-  auto reader = arrow::ipc::RecordBatchStreamReader::Open(source);
-  ASSERT_TRUE(reader.ok()) << reader.status().ToString();
-
-  // The schema metadata — and therefore kSchemaVersionKey — must survive the
-  // stream, or requireSchema() would reject every batch that came over HTTP.
-  EXPECT_EQ(schemaVersionOf(*(*reader)->schema()), kSchemaVersion);
-
-  std::shared_ptr<arrow::RecordBatch> got;
-  ASSERT_TRUE((*reader)->ReadNext(&got).ok());
-  ASSERT_NE(got, nullptr);
-
   SymbolTable symbols, venues;
-  std::vector<BookRecord> out;
-  ASSERT_TRUE(decodeBookEvents(*got, symbols, venues, out).ok());
-  const auto in = bookFixtures(t);
-  ASSERT_EQ(out.size(), in.size());
-  for (std::size_t i = 0; i < in.size(); ++i) {
-    EXPECT_EQ(out[i].orderId, in[i].orderId) << "row " << i;
-    EXPECT_EQ(out[i].price, in[i].price) << "row " << i;
-    EXPECT_EQ(symbols.name(out[i].header.symbolId),
-              t.symbols.name(in[i].header.symbolId)) << "row " << i;
+
+  // uint8 is a legal column type for all 256 byte values, so the schema check
+  // passes and the batch is indistinguishable from a good one by type alone.
+  // 9 is not a BookAction; a BookRecord carrying it matches no enumerator and
+  // §4.6's dispatch onto OrderBookManager would drop the event in silence.
+  {
+    auto bad = withColumnReplaced(**batch, "action", uint8Column({0, 9, 4}));
+    std::vector<BookRecord> out;
+    const auto st = decodeBookEvents(*bad, symbols, venues, out);
+    EXPECT_FALSE(st.ok()) << "action=9 decoded without complaint";
+    EXPECT_NE(st.ToString().find("action"), std::string::npos) << st.ToString();
   }
+  // One past the last enumerator, which is the case a new BookAction would
+  // land on: if BookAction grows, this reddens and sends you to the bound in
+  // Schema.cpp rather than shipping a silently-dropped action.
+  {
+    auto bad = withColumnReplaced(**batch, "action", uint8Column({0, 6, 4}));
+    std::vector<BookRecord> out;
+    EXPECT_FALSE(decodeBookEvents(*bad, symbols, venues, out).ok());
+  }
+  {
+    auto bad = withColumnReplaced(**batch, "side", uint8Column({0, 7, 1}));
+    std::vector<BookRecord> out;
+    const auto st = decodeBookEvents(*bad, symbols, venues, out);
+    EXPECT_FALSE(st.ok()) << "side=7 decoded without complaint";
+    EXPECT_NE(st.ToString().find("side"), std::string::npos) << st.ToString();
+  }
+  // The legal boundary value still decodes — the check must be a domain check,
+  // not a narrower one.
+  {
+    auto ok = withColumnReplaced(**batch, "action", uint8Column({5, 5, 5}));
+    std::vector<BookRecord> out;
+    EXPECT_TRUE(decodeBookEvents(*ok, symbols, venues, out).ok());
+  }
+}
+
+TEST(CodecRefusalTest, AnOutOfDomainAggressorOrSnapshotSideIsRefused) {
+  Tables t;
+  auto trades = encodeTrades(tradeFixtures(t), t.symbols, t.venues);
+  ASSERT_TRUE(trades.ok()) << trades.status().ToString();
+  SymbolTable symbols, venues;
+  {
+    auto bad = withColumnReplaced(**trades, "aggressor", uint8Column({1, 3, 2}));
+    std::vector<TickRecord> out;
+    const auto st = decodeTicks(*bad, RecordKind::Trade, symbols, venues, out);
+    EXPECT_FALSE(st.ok()) << "aggressor=3 decoded without complaint";
+    EXPECT_NE(st.ToString().find("aggressor"), std::string::npos) << st.ToString();
+  }
+
+  auto snaps = encodeBookSnapshots(snapshotFixtures(t), t.symbols, t.venues);
+  ASSERT_TRUE(snaps.ok()) << snaps.status().ToString();
+  {
+    auto bad = withColumnReplaced(**snaps, "side", uint8Column({0, 1, 2}));
+    std::vector<SnapshotRecord> out;
+    const auto st = decodeBookSnapshots(*bad, symbols, venues, out);
+    EXPECT_FALSE(st.ok()) << "side=2 decoded without complaint";
+    EXPECT_NE(st.ToString().find("side"), std::string::npos) << st.ToString();
+  }
+}
+
+TEST(CodecRefusalTest, ABatchWithAShortPayloadColumnIsRefused) {
+  // THE SHARP CASE, and the reason the num_rows variant below is not evidence
+  // on its own. Here the seven header columns are full length, so hdr.bind()
+  // and dictIdAt() both succeed and nothing incidental goes wrong: only the
+  // payload column is short. Unchecked, the decode returns Status::OK() and
+  // two of the three records carry a price read from past the end of the Arrow
+  // buffer. (In the num_rows case the dictionary index read happens to land
+  // out of range, so an unchecked decode errors for the WRONG reason — having
+  // already performed the out-of-bounds read.)
+  Tables t;
+  SymbolTable symbols, venues;
+  auto trades = encodeTrades(tradeFixtures(t), t.symbols, t.venues);
+  ASSERT_TRUE(trades.ok()) << trades.status().ToString();
+  ASSERT_EQ((*trades)->num_rows(), 3);
+  auto shortPrice = withColumnReplaced(**trades, "price", int64Column({7}));
+  std::vector<TickRecord> out;
+  const auto st = decodeTicks(*shortPrice, RecordKind::Trade, symbols, venues, out);
+  EXPECT_FALSE(st.ok())
+      << "a 1-row price column in a 3-row batch decoded without complaint; "
+         "rows 1 and 2 were read out of bounds";
+}
+
+TEST(CodecRefusalTest, ABatchWhoseNumRowsExceedsItsColumnsIsRefused) {
+  // `arrow::RecordBatch::Make` does not validate and the IPC reader does not
+  // run ValidateFull, so a batch whose num_rows exceeds its columns' length is
+  // constructible — a truncated ArrowStream, or a caller assembling one. Every
+  // decoder loops to num_rows, so unchecked this is `price->Value(i)` reading
+  // past the Arrow buffer: an out-of-bounds READ, not a Status. The decoders
+  // now call batch.Validate() before the first Value().
+  Tables t;
+  SymbolTable symbols, venues;
+
+  auto trades = encodeTrades(tradeFixtures(t), t.symbols, t.venues);
+  ASSERT_TRUE(trades.ok()) << trades.status().ToString();
+  auto lyingTrades = arrow::RecordBatch::Make(
+      (*trades)->schema(), (*trades)->num_rows() + 4096, (*trades)->columns());
+  std::vector<TickRecord> tickOut;
+  EXPECT_FALSE(
+      decodeTicks(*lyingTrades, RecordKind::Trade, symbols, venues, tickOut).ok());
+
+  auto book = encodeBookEvents(bookFixtures(t), t.symbols, t.venues);
+  ASSERT_TRUE(book.ok()) << book.status().ToString();
+  auto lyingBook = arrow::RecordBatch::Make(
+      (*book)->schema(), (*book)->num_rows() + 4096, (*book)->columns());
+  std::vector<BookRecord> bookOut;
+  EXPECT_FALSE(decodeBookEvents(*lyingBook, symbols, venues, bookOut).ok());
+
+  auto snaps = encodeBookSnapshots(snapshotFixtures(t), t.symbols, t.venues);
+  ASSERT_TRUE(snaps.ok()) << snaps.status().ToString();
+  auto lyingSnaps = arrow::RecordBatch::Make(
+      (*snaps)->schema(), (*snaps)->num_rows() + 4096, (*snaps)->columns());
+  std::vector<SnapshotRecord> snapOut;
+  EXPECT_FALSE(decodeBookSnapshots(*lyingSnaps, symbols, venues, snapOut).ok());
+}
+
+TEST(CodecRefusalTest, ANullInANonNullableColumnIsRefused) {
+  // Every column of every canonical schema is non-nullable and the PODs have
+  // no absent state, so a null has no representation. Unchecked, `Value(i)` on
+  // a null slot returns a plausible zero — a price of 0 is legal, so this is
+  // the "fails plausibly rather than loudly" mode again.
+  Tables t;
+  auto batch = encodeTrades(tradeFixtures(t), t.symbols, t.venues);
+  ASSERT_TRUE(batch.ok()) << batch.status().ToString();
+  auto bad = withColumnReplaced(**batch, "price", int64ColumnWithANull());
+  SymbolTable symbols, venues;
+  std::vector<TickRecord> out;
+  const auto st = decodeTicks(*bad, RecordKind::Trade, symbols, venues, out);
+  EXPECT_FALSE(st.ok()) << "a null price decoded into a TickRecord";
 }

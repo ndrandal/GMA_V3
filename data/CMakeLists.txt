@@ -9,15 +9,19 @@
 #
 # `gma_engine` depends on neither this library nor any connector, and ARROW
 # AND THE CLICKHOUSE CLIENT MUST NEVER BECOME ENGINE DEPENDENCIES (SPEC D14,
-# docs/data-layer.md §4 rule 6). That is not style: SPEC D14's client
-# deployment profile is live-only and omits this library entirely, so
-# `gma_server` must link and run with GMA_BUILD_DATA=OFF and nothing missing.
+# docs/data-layer.md §4 rule 6). That is not style. D14's client profile is
+# "live-only OR reads a central L1 over the wire with no local store" — two
+# variants: the LIVE-ONLY one omits this library entirely, so `gma_server` must
+# link and run with GMA_BUILD_DATA=OFF and nothing missing, while the
+# over-the-wire one needs Arrow IPC and therefore does ship gma_data. The
+# invariant holds for both because it constrains gma_engine, not the product.
 #
 # The invariant is asserted, not asserted-about: `tools/check_engine_isolation.py`
 # runs as the ctest case `gma_engine_isolation` and fails the build if an Arrow
 # or ClickHouse include appears in engine code, if a `data/` header becomes
-# reachable from the engine's include path, or if `gma_data` enters
-# `gma_engine`'s link libraries.
+# reachable from the engine's include path, or if gma_data / Arrow appears
+# anywhere in gma_engine's or gma_server's TRANSITIVE link closure (the
+# umbrella `gma` target is where a one-level check was blind).
 #
 # The engine-facing PODs are deliberately NOT here — they live in
 # `include/gma/data/Record.hpp`, inside gma_engine, because ENC-1486's
