@@ -70,7 +70,11 @@ std::string readCstr(const std::byte* p, std::size_t width) {
 // passes through it and nothing it returns reaches a price, a size or a
 // timestamp column. It decides which TICKER a row carries. Integer-only, and
 // `std::chrono`'s calendar types are avoided so the arithmetic is visible.
-// Howard Hinnant's `civil_from_days`, which is public domain.
+// Howard Hinnant's `civil_from_days`, which is public domain — kept verbatim
+// rather than specialised to non-negative days, so it stays diffable against
+// the reference. Its `era` branch for negative days is therefore unreachable
+// from this file's only caller; that is a deliberate property of copying a
+// reference algorithm, not untested logic of ours.
 // ---------------------------------------------------------------------------
 
 inline constexpr std::int64_t kNsPerDay = 86'400'000'000'000LL;
@@ -90,12 +94,15 @@ std::uint32_t yyyymmddFromDays(std::int64_t z) noexcept {
                                     static_cast<std::int64_t>(d));
 }
 
-// Floor division, so a pre-1970 timestamp lands on the right day rather than
-// one day late.
-std::uint32_t yyyymmddFromNs(std::int64_t ns) noexcept {
-  const std::int64_t days =
-      ns >= 0 ? ns / kNsPerDay : -((-ns + kNsPerDay - 1) / kNsPerDay);
-  return yyyymmddFromDays(days);
+// UNSIGNED, and that is not laziness. The only caller is `resolveSymbol`, and
+// `makeHeader` has already refused `ts_event == kUndefTimestamp` and
+// `ts_event > INT64_MAX` before it runs, so the input is a non-negative
+// nanosecond count by construction. An earlier version carried a
+// floor-division branch for pre-1970 timestamps; it was unreachable, and
+// replacing it with garbage left the suite green — so it is gone rather than
+// kept as untested insurance against a case the signature now forbids.
+std::uint32_t yyyymmddFromNs(std::uint64_t ns) noexcept {
+  return yyyymmddFromDays(static_cast<std::int64_t>(ns / static_cast<std::uint64_t>(kNsPerDay)));
 }
 
 // ---------------------------------------------------------------------------
@@ -256,9 +263,13 @@ std::optional<std::uint64_t> DatabentoAdapter::restingSize(std::uint32_t instrum
 }
 
 void DatabentoAdapter::trackOrder(const OrderKey& k, std::uint64_t size) {
-  // ItchAdapter::routeAddOrder's M4 bound, verbatim in intent: evict the
-  // oldest bucket entry once the cap is hit. Dropping tracking only forfeits
-  // delta resolution for that order; memory stays bounded.
+  // ItchAdapter::routeAddOrder's M4 bound, verbatim in intent: once the cap is
+  // hit, evict AN ARBITRARY entry. `std::unordered_map::begin()` is bucket
+  // order, not insertion order, so this is not "the oldest" however the
+  // equivalent ItchAdapter comment words it. Erase-then-insert, in that order,
+  // is what keeps `orders_.size() <= maxTrackedOrders` — the invariant
+  // `DbnActionMappingTest.TheOrderMapIsBounded` asserts, because a no-op
+  // eviction that still bumps `evictedOrders` satisfies a counter check.
   if (orders_.size() >= cfg_.maxTrackedOrders && orders_.find(k) == orders_.end()) {
     orders_.erase(orders_.begin());
     ++stats_.evictedOrders;
@@ -668,7 +679,7 @@ arrow::Result<SymbolId> DatabentoAdapter::resolveSymbol(std::uint32_t instrument
         " instrument(s); a record for one it does not name cannot be given a ticker, "
         "and `symbol` is L1's leading key column (SPEC D7).");
   }
-  const std::uint32_t day = yyyymmddFromNs(static_cast<std::int64_t>(tsEventNs));
+  const std::uint32_t day = yyyymmddFromNs(tsEventNs);
   for (const auto& w : it->second) {
     if (day >= w.startDate && day < w.endDate) return w.id;  // half-open
   }
@@ -696,6 +707,16 @@ arrow::Status DatabentoAdapter::onMbo(const dbn::MboMsg& m) {
 
   ARROW_ASSIGN_OR_RAISE(const RecordHeader h, makeHeader(m.hd, m.tsRecv, m.sequence));
 
+  // The two fields DBN carries that no canonical column holds. Recorded rather
+  // than dropped — `channel_id` is the scope `sequence` is monotonic within
+  // (ENC-1483/T6), and `ts_in_delta` is the only signed-32 load in either
+  // record, so without this nothing could gate that offset. See
+  // `DatabentoAdapter::Gateway`.
+  gw_.channelId    = m.channelId;
+  gw_.tsInDelta    = m.tsInDelta;
+  gw_.minChannelId = std::min(gw_.minChannelId, m.channelId);
+  gw_.maxChannelId = std::max(gw_.maxChannelId, m.channelId);
+
   // SPEC D8: an assignment, not a conversion. DBN is int64 at 1e-9 and so are
   // we; the only translation is the sentinel, INT64_MAX -> INT64_MIN.
   std::int64_t px = m.price;
@@ -712,25 +733,39 @@ arrow::Status DatabentoAdapter::onMbo(const dbn::MboMsg& m) {
   std::uint16_t flags = m.flags;
   const auto side = static_cast<dbn::Side>(m.side);
 
-  // `BookRecord::side`, and this is the subtle one.
+  // `BookRecord::side` holds TWO MEANINGS, and keeping them apart is the
+  // subtle part of this function.
   //
-  // On Add/Cancel/Modify/Clear it is the RESTING order's side, which is what
-  // DBN reports and what `OrderBookManager::onAdd/onUpdate` want.
+  //   * On Add / Cancel / Modify / Clear it is the RESTING order's side, which
+  //     is what DBN reports and what `OrderBookManager::onAdd/onUpdate` want.
+  //   * On a `BookAction::Trade` row it is the AGGRESSOR's side, because that
+  //     row drives `OrderBookManager::onTrade(..., Aggressor)`.
   //
-  // On a `BookAction::Trade` row it is the AGGRESSOR's side, because that row
-  // drives `OrderBookManager::onTrade(..., Aggressor)`. DBN's own definition
-  // of `side` is "the side of the market for resting orders, OR the side of
-  // the aggressor for trades" — so a `Trade` record already reports the
-  // aggressor, while a `Fill` reports the RESTING order being filled and must
-  // be FLIPPED. `ItchAdapter::routeOrderExecuted` does exactly this flip
-  // ("The resting order's side is passive; the aggressor is the opposite",
-  // ItchAdapter.cpp:180-181), and not doing it would put two different
-  // meanings in one column.
-  Side out = Side::Bid;
+  // DBN defines `side` as "the side of the market for resting orders, OR the
+  // side of the aggressor for trades", so a `Trade` record already reports the
+  // aggressor while a `Fill` reports the RESTING order being filled and has to
+  // be flipped. `ItchAdapter::routeOrderExecuted` does the same flip ("The
+  // resting order's side is passive; the aggressor is the opposite",
+  // ItchAdapter.cpp:180-181) — and crucially it applies it to the
+  // `ObTradeEvent` ONLY: its `ObDeleteEvent{symbol, orderRef}` and
+  // `ObUpdateEvent{symbol, orderRef, nullopt, remaining}` carry no side field
+  // at all, so ITCH is structurally incapable of mixing the two.
+  //
+  // THE SIDE ON A MUTATION ROW IS A COLUMN THIS ADAPTER ADDED, so the
+  // separation is this adapter's to enforce. It is enforced here by deriving
+  // BOTH values up front and letting `emit` pick by action. An earlier version
+  // flipped one variable before the dispatch, which meant a `Fill` under
+  // `fillReducesRestingOrder` stamped the AGGRESSOR side onto the
+  // `Update`/`Delete` row `applyRemoval` emits — exactly the two-meanings-in-
+  // one-column failure this comment warns about.
+  // `DbnActionMappingTest.EveryBookMutationRowCarriesTheRestingSide` is the
+  // test that catches it; before it existed, inverting the side of every
+  // mutation row left the whole suite green.
+  Side resting = Side::Bid;
   bool sideKnown = true;
   switch (side) {
-    case dbn::Side::Bid: out = Side::Bid; break;
-    case dbn::Side::Ask: out = Side::Ask; break;
+    case dbn::Side::Bid: resting = Side::Bid; break;
+    case dbn::Side::Ask: resting = Side::Ask; break;
     case dbn::Side::None:
       // No representation in data::Side — see kGmaFlagSideUnspecified.
       sideKnown = false;
@@ -738,9 +773,10 @@ arrow::Status DatabentoAdapter::onMbo(const dbn::MboMsg& m) {
       ++stats_.sideUnspecified;
       break;
   }
-  if (sideKnown && m.action == static_cast<char>(dbn::Action::Fill)) {
-    out = out == Side::Bid ? Side::Ask : Side::Bid;
-  }
+  const Side aggressor =
+      (sideKnown && m.action == static_cast<char>(dbn::Action::Fill))
+          ? (resting == Side::Bid ? Side::Ask : Side::Bid)
+          : resting;
 
   const OrderKey key{m.hd.instrumentId, m.orderId};
 
@@ -749,7 +785,10 @@ arrow::Status DatabentoAdapter::onMbo(const dbn::MboMsg& m) {
     BookRecord r;
     r.header   = h;
     r.action   = action;
-    r.side     = out;
+    // Pick by action, not by a variable mutated earlier — see the long note
+    // above. A Trade row is a print and names the aggressor; everything else
+    // is a book mutation and names the resting order.
+    r.side     = action == BookAction::Trade ? aggressor : resting;
     r.price    = price;
     r.size     = size;
     r.orderId  = m.orderId;
@@ -874,6 +913,10 @@ arrow::Status DatabentoAdapter::onTrade(const dbn::TradeMsg& m) {
   }
 
   ARROW_ASSIGN_OR_RAISE(const RecordHeader h, makeHeader(m.hd, m.tsRecv, m.sequence));
+
+  // TradeMsg has no channel_id; ts_in_delta is at a DIFFERENT offset from
+  // MboMsg's, so recording it here is what gates that second signed-32 load.
+  gw_.tsInDelta = m.tsInDelta;
 
   TickRecord t;
   t.header = h;

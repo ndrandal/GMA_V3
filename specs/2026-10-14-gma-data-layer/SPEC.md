@@ -206,8 +206,14 @@ the framing is **measured** against real vendor bytes committed at
 `GMA_V3/data/tests/fixtures/dbn/` and cross-checked against `databento-cpp`'s own decoder-test
 expectations; an unknown DBN version is **refused**, never guessed; and every declared
 `Action` / `Side` / `RType` enumerator is asserted to be *accepted* as well as every
-undeclared byte *refused*. A 16-mutation adversarial sweep against the decoder found one
-untested guard (the metadata tail), which is now covered. Also deliberately **not** in
+undeclared byte *refused*. **Two independent adversarial sweeps**, one by the implementer and
+one by a separate session that did not write the code, put **42 mutations** through the
+decoder. They found one real behavioural bug — the Fill aggressor-side flip leaking onto the
+book-mutation row it also emits, which nothing asserted because no test checked the `side` of
+an `Update` row — plus a bound asserted by its counter rather than its invariant, two decoded
+fields no test could reach, one unreachable branch, and two comments describing mechanisms
+that do not exist. All fixed; the bug's test was written red first. Every one of those
+mutations is now caught. Also deliberately **not** in
 `gma_data`: zstd. `.dbn.zst` is decompressed by ENC-1483's ingest job, and feeding a zstd
 frame to the adapter is refused by name.
 
@@ -256,9 +262,25 @@ does not report an aggressor. `TickRecord` is fine — `Aggressor::Unknown` exis
 `kGmaFlagSideUnspecified` in the free high byte of `flags`, which is lossless and asserted;
 the real fix is for `BookRecord` to carry an `Aggressor` for `BookAction::Trade` rows, or for
 `side` to mirror DBN's three values. Related and deliberate: `BookAction::Trade` rows are
-**unconditionally book-neutral** (every `ObTradeEvent` in the repo is, and DBN says both
-`Trade` and `Fill` do not affect the book), which is why `gma.book_events` needs no
-`book_neutral` column — the value is a constant, not a field.
+**unconditionally book-neutral** — DBN's own documentation for both `Action::Trade` and
+`Action::Fill` is "Does not affect the book" — which is why `gma.book_events` needs no
+`book_neutral` column: for a DBN-fed table the value is a constant. State that as **this
+adapter's decision**, though, not as a property inherited from the ITCH model: `bookNeutral`
+defaults to `false` in `FeedEvent.hpp`, and `WsFeedClient.cpp:385-387` has a live
+`!e.bookNeutral` branch that *does* consume the book, so a non-neutral trade is representable
+and is what a feed whose print *is* the book mutation would use. Both of `ItchAdapter`'s
+production emission sites set the flag; that is the narrower true claim. A future non-DBN
+provider has to state its own answer rather than inherit this one.
+
+A related defect this work introduced and then fixed, because it is the cost of the column
+`BookRecord::side` is: that column means the **resting** order's side on
+Add/Update/Delete/Clear and the **aggressor**'s on a `Trade` row. `ItchAdapter` cannot mix
+them — its `ObUpdateEvent`/`ObDeleteEvent` carry no side at all, and only `ObTradeEvent` gets
+the flipped aggressor — but this adapter added the column, so it owns the separation. The
+first version flipped one variable before dispatch, so a `Fill` under
+`fillReducesRestingOrder` stamped the aggressor onto the `Update`/`Delete` row it also emits.
+`DbnActionMappingTest.EveryBookMutationRowCarriesTheRestingSide` is the gate; before it
+existed, inverting the side of *every* mutation row left the whole suite green.
 
 ---
 

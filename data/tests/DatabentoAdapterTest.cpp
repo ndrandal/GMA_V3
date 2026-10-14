@@ -10,10 +10,11 @@
 //   1. `data/tests/fixtures/dbn/` holds five files of REAL Databento DBN bytes,
 //      copied from `databento-cpp`'s own Apache-2.0 test data (provenance and
 //      licensing: `PROVENANCE.md` beside them). Nobody here wrote those bytes.
-//   2. `DbnEncoderIsReproducible` asserts that a minimal DBN encoder living in
-//      this file, fed the values we BELIEVE those files contain, reproduces
-//      each of them BYTE FOR BYTE. One assertion, three facts: the layout is
-//      right, the believed values are right, and the encoder is right.
+//   2. `DbnEncoderTest.EncoderReproducesEveryFixtureByteForByte` asserts that a
+//      minimal DBN encoder living in this file, fed the values we BELIEVE those
+//      files contain, reproduces each of them BYTE FOR BYTE. One assertion,
+//      three facts: the layout is right, the believed values are right, and
+//      the encoder is right.
 //   3. Only then is the encoder used to build streams covering the rest of the
 //      action and side vocabulary, which the two-record public samples cannot
 //      reach (they contain one action, 'C', and one side, 'A').
@@ -89,7 +90,8 @@ std::span<const std::byte> asSpan(const std::vector<std::byte>& v) {
 // ===========================================================================
 // A minimal DBN writer. Mirrors the encoder in `databento/dbn`
 // (`rust/dbn/src/encode/dbn/sync.rs`) for the parts these tests exercise, and
-// `DbnEncoderIsReproducible` is what proves it mirrors it correctly.
+// `DbnEncoderTest.EncoderReproducesEveryFixtureByteForByte` is what proves it
+// mirrors it correctly.
 // ===========================================================================
 
 struct Interval {
@@ -528,6 +530,13 @@ TEST_P(DbnFixtureTest, EveryRowCarriesTsEventProviderSeqAndInstrumentId) {
 }
 
 TEST_P(DbnFixtureTest, FeedingOneByteAtATimeProducesIdenticalRecords) {
+  // NOTE FOR A FUTURE CLEANUP: this is NOT the test that covers buffer
+  // compaction. One byte at a time means `drain()` always consumes everything
+  // or nothing, so the `cursor_ > 0 && cursor_ < size` partial-compaction
+  // branch never runs here. `APartialRecordAtTheEndOfTheStreamIsAGap` is the
+  // only test that exercises it (and
+  // `CorruptedOrTruncatedBytesRefuseButNeverCrash` hits it incidentally).
+  // Do not delete either as redundant with this one.
   const auto bytes = readFixture(GetParam());
 
   Harness whole;
@@ -935,6 +944,62 @@ TEST(DbnActionMappingTest, ATradeSideIsTheAggressorAndAFillSideIsFlipped) {
   EXPECT_EQ(h.a->bookEvents()[2].side, Side::Bid) << "a Fill on a resting ASK is a BUY";
 }
 
+TEST(DbnActionMappingTest, EveryBookMutationRowCarriesTheRestingSide) {
+  // The column `BookRecord::side` holds TWO meanings — the resting order's side
+  // on Add/Update/Delete/Clear, the aggressor's on a Trade row (see the header).
+  // A column with two meanings needs every row asserted, or the meanings swap
+  // silently. `ItchAdapter` is structurally incapable of this bug: its mutation
+  // events (`ObDeleteEvent{symbol, orderRef}`,
+  // `ObUpdateEvent{symbol, orderRef, nullopt, remaining}`) carry no side at all
+  // and only `ObTradeEvent` gets the flipped aggressor. The side on a mutation
+  // row is a column THIS adapter added, so it is this adapter's job to prove it.
+  //
+  // The case that was wrong: with `fillReducesRestingOrder` a Fill emits BOTH a
+  // mutation row and a print, and the aggressor flip leaked onto the mutation.
+  const char bid = static_cast<char>(dbn::Side::Bid);
+  const char ask = static_cast<char>(dbn::Side::Ask);
+
+  for (const char restingSide : {bid, ask}) {
+    SCOPED_TRACE(dbn::sideName(restingSide));
+    const Side wantResting  = restingSide == bid ? Side::Bid : Side::Ask;
+    const Side wantAggressor = restingSide == bid ? Side::Ask : Side::Bid;
+
+    DbnWriter w = plainWriter();
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Add), restingSide, 1,
+                 1'000'000'000LL, 10, 1));
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Cancel), restingSide, 1,
+                 1'000'000'000LL, 3, 2));   // partial -> Update
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Modify), restingSide, 1,
+                 1'100'000'000LL, 5, 3));   // -> Update
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Fill), restingSide, 1,
+                 1'100'000'000LL, 2, 4));   // -> Update(resting) + Trade(aggressor)
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Fill), restingSide, 1,
+                 1'100'000'000LL, 9, 5));   // -> Delete(resting) + Trade(aggressor)
+    w.addMbo(mbo(static_cast<char>(dbn::Action::Clear), restingSide, 0,
+                 dbn::kUndefPrice, 0, 6));  // -> Clear(resting)
+
+    DatabentoAdapter::Config cfg;
+    cfg.fillReducesRestingOrder = true;
+    Harness h(cfg);
+    ASSERT_TRUE(h.run(w).ok());
+    ASSERT_EQ(h.a->bookEvents().size(), 8u);
+
+    for (std::size_t i = 0; i < h.a->bookEvents().size(); ++i) {
+      const BookRecord& r = h.a->bookEvents()[i];
+      SCOPED_TRACE(static_cast<int>(r.action));
+      if (r.action == BookAction::Trade) {
+        EXPECT_EQ(r.side, wantAggressor)
+            << "row " << i << ": a Trade row carries the AGGRESSOR side";
+      } else {
+        EXPECT_EQ(r.side, wantResting)
+            << "row " << i << ": action " << static_cast<int>(r.action)
+            << " is a book MUTATION and must carry the RESTING side, not the "
+               "aggressor the Fill print needs";
+      }
+    }
+  }
+}
+
 TEST(DbnActionMappingTest, ActionNoneIsAcceptedAndProducesNoBookRow) {
   DbnWriter w = plainWriter();
   w.addMbo(mbo(static_cast<char>(dbn::Action::None),
@@ -967,24 +1032,129 @@ TEST(DbnActionMappingTest, ClearBumpsTheEpochAndDropsTrackedOrders) {
   EXPECT_EQ(h.a->epochOf(kIid), 1u);
   EXPECT_EQ(h.a->stats().clears, 1u);
   // The pre-Clear order is no longer tracked, so its post-Clear cancel cannot
-  // be resolved against stale state — the reason OrderKey carries the epoch.
+  // be resolved against stale state. THE MECHANISM IS THE ERASE LOOP in the
+  // Clear case, not an epoch in the adapter's key: this adapter's private
+  // `OrderKey` is `{instrumentId, orderId}` and carries no epoch. (The epoch'd
+  // key is `gma::OrderKey`, which protects the BOOK downstream.) Removing the
+  // erase loop is what this assertion catches.
   EXPECT_EQ(h.a->stats().unknownOrder, 1u);
+  EXPECT_EQ(h.a->trackedOrders(), 1u) << "only the post-Clear order 12 survives";
+  EXPECT_FALSE(h.a->restingSize(kIid, 11).has_value());
   EXPECT_EQ(h.a->bookEvents()[3].epoch, 1u);
 }
 
 TEST(DbnActionMappingTest, TheOrderMapIsBounded) {
+  // ASSERT THE INVARIANT, NOT THE COUNTER. An earlier version of this test
+  // checked only `evictedOrders > 0`, which a no-op eviction that still bumps
+  // the counter satisfies — so replacing `orders_.erase(begin())` with nothing
+  // left the suite green while the map grew without limit. The bound itself is
+  // `trackedOrders() <= maxTrackedOrders`, and it has to hold after EVERY
+  // record, not just at the end.
+  constexpr std::size_t kCap = 4;
+  constexpr std::uint32_t kAdds = 20;
+
   DatabentoAdapter::Config cfg;
-  cfg.maxTrackedOrders = 4;
-  DbnWriter w = plainWriter();
-  for (std::uint32_t i = 0; i < 20; ++i) {
+  cfg.maxTrackedOrders = kCap;
+  Harness h(cfg);
+
+  // Fed one record at a time so the bound is checked at every step; a
+  // whole-stream feed could only ever see the final state.
+  for (std::uint32_t i = 0; i < kAdds; ++i) {
+    DbnWriter w = plainWriter();
+    if (i > 0) w.records.clear();
     w.addMbo(mbo(static_cast<char>(dbn::Action::Add), static_cast<char>(dbn::Side::Bid),
                  1000 + i, 1'000'000'000LL, 1, i + 1));
+    const auto bytes = w.build();
+    if (i == 0) {
+      ASSERT_TRUE(h.feed(bytes).ok());
+    } else {
+      // Metadata is already consumed; feed just this record's bytes.
+      const std::vector<std::byte> rec(bytes.end() - static_cast<std::ptrdiff_t>(
+                                                         dbn::kMboMsgLen),
+                                       bytes.end());
+      ASSERT_TRUE(h.a->feed(asSpan(rec)).ok()) << "record " << i;
+    }
+    EXPECT_LE(h.a->trackedOrders(), kCap)
+        << "after record " << i << " the tracked-order map exceeded its cap";
   }
-  Harness h(cfg);
-  ASSERT_TRUE(h.run(w).ok());
-  EXPECT_EQ(h.a->bookEvents().size(), 20u);
-  EXPECT_GT(h.a->stats().evictedOrders, 0u)
-      << "ItchAdapter's M4 bound: the tracked-order map must not grow without limit";
+  ASSERT_TRUE(h.a->finish().ok());
+  EXPECT_EQ(h.a->bookEvents().size(), kAdds);
+  EXPECT_EQ(h.a->trackedOrders(), kCap);
+  EXPECT_EQ(h.a->stats().evictedOrders, kAdds - kCap);
+
+  // At most `kCap` of the 20 order ids may still resolve, and the ones that do
+  // must report the size they were added with — eviction drops tracking, it
+  // does not corrupt it.
+  std::size_t stillTracked = 0;
+  for (std::uint32_t i = 0; i < kAdds; ++i) {
+    if (const auto sz = h.a->restingSize(kIid, 1000 + i)) {
+      ++stillTracked;
+      EXPECT_EQ(*sz, 1u);
+    }
+  }
+  EXPECT_EQ(stillTracked, kCap);
+}
+
+TEST(DbnGatewayTest, ChannelIdAndTsInDeltaAreDecodedAtTheRightOffsets) {
+  // `ts_in_delta` is the only signed-32 field in either DBN record and it has
+  // no canonical column, so without `gateway()` nothing could gate that load
+  // at all — zeroing both `loadI32` call sites used to leave the suite green.
+  // `channel_id` matters for a second reason: it is the scope DBN's `sequence`
+  // (our `provider_seq`) is monotonic within, so a stream mixing channels is
+  // one where `(session_id, provider_seq)` is not a per-symbol total order
+  // (ENC-1483/T6).
+  {
+    Harness h;
+    ASSERT_TRUE(h.feed(readFixture("mbo.v2.dbn")).ok());
+    // The second (last) fixture record's values.
+    EXPECT_EQ(h.a->gateway().tsInDelta, 19621);
+    EXPECT_EQ(h.a->gateway().channelId, 0u);
+    EXPECT_EQ(h.a->gateway().minChannelId, 0u);
+    EXPECT_EQ(h.a->gateway().maxChannelId, 0u)
+        << "the fixture is a single channel, so sequence is a total order in it";
+  }
+  {
+    // TradeMsg carries ts_in_delta at a DIFFERENT offset from MboMsg's, so the
+    // trades fixture gates the second load site.
+    Harness h;
+    ASSERT_TRUE(h.feed(readFixture("trades.v2.dbn")).ok());
+    EXPECT_EQ(h.a->gateway().tsInDelta, 20728);
+  }
+  {
+    // A NEGATIVE ts_in_delta, which is what makes the field signed and is the
+    // one value an unsigned load would get wrong, plus two channels so
+    // min != max actually reports a mixed stream.
+    DbnWriter w = plainWriter();
+    dbn::MboMsg a = mbo(static_cast<char>(dbn::Action::Add),
+                        static_cast<char>(dbn::Side::Bid), 1, 1'000'000'000LL, 1, 1);
+    a.channelId = 3;
+    a.tsInDelta = -12345;
+    dbn::MboMsg b = a;
+    b.orderId    = 2;
+    b.sequence   = 2;
+    b.channelId  = 9;
+    b.tsInDelta  = 7;
+    w.addMbo(a);
+    w.addMbo(b);
+    Harness h;
+    ASSERT_TRUE(h.run(w).ok());
+    EXPECT_EQ(h.a->gateway().tsInDelta, 7);
+    EXPECT_EQ(h.a->gateway().channelId, 9u);
+    EXPECT_EQ(h.a->gateway().minChannelId, 3u);
+    EXPECT_EQ(h.a->gateway().maxChannelId, 9u)
+        << "min != max is the two-byte answer to 'did this stream mix channels?'";
+  }
+  {
+    // And the sign survives on its own, as the LAST record seen.
+    DbnWriter w = plainWriter();
+    dbn::MboMsg a = mbo(static_cast<char>(dbn::Action::Add),
+                        static_cast<char>(dbn::Side::Bid), 1, 1'000'000'000LL, 1, 1);
+    a.tsInDelta = -2'000'000'000;  // near INT32_MIN
+    w.addMbo(a);
+    Harness h;
+    ASSERT_TRUE(h.run(w).ok());
+    EXPECT_EQ(h.a->gateway().tsInDelta, -2'000'000'000);
+  }
 }
 
 // ===========================================================================
@@ -992,6 +1162,10 @@ TEST(DbnActionMappingTest, TheOrderMapIsBounded) {
 // ===========================================================================
 
 TEST(DbnFramingTest, APartialRecordAtTheEndOfTheStreamIsAGap) {
+  // LOAD-BEARING BEYOND ITS NAME: by feeding a whole truncated stream in one
+  // call it is the only test that leaves `drain()` with a partial record AND
+  // consumed bytes behind it, i.e. the only one that exercises the
+  // `cursor_ > 0` compaction branch. A one-byte-at-a-time feed cannot.
   auto bytes = readFixture("mbo.v2.dbn");
   bytes.resize(bytes.size() - 9);  // chop the tail of the second record
   Harness h;
@@ -1169,6 +1343,10 @@ TEST(DbnFramingTest, TheMetadataTailIsOnlyEverV3AlignmentPadding) {
 }
 
 TEST(DbnFramingTest, CorruptedOrTruncatedBytesRefuseButNeverCrash) {
+  // LOAD-BEARING BEYOND ITS NAME: this is the only test that catches a
+  // disabled `repeated` count bound in `parseMetadata` (the guard that stops a
+  // corrupt symbol count from reserving gigabytes). It is also what exercises
+  // ASan/UBSan. Do not weaken it to a handful of cases.
   // A hand-rolled byte parser's characteristic failure is an out-of-bounds read
   // on input it was never shown, and `Reader`/`drain()` are full of
   // length-derived offsets. So drive every single-byte corruption and every
@@ -1226,7 +1404,9 @@ TEST(DbnFramingTest, CorruptedOrTruncatedBytesRefuseButNeverCrash) {
     EXPECT_EQ(fin.ok(), haveMeta && !heldBytes)
         << "truncation " << n << ": finish()=" << fin.ToString()
         << " pending=" << h.a->pendingBytes() << " meta=" << haveMeta;
-    if (!fin.ok()) EXPECT_TRUE(fin.IsInvalid()) << fin.ToString();
+    if (!fin.ok()) {
+      EXPECT_TRUE(fin.IsInvalid()) << fin.ToString();
+    }
   }
   // Both finish() outcomes must occur across the sweep, or the EXPECT_EQ above
   // is comparing two constants.
