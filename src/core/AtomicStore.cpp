@@ -1,7 +1,10 @@
 // src/core/AtomicStore.cpp
 #include "gma/AtomicStore.hpp"
+#include <algorithm>
 #include <mutex>
 #include <thread>
+#include <tuple>
+#include <vector>
 
 namespace gma {
 namespace {
@@ -185,6 +188,43 @@ std::optional<ArgType> AtomicStore::get(const std::string& streamKey, const std:
   if (fieldIt == fieldMap.end()) return std::nullopt;
 
   return fieldIt->second;
+}
+
+// ENC-1486. See the header for why a parity test needs this and what a
+// candidate-key comparison missed without it.
+//
+// Takes the SAME writer-queued yield the other readers take: this runs inside
+// a test binary that also runs the ENC-1340 contention suite, and a reader
+// that skips the stand-down is the reader that reintroduces the starvation
+// that suite exists to bound.
+std::vector<std::tuple<std::string, std::string, ArgType>>
+AtomicStore::snapshot() const {
+  for (int i = 0; i < kReaderYieldsWhenWriterQueued &&
+                  _writersQueued.load(std::memory_order_acquire) != 0; ++i) {
+    std::this_thread::yield();
+  }
+
+  std::vector<std::tuple<std::string, std::string, ArgType>> out;
+  {
+    std::shared_lock lock(_mutex);
+    std::size_t n = 0;
+    for (const auto& [streamKey, fieldMap] : _data) n += fieldMap.size();
+    out.reserve(n);
+    for (const auto& [streamKey, fieldMap] : _data) {
+      for (const auto& [field, value] : fieldMap) {
+        out.emplace_back(streamKey, field, value);
+      }
+    }
+  }
+
+  // Sorted by (streamKey, field) only — ArgType has no operator<, and sorting
+  // by value would be meaningless anyway: a (key, field) pair is unique, so
+  // the first two elements are already a total order.
+  std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+    if (std::get<0>(a) != std::get<0>(b)) return std::get<0>(a) < std::get<0>(b);
+    return std::get<1>(a) < std::get<1>(b);
+  });
+  return out;
 }
 
 } // namespace gma

@@ -340,6 +340,17 @@ private:
   // and happens once per record, not once per field.
   std::atomic<const data::SymbolTable*> _symbols{nullptr};
 
+  // ENC-1486. `onRecord`'s two refusals are ONCE-ONLY diagnostics, per
+  // Dispatcher. Both are reached per RECORD, and the whole premise of this
+  // path is tens of millions of records per symbol-day — a log line each would
+  // be an unbounded write amplification on the exact workload the path exists
+  // for, and the hundred-thousandth copy of a wiring error says nothing the
+  // first did not. A silent drop would be worse than either, which is why they
+  // are logged at all: an unresolvable symbolId drops EVERY record, and that
+  // must not be invisible.
+  std::atomic<bool> _warnedNoSymbolTable{false};
+  std::atomic<bool> _warnedUnresolvedSymbol{false};
+
   mutable std::shared_mutex _histMutex;
   mutable std::shared_mutex _listenerMutex;
   gma::rt::ThreadPool* _threadPool;

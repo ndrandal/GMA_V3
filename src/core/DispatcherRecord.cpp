@@ -65,11 +65,17 @@ void Dispatcher::onRecord(const data::TickRecord& rec) {
     // `symbolId` and nothing else, so without a table there is no stream key.
     // Routing under "" would put every symbol's values into one bucket and
     // every subscription would miss — a silent wrong answer, which is worse
-    // than a loud nothing. Logged at Warn, not Error, because the only way to
-    // reach it is a wiring mistake that the first record reports.
-    gma::util::logger().log(gma::util::LogLevel::Warn,
-                            "Dispatcher: onRecord with no SymbolTable installed",
-                            { {"symbolId", std::to_string(rec.header.symbolId)} });
+    // than a loud nothing. Warn, not Error, because the only way to reach it
+    // is a wiring mistake that the first record reports.
+    //
+    // ONCE per Dispatcher, not once per record — see the flag's declaration.
+    if (!_warnedNoSymbolTable.exchange(true, std::memory_order_relaxed)) {
+      gma::util::logger().log(
+          gma::util::LogLevel::Warn,
+          "Dispatcher: onRecord with no SymbolTable installed — every record "
+          "on this path is being dropped (logged once)",
+          { {"symbolId", std::to_string(rec.header.symbolId)} });
+    }
     return;
   }
 
@@ -87,6 +93,18 @@ void Dispatcher::onRecord(const data::TickRecord& rec) {
     // Either kInvalidSymbolId (a record that names no symbol) or an id this
     // table never issued. `onTick` has always dropped an empty stream key;
     // this is the same rule reached from the other side.
+    //
+    // Said out loud, once, because the failure is total and otherwise
+    // invisible: a normalizer interning into a different table than the one
+    // installed here drops EVERY record, and a silently empty chart is a much
+    // longer debugging session than one warning.
+    if (!_warnedUnresolvedSymbol.exchange(true, std::memory_order_relaxed)) {
+      gma::util::logger().log(
+          gma::util::LogLevel::Warn,
+          "Dispatcher: onRecord symbolId does not resolve to a ticker — record "
+          "dropped (logged once)",
+          { {"symbolId", std::to_string(rec.header.symbolId)} });
+    }
     return;
   }
 
