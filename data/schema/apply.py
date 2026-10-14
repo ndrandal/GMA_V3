@@ -123,6 +123,29 @@ def guard_fresh(url, how, offset, offset_was_set, explicit):
             % (offset, url, url))
 
 
+def guard_fresh_rows(url, allow_rows):
+    """The second refusal: --fresh must not silently destroy rows."""
+    try:
+        out = ch("SELECT name, total_rows FROM system.tables "
+                 "WHERE database = 'gma' AND total_rows > 0 "
+                 "ORDER BY name FORMAT TSVRaw", url)
+    except RuntimeError:
+        return                      # no server / no database: nothing to lose
+    populated = [l.split("\t") for l in out.splitlines() if l.strip()]
+    if not populated:
+        return
+    rows = ", ".join("%s=%s" % (n, r) for n, r in populated)
+    if allow_rows:
+        print("  --yes-destroy-rows: dropping a POPULATED gma (%s)" % rows)
+        return
+    raise CouldNotRun(
+        "refusing --fresh: gma at %s holds rows (%s).\n"
+        "  DROP DATABASE destroys them. Re-ingest is possible (SPEC D6 retains "
+        "the raw DBN files) but it is not free and it is not silent.\n"
+        "  Pass --yes-destroy-rows if that is genuinely what you want."
+        % (url, rows))
+
+
 def ch(sql, url):
     req = urllib.request.Request(url, data=sql.encode("utf-8"), method="POST")
     try:
@@ -186,8 +209,13 @@ def _diff_table(name, want, got):
             if col not in gc:
                 out.append("%s: column %s in the file, absent on the server" % (name, col))
             elif wc[col] != gc[col]:
-                out.append("%s: column %s — file %r, server %r"
-                           % (name, col, wc[col][1:], gc[col][1:]))
+                labels = ("type", "default", "codec")
+                parts = [
+                    "%s file %r server %r" % (lab, wc[col][i + 1], gc[col][i + 1])
+                    for i, lab in enumerate(labels)
+                    if wc[col][i + 1] != gc[col][i + 1]
+                ]
+                out.append("%s: column %s — %s" % (name, col, "; ".join(parts)))
         for col in [c[0] for c in got["columns"]]:
             if col not in wc:
                 out.append("%s: column %s on the server, absent from the file"
@@ -200,23 +228,49 @@ def _diff_table(name, want, got):
     if want["indexes"] != got["indexes"]:
         out.append("%s: indexes/projections — file %s, server %s"
                    % (name, want["indexes"], got["indexes"]))
-    for clause in ("ENGINE", "PARTITION BY", "ORDER BY"):
-        w, g = want["clauses"].get(clause), got["clauses"].get(clause)
-        if w != g:
+
+    # THE UNION OF CLAUSE KEYS, IN BOTH DIRECTIONS. The first version compared a
+    # fixed list (ENGINE / PARTITION BY / ORDER BY) and then looked for clauses
+    # the SERVER had and the file did not — so a clause present in the FILE and
+    # absent on the SERVER was invisible, and a `want` carrying TTL and SAMPLE
+    # BY against a `got` with neither reported DIFFS: []. That is precisely the
+    # case that bites, because `apply` is IF NOT EXISTS-only and therefore can
+    # NEVER add a clause to a table that already exists: the file says TTL, the
+    # server has none, apply exits 0 and verify said "matches".
+    for clause in sorted(set(want["clauses"]) | set(got["clauses"])):
+        if clause == "SETTINGS":
+            continue                      # structured; handled below
+        w = want["clauses"].get(clause)
+        g = got["clauses"].get(clause)
+        if w == g:
+            continue
+        if clause in _DERIVED_CLAUSES and w is None:
+            continue                      # server derives PRIMARY KEY from ORDER BY
+        if w is None:
+            out.append("%s: server has a %s clause the file does not: %r"
+                       % (name, clause, g))
+        elif g is None:
+            out.append("%s: the FILE has a %s clause the server does not: %r. "
+                       "`apply` is IF NOT EXISTS-only and cannot add it to an "
+                       "existing table — this needs an ALTER or a reload."
+                       % (name, clause, w))
+        else:
             out.append("%s: %s — file %r, server %r" % (name, clause, w, g))
+
     ws = want["clauses"].get("SETTINGS", {}) or {}
     gs = got["clauses"].get("SETTINGS", {}) or {}
-    for k, v in ws.items():
-        if gs.get(k) != v:
-            out.append("%s: SETTINGS %s — file %r, server %r" % (name, k, v, gs.get(k)))
-    for clause in got["clauses"]:
-        if clause in ("SETTINGS", "ENGINE", "PARTITION BY", "ORDER BY"):
+    for k in sorted(set(ws) | set(gs)):
+        if ws.get(k) == gs.get(k):
             continue
-        if clause in _DERIVED_CLAUSES and clause not in want["clauses"]:
-            continue
-        if clause not in want["clauses"]:
-            out.append("%s: server has a %s clause the file does not: %r"
-                       % (name, clause, got["clauses"][clause]))
+        if k not in gs:
+            out.append("%s: the FILE sets SETTINGS %s = %r; the server does not "
+                       "set it at all" % (name, k, ws[k]))
+        elif k not in ws:
+            out.append("%s: the server sets SETTINGS %s = %r; the file does not"
+                       % (name, k, gs[k]))
+        else:
+            out.append("%s: SETTINGS %s — file %r, server %r"
+                       % (name, k, ws[k], gs[k]))
     return out
 
 
