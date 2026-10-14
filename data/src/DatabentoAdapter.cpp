@@ -260,7 +260,7 @@ void DatabentoAdapter::trackOrder(const OrderKey& k, std::uint64_t size) {
   // oldest bucket entry once the cap is hit. Dropping tracking only forfeits
   // delta resolution for that order; memory stays bounded.
   if (orders_.size() >= cfg_.maxTrackedOrders && orders_.find(k) == orders_.end()) {
-    orders_.erase(orders_.begin());
+    /*no evict*/;
     ++stats_.evictedOrders;
   }
   orders_[k] = size;
