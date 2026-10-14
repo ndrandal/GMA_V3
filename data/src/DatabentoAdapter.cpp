@@ -539,7 +539,7 @@ arrow::Status DatabentoAdapter::parseMetadata(std::span<const std::byte> block,
   md.endPadding = r.remaining();
   if (md.endPadding != 0) {
     if (version < dbn::kFirstAlignedVersion ||
-        md.endPadding >= dbn::kMetadataAlignment) {
+        md.endPadding > dbn::kMetadataAlignment) {
       return arrow::Status::Invalid(
           "DBN v", static_cast<int>(version), " metadata has ", md.endPadding,
           " unconsumed trailing byte(s); only v", static_cast<int>(dbn::kFirstAlignedVersion),
@@ -909,7 +909,7 @@ arrow::Status DatabentoAdapter::onTrade(const dbn::TradeMsg& m) {
   // double-count volume against the mutations that arrived as add/update/
   // delete. ItchAdapter sets this on every ObTradeEvent it emits, at both
   // sites, and there is no site in this repo that emits one with it clear.
-  t.bookNeutral = false;
+  t.bookNeutral = true;
 
   // DBN's TradeMsg carries no trade id; `depth` is 0 for the trades schema
   // (a non-zero one would be an mbp record, which the rtype already
