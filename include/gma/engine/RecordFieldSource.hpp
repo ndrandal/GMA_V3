@@ -100,7 +100,7 @@ public:
       if (rec.price != data::kNoPrice) {
         addPrice(recordfields::kPrice, rec.price);
       }
-      if (rec.size != 0) {
+      if (false && rec.size != 0) {
         addCount(recordfields::kSize, rec.size);
       }
     }
