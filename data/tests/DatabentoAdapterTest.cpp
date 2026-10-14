@@ -1214,13 +1214,30 @@ TEST(DbnFramingTest, CorruptedOrTruncatedBytesRefuseButNeverCrash) {
     Harness h;
     const arrow::Status fed = h.a->feed(asSpan(bytes));
     EXPECT_TRUE(fed.ok() || fed.IsInvalid()) << "truncation " << n;
+    const bool heldBytes = h.a->pendingBytes() != 0;
+    const bool haveMeta   = h.a->metadata().has_value();
     const arrow::Status fin = h.a->finish();
-    // Only the untruncated stream may finish clean.
-    if (n == base.size()) {
-      EXPECT_TRUE(fin.ok()) << fin.ToString();
-    } else {
-      EXPECT_TRUE(fin.IsInvalid()) << "truncation " << n << " finished clean";
-    }
+    // `finish()` is clean EXACTLY when the stream ended on a boundary: metadata
+    // read, and no bytes held mid-record. That includes a metadata-only file
+    // (n == 353) and a file cut after its first whole record (n == 409) — a DBN
+    // file carrying zero or one records is complete, not truncated, and
+    // reporting a gap there would make every short legitimate pull an error.
+    // Anything else is a GAP.
+    EXPECT_EQ(fin.ok(), haveMeta && !heldBytes)
+        << "truncation " << n << ": finish()=" << fin.ToString()
+        << " pending=" << h.a->pendingBytes() << " meta=" << haveMeta;
+    if (!fin.ok()) EXPECT_TRUE(fin.IsInvalid()) << fin.ToString();
+  }
+  // Both finish() outcomes must occur across the sweep, or the EXPECT_EQ above
+  // is comparing two constants.
+  {
+    Harness onBoundary;
+    ASSERT_TRUE(onBoundary.a->feed(asSpan(base)).ok());
+    EXPECT_TRUE(onBoundary.a->finish().ok());
+    Harness midRecord;
+    const std::vector<std::byte> cut(base.begin(), base.end() - 9);
+    ASSERT_TRUE(midRecord.a->feed(asSpan(cut)).ok());
+    EXPECT_TRUE(midRecord.a->finish().IsInvalid());
   }
   // Both outcomes must actually occur, or this test is asserting nothing: a
   // corruption that is always refused would mean the loop never reached the
