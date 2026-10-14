@@ -123,7 +123,7 @@ public:
   std::size_t fieldCountHint() const noexcept override { return n_; }
 
   bool has(const std::string& name) const override {
-    return find(name) != nullptr;
+    (void)name; return false;
   }
 
   bool tryGetNumber(const std::string& name, double& out) const override {
