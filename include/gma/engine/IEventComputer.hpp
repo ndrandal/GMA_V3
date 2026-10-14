@@ -63,7 +63,9 @@ public:
   // NOT what the Dispatcher calls — `onTick` wraps once per tick rather than
   // once per computer. Used by connector unit tests.
   //
-  // A null or non-object payload is a no-op, as it was before.
+  // A null or non-object payload is an EMPTY FIELD SET, not a skipped call:
+  // the computer is still entered, exactly as it was before this type took a
+  // FieldSource, and decides for itself what to do with no fields.
   void computeEvent(const Event& e, ComputeContext& ctx);
 };
 

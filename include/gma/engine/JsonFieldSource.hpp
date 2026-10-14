@@ -43,37 +43,48 @@ namespace gma::engine {
 class JsonFieldSource final : public FieldSource {
 public:
   explicit JsonFieldSource(const rapidjson::Value& payload) noexcept
+    : payload_(&payload) {}
+
+  // NULL-ACCEPTING OVERLOAD, for `IEventComputer::computeEvent`: an `Event`
+  // with no payload at all is an empty field set, not a skipped computer.
+  // That keeps the pre-ENC-1486 behaviour of driving a computer directly with
+  // a default-constructed `Event` — the computer WAS entered and bailed on
+  // `!e.payload` itself (tests/engine/RegistriesTest.cpp counts exactly that),
+  // so swallowing the call here would have changed what "invoked" means.
+  explicit JsonFieldSource(const rapidjson::Value* payload) noexcept
     : payload_(payload) {}
 
-  bool isObject() const noexcept override { return payload_.IsObject(); }
+  bool isObject() const noexcept override {
+    return payload_ != nullptr && payload_->IsObject();
+  }
 
   std::size_t fieldCountHint() const noexcept override {
-    return payload_.IsObject() ? payload_.MemberCount() : 0u;
+    return isObject() ? payload_->MemberCount() : 0u;
   }
 
   bool has(const std::string& name) const override {
-    if (!payload_.IsObject()) return false;
-    return payload_.FindMember(name.c_str()) != payload_.MemberEnd();
+    if (!isObject()) return false;
+    return payload_->FindMember(name.c_str()) != payload_->MemberEnd();
   }
 
   bool tryGetNumber(const std::string& name, double& out) const override {
-    if (!payload_.IsObject()) return false;
-    auto it = payload_.FindMember(name.c_str());
-    if (it == payload_.MemberEnd() || !it->value.IsNumber()) return false;
+    if (!isObject()) return false;
+    auto it = payload_->FindMember(name.c_str());
+    if (it == payload_->MemberEnd() || !it->value.IsNumber()) return false;
     out = it->value.GetDouble();
     return true;
   }
 
   bool tryGetUint64(const std::string& name, std::uint64_t& out) const override {
-    if (!payload_.IsObject()) return false;
-    auto it = payload_.FindMember(name.c_str());
-    if (it == payload_.MemberEnd() || !it->value.IsUint64()) return false;
+    if (!isObject()) return false;
+    auto it = payload_->FindMember(name.c_str());
+    if (it == payload_->MemberEnd() || !it->value.IsUint64()) return false;
     out = it->value.GetUint64();
     return true;
   }
 
   void forEachNumber(NumericFieldSink& sink) const override {
-    if (!payload_.IsObject()) return;
+    if (!isObject()) return;
     // ONE reused buffer, not a fresh `std::string` per member. The pre-ENC-1486
     // loop constructed a `std::string name(it->name.GetString(), ...)` per
     // member per tick — the cost docs/data-layer.md §C6 names — and the sink
@@ -81,7 +92,7 @@ public:
     // here would be pure waste. `assign` reuses the capacity, so a tick costs
     // at most one allocation for names rather than one per member.
     std::string name;
-    for (auto it = payload_.MemberBegin(); it != payload_.MemberEnd(); ++it) {
+    for (auto it = payload_->MemberBegin(); it != payload_->MemberEnd(); ++it) {
       if (!it->name.IsString() || !it->value.IsNumber()) continue;
       name.assign(it->name.GetString(), it->name.GetStringLength());
       sink.field(name, it->value.GetDouble());
@@ -89,7 +100,7 @@ public:
   }
 
 private:
-  const rapidjson::Value& payload_;
+  const rapidjson::Value* payload_;
 };
 
 } // namespace gma::engine
