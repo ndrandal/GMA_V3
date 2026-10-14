@@ -35,6 +35,8 @@ include(GmaDataArrow)
 add_library(gma_data STATIC
   "${CMAKE_CURRENT_SOURCE_DIR}/src/Schema.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/include/gma/data/Schema.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/DatabentoAdapter.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/gma/data/DatabentoAdapter.hpp"
 )
 
 # PUBLIC: a consumer of gma_data sees the L1 schema headers.
@@ -61,6 +63,14 @@ if (GMA_BUILD_TESTS AND TARGET GTest::gtest_main)
   file(GLOB GMA_DATA_TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
   add_executable(gma_data_tests ${GMA_DATA_TEST_SOURCES})
   target_link_libraries(gma_data_tests PRIVATE gma_data GTest::gtest_main)
+  # The DBN fixtures are REAL VENDOR BYTES (data/tests/fixtures/dbn/, see
+  # PROVENANCE.md there) and are read from the source tree rather than copied
+  # beside the binary: a copy step is one more thing that can silently copy
+  # nothing and leave a test skipping instead of failing. The path is absolute
+  # so it holds regardless of the test's working directory, and the fixture
+  # test FAILS (never skips) when a file is missing.
+  target_compile_definitions(gma_data_tests PRIVATE
+    GMA_DATA_DBN_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/dbn")
   gma_apply_warnings(gma_data_tests)
   add_test(NAME gma_data_tests
     COMMAND gma_data_tests
