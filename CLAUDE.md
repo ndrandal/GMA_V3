@@ -124,7 +124,15 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture including 
   `gma_server`, while `-DGMA_BUILD_TESTS=ON` builds and tests the data layer. An explicit
   `-DGMA_BUILD_DATA=ON|OFF` always wins and the configure says which way it resolved.
   `-DGMA_DATA_ARROW_FORCE_FETCH=ON` skips `find_package` when an installed Arrow is
-  present but unusable.
+  present but unusable — **it only exists when the data layer is in the build**, because it
+  is declared in `data/cmake/GmaDataArrow.cmake`, so pass it with `-DGMA_BUILD_DATA=ON` or
+  alongside `-DGMA_BUILD_TESTS=ON`. On its own with tests off it is an unused-variable
+  warning and nothing else. Conversely, `GMA_BUILD_DATA=OFF` while `GMA_BUILD_TESTS=ON`
+  now emits a `CMake Warning`: `gma_data_tests` is absent and the isolation gate's Arrow
+  positive control cannot run, so a green `ctest` there excludes the data layer. That is
+  intended for D14's live-only variant and is a stale cache otherwise — `option()` writes
+  `GMA_BUILD_DATA` on a build dir's first configure and a later `-DGMA_BUILD_TESTS=ON`
+  does not move it.
 - **Boost.Asio / Beast** — networking + WebSocket
 - **RapidJSON** — JSON parsing and validation
 - **GoogleTest** — unit + integration tests

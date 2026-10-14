@@ -131,6 +131,24 @@ arrow::Result<std::vector<SymbolId>> internDictionary(
                                   " dictionary values are not utf8");
   }
   const auto& strings = static_cast<const arrow::StringArray&>(values);
+  // A NULL HERE IS INVISIBLE TO Array::null_count() ON THE COLUMN, which
+  // reports the null count of the dictionary's INDICES, not of its values. An
+  // unchecked null value becomes GetView(i) == "" and then an ordinary interned
+  // id (SymbolTableTest.EmptyStringGetsAnOrdinaryId pins that), i.e. a record
+  // naming a real symbol called "" with Status::OK() — the same confusion the
+  // encoder refuses an un-interned id to avoid, arriving from the other end.
+  if (strings.null_count() != 0) {
+    return arrow::Status::Invalid(
+        "gma::data: ", what, " dictionary holds ", strings.null_count(),
+        " null value(s); a null ticker would decode to an interned \"\", which "
+        "is indistinguishable from a provider gap");
+  }
+  if (dict.indices()->null_count() != 0) {
+    return arrow::Status::Invalid(
+        "gma::data: ", what, " dictionary indices hold ",
+        dict.indices()->null_count(),
+        " null(s), but the column is declared non-nullable");
+  }
   std::vector<SymbolId> ids;
   ids.reserve(static_cast<std::size_t>(strings.length()));
   for (std::int64_t i = 0; i < strings.length(); ++i) {
@@ -202,12 +220,30 @@ arrow::Result<const ArrayType*> column(const arrow::RecordBatch& batch,
 // over `FORMAT ArrowStream` (ENC-1485's transport) is not under our control,
 // so this is a wire input, not an internal invariant.
 //
-// The bounds mirror include/gma/data/Record.hpp. Adding an enumerator there
-// means raising the bound here; `EnumDomainBoundsMatchRecordHpp` in
-// data/tests/SchemaRoundTripTest.cpp reddens if the two drift.
-inline constexpr std::uint8_t kMaxSideValue       = 1;  // Side::Ask
-inline constexpr std::uint8_t kMaxAggressorValue  = 2;  // Aggressor::Sell
-inline constexpr std::uint8_t kMaxBookActionValue = 5;  // BookAction::Clear
+// THE BOUNDS ARE NAMED IN TERMS OF THE LAST ENUMERATOR, not as magic numbers,
+// so a renamed enumerator is a compile error rather than a silent off-by-one.
+// What they cannot be is self-maintaining: C++ gives no way to ask for an
+// enum's largest enumerator, and these three enums mirror the engine's own
+// (Record.hpp's header comment) one-for-one, so adding a sentinel to them is
+// not available either.
+//
+// SO BE PRECISE ABOUT WHAT IS GUARDED, because the first version of this
+// comment claimed a drift guard that does not exist. ADDING AN ENUMERATOR
+// PAST THE ONE NAMED BELOW REQUIRES EDITING THIS LINE BY HAND. If you forget,
+// the codec rejects a value that is now legal, every existing test stays
+// green, and `DecodeAcceptsEveryDeclaredEnumerator` in
+// data/tests/SchemaRoundTripTest.cpp is the one place that will tell you —
+// but only once you add the new enumerator to ITS list too, which is why that
+// test enumerates them one per line instead of looping a range. The tests DO
+// catch the opposite drift (a bound raised here without the domain tests
+// following), and they catch any out-of-domain wire value, which is what the
+// check is actually for.
+inline constexpr std::uint8_t kMaxSideValue =
+    static_cast<std::uint8_t>(Side::Ask);
+inline constexpr std::uint8_t kMaxAggressorValue =
+    static_cast<std::uint8_t>(Aggressor::Sell);
+inline constexpr std::uint8_t kMaxBookActionValue =
+    static_cast<std::uint8_t>(BookAction::Clear);
 
 template <typename Enum>
 arrow::Result<Enum> enumAt(const arrow::UInt8Array& column, std::int64_t row,
@@ -236,6 +272,18 @@ arrow::Result<Enum> enumAt(const arrow::UInt8Array& column, std::int64_t row,
 // ArrowStream into `price->Value(i)` reading past the Arrow buffer. That is an
 // out-of-bounds read, not a Status, so it is checked before the first Value()
 // call rather than after. Validate() is O(columns), not O(rows).
+//
+// WHAT Validate() DOES NOT COVER, stated because "checked before the first
+// read" is true of Value() and not of everything: it is
+// ValidateBatch(full_validation=false), which checks each column's length and
+// type against the schema but does NOT validate offset *values* inside a
+// variable-width array (arrow/array/validate.cc gates that on full
+// validation). So a dictionary whose StringArray offsets are corrupt still
+// reaches GetView() in internDictionary. ValidateFull() would catch it and is
+// deliberately not called: it is O(rows) on every batch on the decode path,
+// which is the one place in this design that is explicitly a per-batch cost.
+// A corrupt-offsets ArrowStream is therefore still out of scope here; the
+// transport, not the codec, is where that gets a checksum (ENC-1485).
 //
 // Nulls are refused for the same reason one level up: every field in every
 // canonical schema is declared non-nullable (see Schema.hpp), so a column with
@@ -356,6 +404,36 @@ struct HeaderBuilders {
     ARROW_ASSIGN_OR_RAISE(a, venue.finish());     out->push_back(a);
     return arrow::Status::OK();
   }
+};
+
+// Rolls `out` back to the size it had on entry unless the decode is dismissed.
+//
+// The contract (Schema.hpp) is that `out` is APPENDED TO, not cleared, so a
+// caller may accumulate across batches. That only works if a REFUSED batch
+// contributes nothing: otherwise a caller that accumulates and checks the
+// Status at the end is holding rows [0, i) of a batch the codec rejected
+// mid-loop. The enum and dictionary checks above make mid-loop refusal a
+// routine wire-input outcome rather than a corrupt-memory edge case, so the
+// decoders are all-or-nothing about their own appends.
+template <typename T>
+class AppendRollback {
+ public:
+  explicit AppendRollback(std::vector<T>& out)
+      : out_(out), mark_(out.size()) {}
+  ~AppendRollback() {
+    if (!dismissed_ && out_.size() > mark_) {
+      out_.resize(mark_);
+    }
+  }
+  void dismiss() { dismissed_ = true; }
+
+  AppendRollback(const AppendRollback&) = delete;
+  AppendRollback& operator=(const AppendRollback&) = delete;
+
+ private:
+  std::vector<T>& out_;
+  std::size_t mark_;
+  bool dismissed_ = false;
 };
 
 arrow::MemoryPool* poolOr(arrow::MemoryPool* pool) {
@@ -659,6 +737,7 @@ arrow::Status decodeTicks(const arrow::RecordBatch& batch, RecordKind kind,
     ARROW_ASSIGN_OR_RAISE(askCt, column<arrow::UInt32Array>(batch, "ask_ct"));
   }
 
+  AppendRollback<TickRecord> rollback(out);
   out.reserve(out.size() + static_cast<std::size_t>(batch.num_rows()));
   for (std::int64_t i = 0; i < batch.num_rows(); ++i) {
     TickRecord r;
@@ -683,6 +762,7 @@ arrow::Status decodeTicks(const arrow::RecordBatch& batch, RecordKind kind,
     r.flags = flags->Value(i);
     out.push_back(r);
   }
+  rollback.dismiss();
   return arrow::Status::OK();
 }
 
@@ -703,6 +783,7 @@ arrow::Status decodeBookEvents(const arrow::RecordBatch& batch,
   ARROW_ASSIGN_OR_RAISE(const auto* epoch, column<arrow::UInt32Array>(batch, "epoch"));
   ARROW_ASSIGN_OR_RAISE(const auto* flags, column<arrow::UInt16Array>(batch, "flags"));
 
+  AppendRollback<BookRecord> rollback(out);
   out.reserve(out.size() + static_cast<std::size_t>(batch.num_rows()));
   for (std::int64_t i = 0; i < batch.num_rows(); ++i) {
     BookRecord r;
@@ -721,6 +802,7 @@ arrow::Status decodeBookEvents(const arrow::RecordBatch& batch,
     r.flags = flags->Value(i);
     out.push_back(r);
   }
+  rollback.dismiss();
   return arrow::Status::OK();
 }
 
@@ -737,6 +819,7 @@ arrow::Status decodeBookSnapshots(const arrow::RecordBatch& batch,
   ARROW_ASSIGN_OR_RAISE(const auto* size, column<arrow::UInt64Array>(batch, "size"));
   ARROW_ASSIGN_OR_RAISE(const auto* count, column<arrow::UInt32Array>(batch, "order_count"));
 
+  AppendRollback<SnapshotRecord> rollback(out);
   out.reserve(out.size() + static_cast<std::size_t>(batch.num_rows()));
   for (std::int64_t i = 0; i < batch.num_rows(); ++i) {
     SnapshotRecord r;
@@ -749,6 +832,7 @@ arrow::Status decodeBookSnapshots(const arrow::RecordBatch& batch,
     r.level.orderCount = count->Value(i);
     out.push_back(r);
   }
+  rollback.dismiss();
   return arrow::Status::OK();
 }
 

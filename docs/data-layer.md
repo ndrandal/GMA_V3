@@ -861,9 +861,11 @@ wall-clock cadence by construction; formerly Q13), and multi-symbol graphs where
 | DuckDB | — | **dropped.** Largest dependency; existed only to query Parquet |
 | Databento client | avoidable by decoding DBN directly | **Q14** |
 
-The client profile (C10) needs Arrow plus a wire client and no store — far smaller than
-Arrow+Parquet+DuckDB. Build `gma_data` separately linkable so a live-only deployment omits
-it.
+D14's client profile has two variants and they do not cost the same. The **over-the-wire**
+variant (C10) needs Arrow plus a wire client and no store — far smaller than
+Arrow+Parquet+DuckDB. The **live-only** variant needs no Arrow at all, which is the whole
+premise of `GMA_BUILD_DATA=OFF`. `gma_data` is separately linkable so that one omits it,
+and §15.1's Release row sizes the first, not the second.
 
 ### 15.1 Arrow, measured — ENC-1481, 2026-10-14
 
@@ -889,7 +891,8 @@ Box: Fedora 44, 16 cores, GCC 16.2.1, CMake 4.3.0, Ninja. Arrow **23.0.1** from
 
 The download dominates, and it is a one-time cost per build tree; a warm tree pays none of
 it. Debug `libarrow.a` is an order of magnitude larger than Release because it is `-O0`
-with full debug info — size the client profile off the Release row.
+with full debug info — size the over-the-wire client variant off the Release row (the
+live-only variant links no Arrow at all).
 
 **Who pays it: `GMA_BUILD_DATA` defaults to `GMA_BUILD_TESTS`.** `-DGMA_BUILD_TESTS=ON` —
 the acceptance command and every gate configuration — builds `gma_data` and runs both

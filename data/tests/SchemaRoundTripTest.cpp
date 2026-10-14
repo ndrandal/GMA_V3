@@ -18,6 +18,8 @@
 
 #include <arrow/array/array_base.h>
 #include <arrow/array/array_dict.h>
+#include <arrow/array/array_binary.h>
+#include <arrow/array/builder_binary.h>
 #include <arrow/array/builder_primitive.h>
 #include <arrow/ipc/options.h>
 #include <arrow/ipc/reader.h>
@@ -224,9 +226,17 @@ std::vector<SnapshotRecord> snapshotFixtures(const Tables& t) {
 std::shared_ptr<arrow::RecordBatch> withColumnReplaced(
     const arrow::RecordBatch& batch, const char* name,
     const std::shared_ptr<arrow::Array>& replacement) {
-  const int idx = batch.schema()->GetFieldIndex(name);
-  EXPECT_GE(idx, 0) << "no column named " << name;
   auto cols = batch.columns();
+  const int idx = batch.schema()->GetFieldIndex(name);
+  // GetFieldIndex returns -1 for a name that is not there, and
+  // cols[static_cast<size_t>(-1)] is an out-of-bounds WRITE -- in a helper
+  // whose whole subject is refusing out-of-bounds indexing. Return the batch
+  // unmodified and let the caller's assertion be the thing that fails.
+  if (idx < 0) {
+    ADD_FAILURE() << "withColumnReplaced: no column named '" << name
+                  << "' in " << batch.schema()->ToString();
+    return arrow::RecordBatch::Make(batch.schema(), batch.num_rows(), cols);
+  }
   cols[static_cast<std::size_t>(idx)] = replacement;
   return arrow::RecordBatch::Make(batch.schema(), batch.num_rows(), cols);
 }
@@ -681,9 +691,16 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ipcRoundTrip(
   return got;
 }
 
-// Encode -> stream -> decode, for one table. The header and both dictionary
-// columns are checked here for every table; `compare` adds that table's
-// payload fields.
+// Encode -> stream -> decode, for one table. All seven header columns and both
+// dictionary columns are checked here for every table; `compare` adds that
+// table's payload fields.
+//
+// What this does NOT assert: that the compressed bodies were actually
+// compressed. Arrow gives no portable way to read a stream's body
+// compression back, so the real assertion about the codecs is that
+// `Codec::Create` succeeds at all -- it fails outright when the codec was not
+// built, which is the thing GMA_DATA_ARROW_IPC_CODECS controls. If Arrow ever
+// silently ignored IpcWriteOptions::codec, these cases would still pass.
 template <typename Record, typename Encode, typename Decode, typename Compare>
 void expectStreamRoundTrip(const Tables& t, const std::vector<Record>& in,
                            arrow::Compression::type compression,
@@ -709,7 +726,9 @@ void expectStreamRoundTrip(const Tables& t, const std::vector<Record>& in,
     EXPECT_EQ(venues.name(out[i].header.venueId),
               t.venues.name(in[i].header.venueId));
     EXPECT_EQ(out[i].header.tsEventNs, in[i].header.tsEventNs);
+    EXPECT_EQ(out[i].header.tsRecvNs, in[i].header.tsRecvNs);
     EXPECT_EQ(out[i].header.providerSeq, in[i].header.providerSeq);
+    EXPECT_EQ(out[i].header.sessionId, in[i].header.sessionId);
     EXPECT_EQ(out[i].header.instrumentId, in[i].header.instrumentId);
     compare(out[i], in[i]);
   }
@@ -829,13 +848,80 @@ TEST(IpcTest, TheIpcCodecsClickHouseDefaultsToAreActuallyBuilt) {
 // is wrong rather than absent.
 
 TEST(CodecRefusalTest, EnumDomainBoundsMatchRecordHpp) {
-  // The codec bounds enum columns with three constants in Schema.cpp that
-  // mirror these enumerators. This pins the values those constants were
-  // derived from; the two tests below pin the behaviour, so adding an
-  // enumerator without raising the bound reddens there.
+  // The codec bounds enum columns against the LAST enumerator of each enum
+  // (kMaxSideValue &c. in Schema.cpp). This pins the values those bounds
+  // resolve to today, so a reordering that moves the largest enumerator is
+  // visible here rather than only in behaviour.
   EXPECT_EQ(static_cast<std::uint8_t>(Side::Ask), 1);
   EXPECT_EQ(static_cast<std::uint8_t>(Aggressor::Sell), 2);
   EXPECT_EQ(static_cast<std::uint8_t>(BookAction::Clear), 5);
+}
+
+// THE DRIFT GUARD, and the reason it is written out longhand.
+//
+// C++ cannot ask an enum for its largest enumerator, so the codec's bounds are
+// maintained by hand. If someone adds `BookAction::NewThing = 6` and forgets
+// the bound, the codec starts refusing a LEGAL value — and every refusal test
+// stays green, because they all assert that out-of-domain bytes are rejected.
+// The only thing that catches that direction is a list of the enumerators the
+// codec must ACCEPT. Listing them one per line is deliberate: a range loop
+// would silently cover a new enumerator and assert nothing about the bound,
+// whereas this list is a thing the person adding an enumerator has to come and
+// extend, at which point the test fails and names the bound.
+TEST(CodecRefusalTest, DecodeAcceptsEveryDeclaredEnumerator) {
+  Tables t;
+  SymbolTable symbols, venues;
+
+  const std::vector<BookAction> allActions = {
+      BookAction::Add, BookAction::Update, BookAction::Delete,
+      BookAction::Trade, BookAction::TickSize, BookAction::Clear,
+  };
+  const std::vector<Side> allSides = {Side::Bid, Side::Ask};
+  const std::vector<Aggressor> allAggressors = {
+      Aggressor::Unknown, Aggressor::Buy, Aggressor::Sell,
+  };
+
+  auto book = encodeBookEvents(bookFixtures(t), t.symbols, t.venues);
+  ASSERT_TRUE(book.ok()) << book.status().ToString();
+  for (const auto action : allActions) {
+    SCOPED_TRACE("action=" + std::to_string(static_cast<int>(action)));
+    const int v = static_cast<int>(action);
+    auto b = withColumnReplaced(**book, "action", uint8Column({v, v, v}));
+    std::vector<BookRecord> out;
+    const auto st = decodeBookEvents(*b, symbols, venues, out);
+    EXPECT_TRUE(st.ok())
+        << st.ToString()
+        << "\n  a DECLARED BookAction was refused: raise kMaxBookActionValue "
+           "in data/src/Schema.cpp to the new last enumerator";
+    if (st.ok()) {
+      ASSERT_EQ(out.size(), 3u);
+      EXPECT_EQ(out[0].action, action);
+    }
+    out.clear();
+  }
+  for (const auto side : allSides) {
+    SCOPED_TRACE("side=" + std::to_string(static_cast<int>(side)));
+    const int v = static_cast<int>(side);
+    auto b = withColumnReplaced(**book, "side", uint8Column({v, v, v}));
+    std::vector<BookRecord> out;
+    const auto st = decodeBookEvents(*b, symbols, venues, out);
+    EXPECT_TRUE(st.ok()) << st.ToString()
+                         << "\n  a DECLARED Side was refused: raise "
+                            "kMaxSideValue in data/src/Schema.cpp";
+  }
+
+  auto trades = encodeTrades(tradeFixtures(t), t.symbols, t.venues);
+  ASSERT_TRUE(trades.ok()) << trades.status().ToString();
+  for (const auto aggressor : allAggressors) {
+    SCOPED_TRACE("aggressor=" + std::to_string(static_cast<int>(aggressor)));
+    const int v = static_cast<int>(aggressor);
+    auto b = withColumnReplaced(**trades, "aggressor", uint8Column({v, v, v}));
+    std::vector<TickRecord> out;
+    const auto st = decodeTicks(*b, RecordKind::Trade, symbols, venues, out);
+    EXPECT_TRUE(st.ok()) << st.ToString()
+                         << "\n  a DECLARED Aggressor was refused: raise "
+                            "kMaxAggressorValue in data/src/Schema.cpp";
+  }
 }
 
 TEST(CodecRefusalTest, AnOutOfDomainBookActionOrSideIsRefused) {
@@ -956,6 +1042,87 @@ TEST(CodecRefusalTest, ABatchWhoseNumRowsExceedsItsColumnsIsRefused) {
       (*snaps)->schema(), (*snaps)->num_rows() + 4096, (*snaps)->columns());
   std::vector<SnapshotRecord> snapOut;
   EXPECT_FALSE(decodeBookSnapshots(*lyingSnaps, symbols, venues, snapOut).ok());
+}
+
+TEST(CodecRefusalTest, ANullInADictionaryValueIsRefused) {
+  // The one a column-level null_count() cannot see: Array::null_count() on a
+  // DictionaryArray counts nulls in its INDICES, so a null in the dictionary's
+  // VALUES array is invisible to it. Unchecked, GetView() on that slot yields
+  // "" and SymbolTable::intern("") issues an ordinary id (pinned by
+  // SymbolTableTest.EmptyStringGetsAnOrdinaryId) — so the record names a real
+  // symbol called "", with Status::OK(). That is the exact confusion the
+  // ENCODER refuses an un-interned id to avoid, arriving from the other end.
+  Tables t;
+  auto batch = encodeTrades(tradeFixtures(t), t.symbols, t.venues);
+  ASSERT_TRUE(batch.ok()) << batch.status().ToString();
+  const auto& dict = static_cast<const arrow::DictionaryArray&>(
+      *(*batch)->GetColumnByName("symbol"));
+
+  const auto& originalValues =
+      static_cast<const arrow::StringArray&>(*dict.dictionary());
+  arrow::StringBuilder values;
+  ASSERT_TRUE(values.AppendNull().ok());          // was "AAPL"
+  for (std::int64_t i = 1; i < originalValues.length(); ++i) {
+    ASSERT_TRUE(values.Append(originalValues.GetView(i)).ok());
+  }
+  std::shared_ptr<arrow::Array> nulledValues;
+  ASSERT_TRUE(values.Finish(&nulledValues).ok());
+  auto poisoned = arrow::DictionaryArray::FromArrays(
+      dict.type(), dict.indices(), nulledValues);
+  ASSERT_TRUE(poisoned.ok()) << poisoned.status().ToString();
+  // The column-level null count still reads zero — which is why this needed
+  // its own check rather than the generic one.
+  EXPECT_EQ((*poisoned)->null_count(), 0);
+
+  auto bad = withColumnReplaced(**batch, "symbol", *poisoned);
+  SymbolTable symbols, venues;
+  std::vector<TickRecord> out;
+  const auto st = decodeTicks(*bad, RecordKind::Trade, symbols, venues, out);
+  EXPECT_FALSE(st.ok()) << "a null ticker decoded into an interned \"\"";
+  EXPECT_NE(st.ToString().find("null"), std::string::npos) << st.ToString();
+}
+
+TEST(CodecRefusalTest, ARefusedBatchAppendsNothing) {
+  // `out` is append-only across batches (Schema.hpp), which only works if a
+  // refused batch contributes nothing: a caller that accumulates and checks
+  // the Status at the end would otherwise be holding rows [0, i) of a batch
+  // the codec rejected. The enum and dictionary checks make mid-loop refusal
+  // routine, so this is the normal path, not an edge case.
+  Tables t;
+  SymbolTable symbols, venues;
+
+  // Seed with one good batch so the test distinguishes "rolled back to entry"
+  // from "cleared".
+  std::vector<BookRecord> out;
+  auto good = encodeBookEvents(bookFixtures(t), t.symbols, t.venues);
+  ASSERT_TRUE(good.ok()) << good.status().ToString();
+  ASSERT_TRUE(decodeBookEvents(**good, symbols, venues, out).ok());
+  const std::size_t accumulated = out.size();
+  ASSERT_EQ(accumulated, 3u);
+
+  // Row 0 is legal, row 1 is not: an unguarded decode leaves row 0 behind.
+  auto bad = withColumnReplaced(**good, "action", uint8Column({0, 9, 4}));
+  const auto st = decodeBookEvents(*bad, symbols, venues, out);
+  ASSERT_FALSE(st.ok()) << "the fixture for this test is not being refused";
+  EXPECT_EQ(out.size(), accumulated)
+      << "a refused batch left " << (out.size() - accumulated)
+      << " partially-decoded row(s) in the caller's vector";
+
+  std::vector<TickRecord> ticks;
+  auto trades = encodeTrades(tradeFixtures(t), t.symbols, t.venues);
+  ASSERT_TRUE(trades.ok()) << trades.status().ToString();
+  auto badTrades = withColumnReplaced(**trades, "aggressor",
+                                      uint8Column({1, 3, 2}));
+  ASSERT_FALSE(
+      decodeTicks(*badTrades, RecordKind::Trade, symbols, venues, ticks).ok());
+  EXPECT_TRUE(ticks.empty()) << ticks.size() << " row(s) survived a refusal";
+
+  std::vector<SnapshotRecord> snaps;
+  auto snapBatch = encodeBookSnapshots(snapshotFixtures(t), t.symbols, t.venues);
+  ASSERT_TRUE(snapBatch.ok()) << snapBatch.status().ToString();
+  auto badSnaps = withColumnReplaced(**snapBatch, "side", uint8Column({0, 1, 2}));
+  ASSERT_FALSE(decodeBookSnapshots(*badSnaps, symbols, venues, snaps).ok());
+  EXPECT_TRUE(snaps.empty()) << snaps.size() << " row(s) survived a refusal";
 }
 
 TEST(CodecRefusalTest, ANullInANonNullableColumnIsRefused) {

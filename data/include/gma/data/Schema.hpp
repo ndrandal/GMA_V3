@@ -163,7 +163,19 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> encodeBookSnapshots(
 //
 // The batch's schema is checked against the expected one first, so decoding a
 // book batch as trades fails loudly instead of reading `action` as a price.
-// `out` is appended to, not cleared, so a caller may accumulate across batches.
+// `out` is appended to, not cleared, so a caller may accumulate across batches
+// — and a REFUSED batch appends nothing. The two go together: a decode that
+// left a partial prefix behind would make accumulate-then-check-the-Status
+// silently wrong, and these functions refuse mid-loop as a matter of course
+// (an out-of-domain enum byte, a null in a dictionary) rather than only on
+// corrupt memory.
+//
+// What the batch is checked for, beyond its schema: internal consistency
+// (arrow::RecordBatch::Validate — column lengths against num_rows, which is
+// every decoder's loop bound), no nulls in any column or in a dictionary's
+// values, and every enum-valued column inside its declared domain. A batch
+// off ClickHouse `FORMAT ArrowStream` is a wire input; its column TYPES can be
+// exactly canonical while its contents are not representable.
 
 arrow::Status decodeTicks(const arrow::RecordBatch& batch, RecordKind kind,
                           SymbolTable& symbols, SymbolTable& venues,

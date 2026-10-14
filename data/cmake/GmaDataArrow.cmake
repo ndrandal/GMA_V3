@@ -117,10 +117,19 @@ endif()
 # ---------------------------------------------------------------------------
 # Route 2 — build it from source, trimmed.
 # ---------------------------------------------------------------------------
-message(STATUS
-  "gma_data: no installed Arrow (find_package(Arrow CONFIG) failed) — "
-  "building ${GMA_DATA_ARROW_VERSION} from source. "
-  "This is the long pole in a cold configure; see docs/data-layer.md §15.")
+# Do not claim find_package failed when it was never run — the force-fetch
+# branch above already said why, and two contradictory STATUS lines in a row
+# is how a configure log stops being read.
+if (NOT GMA_DATA_ARROW_FORCE_FETCH)
+  message(STATUS
+    "gma_data: no installed Arrow (find_package(Arrow CONFIG) failed) — "
+    "building ${GMA_DATA_ARROW_VERSION} from source. "
+    "This is the long pole in a cold configure; see docs/data-layer.md §15.")
+else()
+  message(STATUS
+    "gma_data: building Arrow ${GMA_DATA_ARROW_VERSION} from source. "
+    "This is the long pole in a cold configure; see docs/data-layer.md §15.")
+endif()
 
 include(FetchContent)
 

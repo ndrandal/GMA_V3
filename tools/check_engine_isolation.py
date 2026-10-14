@@ -39,7 +39,11 @@ FOUR CHECKS, each closing a different route in:
   D  profile   nothing matching them is reachable from gma_server's either,
                which is what makes the LIVE-ONLY VARIANT of SPEC D14's client
                profile (GMA_BUILD_DATA=OFF) actually buildable rather than
-               nominally so.
+               nominally so.  `gma_tests` is checked on the same rule, because
+               data/CMakeLists.txt names "the engine test suite is built
+               against an Arrow-free include path" as the thing being
+               protected, and a prose claim with no check behind it is what
+               this whole file is a reaction to.
 
 C AND D WALK THE CLOSURE, AND HAVE TO.  They read a *link graph* out of the
 manifest, not one target's own property, because the direct property is the
@@ -124,12 +128,21 @@ INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]')
 # claimed: the engine is **99** source/header files once src/main.cpp is
 # excluded (measured 2026-10-14 -- `find src include -type f` is 101, of which
 # one is src/util/gma.conf and one is the composition root, and the gate prints
-# the 99 it actually scanned).  The 50 that stood here was advertised in a
-# comment as "well under the real count (the engine was ~190 files)"; 190 was
-# the whole repo's .cpp/.hpp count, so the floor was in fact HALF the true
-# number and a traversal that silently found half the engine would have passed.
-# 80 is a ~19% margin -- enough for ordinary deletion, not enough to hide a
-# broken walk.
+# the 99 it actually scanned).  The 50 that stood here was advertised as "well
+# under the real count (the engine was ~190 files)"; the engine has never been
+# 190 files, and the 190's provenance is unknown -- the whole repo is **231**
+# .cpp/.hpp files (`git ls-files '*.cpp' '*.hpp' | wc -l`, and the same at the
+# commit that wrote the 190), and no subtree of this repo comes to 190.  So the
+# floor was half the true number under a comment that cited a figure matching
+# nothing.  80 is a ~19% margin: enough for ordinary deletion, tight enough
+# that a walk finding half the engine fails.
+#
+# It bounds the WALK and the union separately, in main(), and the distinction
+# is the whole value of the number: `sources` is the union of the walk and
+# CMake's SOURCES property, so CMake alone supplies 99 and ANY floor below 99
+# on the union is clear even when the walk returns nothing.  A floor on the
+# union is therefore not a check on the walk -- raising 50 to 80 buys nothing
+# by itself, which is why the walk is now floored directly.
 MIN_ENGINE_FILES = 80
 MIN_ENGINE_INCLUDE_DIRS = 1
 
@@ -304,25 +317,77 @@ def check_b_include_dirs(root: str, dirs: list[str]) -> list[str]:
     return problems
 
 
-# CMake leaves generator-expression wrappers in LINK_LIBRARIES --
-# `$<LINK_ONLY:Boost::headers>` is the common one -- and appends a
-# `::@(<directory-id>)` marker to an INTERFACE_LINK_LIBRARIES entry recorded
-# from another directory scope.  Neither is part of the target name, and an
-# unstripped name is a graph node that never matches a `link.<target>` row, so
-# the walk would stop one edge short of the thing it is looking for.
-GENEX_RE = re.compile(r"^\$<[A-Za-z_0-9]+:(.*)>$")
+# A link entry is not always a bare target name, and MATCHING A DECORATED
+# ENTRY AS IF IT WERE ONE IS A BYPASS, not a cosmetic problem.  Three forms are
+# legal in LINK_LIBRARIES and none of them unwraps to a clean name:
+#
+#     $<LINK_ONLY:gma_data>                      one genex head
+#     $<IF:$<BOOL:ON>,gma_data,>                 commas, nested head
+#     $<LINK_LIBRARY:WHOLE_ARCHIVE,gma_data>     CMake >= 3.24, feature + comma
+#     $<$<CONFIG:Debug>:gma_data>                head is itself a genex
+#     gma::@(0x55f0)                             directory-scope marker on an
+#                                                INTERFACE_LINK_LIBRARIES entry
+#
+# So this file does NOT rely on reducing an entry to one name.  It extracts
+# every identifier-shaped TOKEN in the entry and pattern-matches all of them,
+# and tries each as a graph key so the walk does not stop an edge short when
+# the edge was wrapped.  Over-extraction is the safe direction: a spurious
+# token can only cause a false FAILURE, which a human reads, while a missed one
+# causes a false pass, which nobody does.
+#
+# PROVENANCE, because it matters for how much these cases are worth: the
+# manifest this gate actually reads contains NONE of them today.
+# `$<TARGET_PROPERTY:...>` inside `file(GENERATE)` evaluates the property's own
+# generator expressions, and `link.gma_engine` really resolves to
+# `Boost::system|Threads::Threads|RapidJSON::rapidjson|OpenSSL::SSL|OpenSSL::Crypto`
+# -- no genex, no marker, and `$<LINK_ONLY:` appears nowhere in this repo.
+# They are handled because the producer is not the only possible producer of
+# this file and because the cost of being wrong is a silent pass; they are NOT
+# handled because they are observed.  The selftest cases for them are labelled
+# accordingly.
+GENEX_HEAD_RE = re.compile(r"^\$<(?:[A-Za-z_0-9]+|\$<[^<>]*>):(.*)>$")
 DIRSCOPE_RE = re.compile(r"::@\(?[^)]*\)?$")
+# `+`, `.` and `-` appear in real library names (`stdc++`, `libm.so`,
+# `foo-bar`); `::` in namespaced targets.  Commas and genex punctuation are
+# separators, which is what splits `WHOLE_ARCHIVE,gma_data` apart.
+TOKEN_RE = re.compile(r"[A-Za-z0-9_.+:-]+")
 
 
 def link_item_name(item: str) -> str:
-    """The bare target/library name behind CMake's link-entry decorations."""
+    """The most likely bare target name, for recursion and for the report.
+
+    Best effort only -- `link_item_candidates` is what the checks match on.
+    """
     name = item.strip()
     while True:
-        m = GENEX_RE.match(name)
+        m = GENEX_HEAD_RE.match(name)
         if not m:
             break
         name = m.group(1).strip()
-    return DIRSCOPE_RE.sub("", name).strip()
+    name = DIRSCOPE_RE.sub("", name).strip()
+    # A residue like `WHOLE_ARCHIVE,gma_data` or `$<BOOL:ON>,gma_data,` is not
+    # a name; prefer its last identifier-shaped token, which is where CMake
+    # puts the library in every genex form above.
+    if "," in name or "<" in name or ">" in name:
+        tokens = [t for t in TOKEN_RE.findall(name) if not t.startswith("$")]
+        if tokens:
+            name = DIRSCOPE_RE.sub("", tokens[-1])
+    return name.strip()
+
+
+def link_item_candidates(item: str) -> list[str]:
+    """Every string in a link entry that could name a library.
+
+    The unwrapped name plus every identifier-shaped token, deduped.  Checks C
+    and D match patterns against all of these, so a forbidden name cannot hide
+    inside a generator expression this parser does not fully understand.
+    """
+    out = [link_item_name(item)]
+    for tok in TOKEN_RE.findall(item.strip()):
+        tok = DIRSCOPE_RE.sub("", tok).strip()
+        if tok and tok not in out:
+            out.append(tok)
+    return [c for c in out if c]
 
 
 def cmake_true(value: str) -> bool:
@@ -361,47 +426,83 @@ def parse_link_graph(manifest: dict[str, str]) -> dict[str, list[str]]:
 
 
 def link_closure(graph: dict[str, list[str]],
-                 root: str) -> list[tuple[str, tuple[str, ...]]]:
-    """Every library reachable from `root`, with the chain that reaches it.
+                 root: str) -> list[tuple[str, list[str], tuple[str, ...]]]:
+    """Every library reachable from `root`: (name, candidates, chain).
 
-    Breadth-first so the reported chain is a shortest one, and cycle-safe: a
-    name is expanded at most once.  A name with no row in the graph is a leaf
-    (a system library, an imported target) and is matched but not expanded.
+    Breadth-first so the reported chain is a shortest one, and cycle-safe.  A
+    name with no row in the graph is a leaf (a system library, an imported
+    target) and is matched but not expanded.  EVERY candidate of an entry is
+    tried as a graph key, not just the best-guess name, so a wrapped edge --
+    `$<LINK_LIBRARY:WHOLE_ARCHIVE,gma>` -- is still traversed instead of
+    stopping the walk one edge short.
     """
-    out: list[tuple[str, tuple[str, ...]]] = []
-    seen = {root}
+    out: list[tuple[str, list[str], tuple[str, ...]]] = []
+    reported: set[str] = {root}
+    expanded: set[str] = {root}
     queue: list[tuple[str, tuple[str, ...]]] = [(root, (root,))]
     while queue:
         target, path = queue.pop(0)
         for raw in graph.get(target, ()):
-            name = link_item_name(raw)
-            if not name or name in seen:
+            cands = link_item_candidates(raw)
+            if not cands:
                 continue
-            seen.add(name)
+            name = cands[0]
             chain = path + (name,)
-            out.append((name, chain))
-            if name in graph:
-                queue.append((name, chain))
+            if name not in reported:
+                reported.add(name)
+                out.append((name, cands, chain))
+            for cand in cands:
+                if cand in graph and cand not in expanded:
+                    expanded.add(cand)
+                    queue.append((cand, path + (cand,)))
     return out
+
+
+# A name that belongs to this repo rather than to the system or a dependency.
+# `gma`, `gma_engine`, `gma_data`, `gma::arrow`, `gma::data` all match.
+FIRST_PARTY_RE = re.compile(r"^gma(?:[_:].*)?$")
 
 
 def forbidden_links(graph: dict[str, list[str]], root: str) -> list[str]:
     """Checks C and D: nothing forbidden anywhere in `root`'s link closure.
 
-    Transitive, not direct -- see the docstring. The chain is printed because
+    Transitive, not direct -- see the docstring.  The chain is printed because
     the fix is almost never on the root's own link line.
+
+    TWO rules, and the second one is what closes the hole ONE LEVEL DEEPER
+    than the review found it.  The manifest's target registry is written by
+    hand in CMakeLists.txt, and nothing in CMake makes it complete, so a new
+    first-party library -- `gma_store`, say -- would arrive with no row, be
+    treated as a LEAF, and have its own dependencies never walked; an ALIAS
+    (`add_library(gma::data ALIAS gma_data)`) does the same thing without even
+    being a new target.  Either one makes GMA_BUILD_DATA=OFF unlinkable while
+    rule one stays clean.  So a reached name that LOOKS first-party and has no
+    row is itself a failure: not "this links something forbidden" but "this
+    subtree was never searched, so a clean verdict about it is a verdict from
+    a search that did not happen".
     """
     problems: list[str] = []
-    for name, chain in link_closure(graph, root):
-        for pattern in FORBIDDEN_LINK_PATTERNS:
-            if pattern.search(name):
-                problems.append(
-                    f"{root} links '{name}' via {' -> '.join(chain)} -- Arrow, "
-                    f"the ClickHouse client and gma_data must never be "
-                    f"reachable from {root}'s link line, because SPEC D14's "
-                    f"live-only client variant omits gma_data entirely and "
-                    f"must still link")
-                break
+    for name, cands, chain in link_closure(graph, root):
+        hit = next((c for c in cands
+                    for p in FORBIDDEN_LINK_PATTERNS if p.search(c)), None)
+        if hit is not None:
+            shown = hit if hit == name else f"{name}' (as '{hit}"
+            problems.append(
+                f"{root} links '{shown}' via {' -> '.join(chain)} -- Arrow, "
+                f"the ClickHouse client and gma_data must never be "
+                f"reachable from {root}'s link line, because SPEC D14's "
+                f"live-only client variant omits gma_data entirely and "
+                f"must still link")
+            continue
+        if FIRST_PARTY_RE.match(name) and name not in graph:
+            problems.append(
+                f"{root} links '{name}' via {' -> '.join(chain)} -- that is a "
+                f"first-party name with NO link.<target> row in the manifest, "
+                f"so its own dependencies were never walked and this closure "
+                f"is incomplete. Add it to _gma_iso_link_targets in "
+                f"CMakeLists.txt (an ALIAS belongs there under its real "
+                f"target's name), or if it is genuinely third-party, rename "
+                f"it so it does not read as ours")
     return problems
 
 
@@ -501,20 +602,27 @@ def selftest() -> int:
         expect_detected("B/include-missing", check_b_include_dirs(tmp, ["/usr/include"]))
 
         # --- C and D: the link closure ----------------------------------
-        # The real shape of this repo's link graph. gma_server links the `gma`
-        # umbrella and nothing else, which is the whole reason these checks
-        # cannot read one property and stop.
+        # The real shape of this repo's link graph, copied from an actual
+        # manifest (`link.*` rows of build/gma_engine_isolation.manifest,
+        # 2026-10-14) rather than from memory -- OpenSSL included, and with
+        # no decoration, because the real rows carry none.
         legal = {
             "gma_server": ["gma", "Boost::system", "Threads::Threads",
                            "RapidJSON::rapidjson"],
             "gma": ["gma_engine", "gma_connector_market"],
             "gma_engine": ["Boost::system", "Threads::Threads",
-                           "RapidJSON::rapidjson", "$<LINK_ONLY:Boost::headers>"],
+                           "RapidJSON::rapidjson", "OpenSSL::SSL",
+                           "OpenSSL::Crypto"],
             "gma_connector_market": ["gma_engine"],
             "gma_connector_synthetic": ["gma_engine"],
+            "gma_tests": ["gma", "Boost::system", "Threads::Threads",
+                          "RapidJSON::rapidjson", "GTest::gtest_main",
+                          "gma_connector_synthetic"],
         }
         expect_clean("C/closure-legal", forbidden_links(legal, "gma_engine"))
         expect_clean("D/closure-legal", forbidden_links(legal, "gma_server"))
+        expect_clean("D/closure-legal-gma_tests",
+                     forbidden_links(legal, "gma_tests"))
 
         # THE CASE THAT MOTIVATED THE CLOSURE. One line on the umbrella makes
         # GMA_BUILD_DATA=OFF unlinkable; neither gma_engine's nor gma_server's
@@ -547,6 +655,34 @@ def selftest() -> int:
         expect_clean("C/connector-arrow-is-not-an-engine-dependency",
                      forbidden_links(connector_arrow, "gma_engine"))
 
+        # The third route, and the one the FIRST VERSION OF THIS CHECK MISSED:
+        # the target registry in CMakeLists.txt is hand-written, so a new
+        # first-party library gets no row and the walk treats it as a leaf.
+        # Both of these are green under a check that only pattern-matches.
+        new_lib = dict(legal)
+        new_lib["gma"] = ["gma_engine", "gma_connector_market", "gma_store"]
+        expect_detected("D/unregistered-first-party-library",
+                        forbidden_links(new_lib, "gma_server"))
+        aliased = dict(legal)
+        aliased["gma"] = ["gma_engine", "gma_connector_market", "gma::data"]
+        expect_detected("D/alias-for-gma_data",
+                        forbidden_links(aliased, "gma_server"))
+        # ... and once the row exists, the walk reaches through it.
+        registered = dict(new_lib)
+        registered["gma_store"] = ["gma_engine", "gma_data"]
+        expect_detected("D/through-a-registered-new-library",
+                        forbidden_links(registered, "gma_server"))
+        clean_new_lib = dict(new_lib)
+        clean_new_lib["gma_store"] = ["gma_engine"]
+        expect_clean("D/a-registered-new-library-that-is-clean",
+                     forbidden_links(clean_new_lib, "gma_server"))
+        # A genuinely third-party leaf must NOT trip the first-party rule.
+        expect_clean("D/third-party-leaves-are-leaves",
+                     forbidden_links({"gma_server": ["Boost::system", "m",
+                                                     "GTest::gtest_main",
+                                                     "stdc++fs", "libm.so"]},
+                                     "gma_server"))
+
         # Direct links still caught, one per forbidden pattern.
         for name in ("gma_data", "gma::arrow", "arrow_static", "parquet",
                      "clickhouse-cpp", "duckdb"):
@@ -555,16 +691,39 @@ def selftest() -> int:
                                                             name]},
                                             "gma_engine"))
 
-        # Wrapped entries must be unwrapped, or the walk stops an edge short.
-        expect_detected("C/genex-wrapped",
+        # DECORATED ENTRIES.  Labelled honestly: the manifest this gate reads
+        # carries none of these forms today (see the note above
+        # link_item_name), so these are defence against a producer other than
+        # the current one, not coverage of an observed case.  They are here
+        # because every one of them was a working bypass of the first version
+        # of this check.
+        for label, entry in (
+                ("genex/LINK_ONLY", "$<LINK_ONLY:gma_data>"),
+                ("genex/IF", "$<IF:$<BOOL:ON>,gma_data,>"),
+                ("genex/LINK_LIBRARY-feature",
+                 "$<LINK_LIBRARY:WHOLE_ARCHIVE,gma_data>"),
+                ("genex/nested-head", "$<$<CONFIG:Debug>:gma_data>"),
+                ("genex/arrow-wrapped", "$<LINK_ONLY:gma::arrow>")):
+            expect_detected(f"C/{label} (defensive: not emitted today)",
+                            forbidden_links({"gma_engine": [entry]},
+                                            "gma_engine"))
+        # A wrapped edge must still be TRAVERSED, not merely matched.
+        expect_detected("D/wrapped-edge-is-still-walked (defensive)",
                         forbidden_links(
-                            {"gma_engine": ["$<LINK_ONLY:gma_data>"]},
-                            "gma_engine"))
-        expect_detected("C/directory-scoped-interface-entry",
+                            {"gma_server": ["$<LINK_LIBRARY:WHOLE_ARCHIVE,gma>"],
+                             "gma": ["gma_data"]},
+                            "gma_server"))
+        expect_detected("C/directory-scoped-interface-entry (defensive)",
                         forbidden_links(
                             {"gma_server": ["gma::@(0x55f0)"],
                              "gma": ["gma_data"]},
                             "gma_server"))
+        # And a decorated LEGAL entry must not be mistaken for a violation.
+        expect_clean("C/decorated-legal-entry (defensive)",
+                     forbidden_links(
+                         {"gma_engine": ["$<LINK_ONLY:Boost::headers>",
+                                         "$<LINK_LIBRARY:WHOLE_ARCHIVE,m>"]},
+                         "gma_engine"))
 
         # A cycle must terminate rather than hang, and must still report.
         expect_detected("closure/cycle-safe",
@@ -577,6 +736,14 @@ def selftest() -> int:
                             {"gma_data": ["gma_engine", "gma::arrow"],
                              "gma_engine": ["Threads::Threads"]},
                             "gma_data"))
+
+        # cmake_true, because the positive control's verdict depends on it.
+        for truthy in ("ON", "on", "1", "TRUE", "yes", "Y", "2"):
+            if not cmake_true(truthy):
+                failures.append(f"SELFTEST: cmake_true({truthy!r}) is False")
+        for falsy in ("OFF", "off", "0", "FALSE", "no", "", "NOTFOUND", "junk"):
+            if cmake_true(falsy):
+                failures.append(f"SELFTEST: cmake_true({falsy!r}) is True")
 
     if failures:
         for f in failures:
@@ -623,6 +790,8 @@ def main() -> int:
     server_libs = graph.get("gma_server", [])
     engine_closure = link_closure(graph, "gma_engine")
     server_closure = link_closure(graph, "gma_server")
+    tests_closure = (link_closure(graph, "gma_tests")
+                     if "gma_tests" in graph else [])
     cmake_sources = dedupe(split_list(manifest.get("engine_cmake_sources", "")))
     data_enabled = manifest.get("gma_data_enabled", "?")
 
@@ -642,6 +811,17 @@ def main() -> int:
 
     # --- anti-vacuity: an empty input is a failure, not a pass --------------
     vacuous: list[str] = []
+    # Both counts, separately, and that is the point. `sources` is the UNION
+    # of the walk and CMake's own source list, so CMake alone supplies 99 and a
+    # floor on the union cannot detect a walk that returned nothing -- which is
+    # the failure the floor is named for. The walk gets its own floor.
+    if len(walked) < MIN_ENGINE_FILES:
+        vacuous.append(
+            f"the filesystem walk of src/ and include/ found {len(walked)} "
+            f"source/header files (floor {MIN_ENGINE_FILES}) -- the traversal "
+            f"is blind, and because `sources` is the union of the walk and "
+            f"CMake's list, a clean check A result would otherwise look "
+            f"perfectly normal")
     if len(sources) < MIN_ENGINE_FILES:
         vacuous.append(
             f"scanned only {len(sources)} engine source/header files (floor "
@@ -674,7 +854,7 @@ def main() -> int:
             "is one-level-deep again, and the umbrella is exactly where the "
             "review found the hole (CMake must emit link.<target> for every "
             "first-party target)")
-    if not any(name == "gma_engine" for name, _ in server_closure):
+    if not any(name == "gma_engine" for name, _, _ in server_closure):
         vacuous.append(
             "gma_server's link closure does not reach gma_engine -- it goes "
             "gma_server -> gma -> gma_engine, so a closure that does not "
@@ -724,7 +904,9 @@ def main() -> int:
                     root, cmake_sources, walked_set) +
                 check_b_include_dirs(root, include_dirs) +
                 forbidden_links(graph, "gma_engine") +
-                forbidden_links(graph, "gma_server"))
+                forbidden_links(graph, "gma_server") +
+                (forbidden_links(graph, "gma_tests")
+                 if "gma_tests" in graph else []))
 
     print(f"gma_engine isolation (ENC-1481, SPEC D14)")
     print(f"  root            : {root}")
@@ -734,7 +916,8 @@ def main() -> int:
     print(f"  link libraries  : {len(link_libs)} engine, {len(server_libs)} server "
           f"(direct)")
     print(f"  link closure    : {len(engine_closure)} from gma_engine, "
-          f"{len(server_closure)} from gma_server, over "
+          f"{len(server_closure)} from gma_server, "
+          f"{len(tests_closure)} from gma_tests, over "
           f"{len(graph)} graphed target(s): {sorted(graph)}")
     print(f"  positive control: {control}")
     print(f"  foreign roots   : {[os.path.relpath(r, root) for r in foreign_roots]}")
@@ -759,7 +942,8 @@ def main() -> int:
     print("\nOK: no Arrow/ClickHouse include in engine code or the composition "
           "root, no data/ or connector header reached from the engine, engine "
           "include path is include/ only, and no data-layer library anywhere "
-          "in gma_engine's or gma_server's TRANSITIVE link closure.")
+          "in the TRANSITIVE link closure of gma_engine, gma_server or "
+          "gma_tests.")
     return 0
 
 
