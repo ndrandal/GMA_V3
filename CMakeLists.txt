@@ -701,3 +701,61 @@ elseif (GMA_BUILD_TESTS)
     "absent), so check D cannot read its link libraries. The SPEC D14 "
     "engine-isolation invariant is NOT being checked in this build.")
 endif()
+
+# =======================
+# L1 schema gate (ENC-1480)
+# =======================
+# THE INVARIANT: data/schema/clickhouse.sql must not COMPUTE. No aggregate
+# function, no GROUP BY, no MATERIALIZED/ALIAS column, no view, no
+# Aggregating/SummingMergeTree, no window function (SPEC D2; docs/data-layer.md
+# §8). D2 is usually read as a rule about the shim's SELECTs, but it binds the
+# schema just as hard and in a way no SELECT lint can reach: a MATERIALIZED
+# column or an AggregatingMergeTree computes at insert or at merge time, so by
+# the time any query runs the second implementation of gma's math has already
+# produced its value.
+#
+# REGISTERED HERE BECAUSE A CHECKER NOTHING INVOKES IS NOT A GATE. It shipped
+# with ENC-1480 as a standalone script, which means it was a gate exactly as
+# often as somebody remembered to type it.
+#
+# NOT GATED ON GMA_BUILD_DATA, DELIBERATELY. The check reads a text file: no
+# Arrow, no ClickHouse client, no C++ target, no server. Gating it on
+# GMA_BUILD_DATA would mean SPEC D14's live-only client variant silently stops
+# checking the invariant — and the schema file still ships in that variant, so
+# the thing being protected is still there while the protection is not. It runs
+# whenever tests are on.
+#
+# TWO CASES, because one of them is the other's gate. The lint alone could decay
+# into a green no-op in several ways the lint itself cannot see: the aggregate
+# vocabulary going empty, the comment stripper eating the statements, the
+# statement splitter matching nothing. `self-test` runs the checker against
+# seven fixtures and nine generated mutants of the real schema — each asserting
+# its substitution changed the text before asserting the check reddens — so the
+# gate is observed failing on every pass. Same anti-vacuity rule as
+# gma_engine_isolation_selftest above (docs/data-layer.md §5.4).
+#
+# The schema path is passed explicitly rather than left to the script's own
+# __file__ resolution so that a wrong path is a loud failure (exit 2, "could not
+# run") instead of a case that quietly checks whatever it found.
+if (GMA_BUILD_TESTS)
+  if (Python3_Interpreter_FOUND)
+    add_test(NAME gma_schema_no_compute
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/data/schema/check_no_compute.py"
+              lint "${CMAKE_SOURCE_DIR}/data/schema/clickhouse.sql")
+    set_tests_properties(gma_schema_no_compute PROPERTIES TIMEOUT 120)
+
+    # The gate's own gate — see the note above.
+    add_test(NAME gma_schema_no_compute_selftest
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/data/schema/check_no_compute.py"
+              self-test)
+    set_tests_properties(gma_schema_no_compute_selftest PROPERTIES TIMEOUT 120)
+  else()
+    message(WARNING
+      "gma_schema_no_compute test SKIPPED: no Python3 interpreter. The SPEC D2 "
+      "invariant that data/schema/clickhouse.sql computes nothing — no "
+      "aggregate, no GROUP BY, no MATERIALIZED/ALIAS column, no "
+      "Aggregating/SummingMergeTree — is NOT being checked in this build.")
+  endif()
+endif()
