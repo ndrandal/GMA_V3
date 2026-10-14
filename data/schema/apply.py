@@ -187,6 +187,81 @@ def cmd_verify(args):
     return 0
 
 
+PROBE_DB = "gma_verify_probe"
+
+
+def cmd_prove_verify(args):
+    """Show the verifier failing. A comparison never observed reporting a
+    difference has not been shown to compare.
+
+    Done in a throwaway database rather than by mutating `gma`, so it is safe to
+    run as part of the acceptance script. The mutation is asserted to have taken
+    effect before its detection is claimed — a no-op mutation reads exactly like
+    a passing gate.
+    """
+    statements, _ = ddl.read_statements(SCHEMA)
+    src = None
+    for stmt in statements:
+        if ddl.is_create_table(stmt) and \
+                ddl.parse_create_table(stmt)["table"] == "gma.gaps":
+            src = stmt
+    if src is None:
+        print("could not run: gma.gaps not found in %s" % SCHEMA, file=sys.stderr)
+        return 2
+    want = ddl.parse_create_table(src)
+
+    ch("DROP DATABASE IF EXISTS %s SYNC" % PROBE_DB, args.url)
+    ch("CREATE DATABASE %s" % PROBE_DB, args.url)
+    try:
+        # Three independent mutations, so a differ that only looks at one place
+        # still has to see the others: a dropped column, a different codec on a
+        # kept one, and a different index_granularity.
+        mutated = (src
+                   .replace("gma.gaps", "%s.gaps" % PROBE_DB)
+                   .replace("    -- 0 none, 1 re-snapshot requested, 2 backfilled from history\n"
+                            "    recovery      UInt8                 CODEC(ZSTD(1))\n", "")
+                   .replace("    cause         UInt8                 CODEC(ZSTD(1)),\n",
+                            "    cause         UInt8                 CODEC(ZSTD(1))\n")
+                   .replace("seq_to        UInt64                CODEC(DoubleDelta, ZSTD(1))",
+                            "seq_to        UInt64                CODEC(ZSTD(9))")
+                   .replace("index_granularity = 1024", "index_granularity = 4096"))
+        if mutated == src:
+            print("could not run: the mutation was a no-op, so detecting it "
+                  "would prove nothing", file=sys.stderr)
+            return 2
+        ch(mutated, args.url)
+        shown = ch("SHOW CREATE TABLE %s.gaps FORMAT TSVRaw" % PROBE_DB,
+                   args.url).strip()
+        got = ddl.parse_create_table(shown)
+
+        # Assert the mutation actually landed before claiming its detection.
+        applied = []
+        if len(got["columns"]) == len(want["columns"]) - 1:
+            applied.append("recovery column dropped")
+        if dict((c[0], c[2]) for c in got["columns"]).get("seq_to") == "CODEC(ZSTD(9))":
+            applied.append("seq_to codec changed")
+        if got["clauses"].get("SETTINGS", {}).get("index_granularity") == "4096":
+            applied.append("index_granularity changed")
+        if len(applied) != 3:
+            print("could not run: only %d of 3 mutations reached the server (%s)"
+                  % (len(applied), ", ".join(applied) or "none"), file=sys.stderr)
+            return 2
+        print("  mutation applied to %s.gaps: %s" % (PROBE_DB, "; ".join(applied)))
+
+        diffs = _diff_table("gma.gaps", want, got)
+        for d in diffs:
+            print("    detected: %s" % d)
+        if len(diffs) < 3:
+            print("  PROOF FAILED: expected at least 3 differences, got %d. The "
+                  "comparison does not gate." % len(diffs), file=sys.stderr)
+            return 1
+        print("  proof: the comparison reports %d difference(s) against a "
+              "deliberately-wrong table, and 0 against the real one" % len(diffs))
+        return 0
+    finally:
+        ch("DROP DATABASE IF EXISTS %s SYNC" % PROBE_DB, args.url)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -196,10 +271,13 @@ def main(argv=None):
                    help="DROP DATABASE gma first — DESTRUCTIVE")
     p = sub.add_parser("verify")
     p.add_argument("--url", default=DEFAULT_URL)
+    p = sub.add_parser("prove-verify")
+    p.add_argument("--url", default=DEFAULT_URL)
     sub.add_parser("emit")
     args = ap.parse_args(argv)
     try:
         return {"apply": cmd_apply, "verify": cmd_verify,
+                "prove-verify": cmd_prove_verify,
                 "emit": cmd_emit}[args.cmd](args)
     except RuntimeError as exc:
         print("FAILED: %s" % exc, file=sys.stderr)
