@@ -295,6 +295,33 @@ Event equivalentEvent(const std::string& symbol, const data::TickRecord& rec) {
   return Event{symbol, std::move(doc)};
 }
 
+// The same tick with its JSON members in REVERSE order. Not an "equivalent
+// tick" under the mapping — which fixes an order — but one a JSON producer
+// could legitimately emit, and the only way to show that `maxFieldsPerSymbol`
+// makes order observable.
+Event reversedEvent(const std::string& symbol, const data::TickRecord& rec) {
+  std::vector<std::pair<std::string, double>> fs;
+  struct Collect final : engine::NumericFieldSink {
+    std::vector<std::pair<std::string, double>>* out;
+    void field(const std::string& name, double value) override {
+      out->emplace_back(name, value);
+    }
+  } collect;
+  collect.out = &fs;
+  engine::RecordFieldSource(rec).forEachNumber(collect);
+
+  auto doc = std::make_shared<rapidjson::Document>();
+  doc->SetObject();
+  for (auto it = fs.rbegin(); it != fs.rend(); ++it) {
+    auto& alloc = doc->GetAllocator();
+    doc->AddMember(rapidjson::Value(it->first.c_str(),
+                                    static_cast<rapidjson::SizeType>(it->first.size()),
+                                    alloc),
+                   rapidjson::Value(it->second), alloc);
+  }
+  return Event{symbol, std::move(doc)};
+}
+
 // Four ticks, not one. A single tick cannot see a history buffer, a rolling
 // builtin or the cap bookkeeping; `sma_5` needs depth and `stddev` of one
 // sample is not a test of anything.
@@ -308,72 +335,30 @@ std::vector<data::TickRecord> corpus(data::SymbolId sym) {
 }
 
 // ---------------------------------------------------------------------------
-// The AtomicStore comparison, over a DERIVED key set
+// The AtomicStore comparison — TOTAL, not over a guessed key set
 // ---------------------------------------------------------------------------
-
-// `AtomicStore` has no enumeration accessor, so the comparison needs a
-// candidate key list. Hardcoding one is how a store comparison silently stops
-// covering a key, so every key here is derived from the engine:
 //
-//   * every field `RecordFieldSource` can emit, from the source itself;
-//   * every `FunctionMap` builtin, bare AND `<field>.<fn>` (the ENC-1008 key
-//     shape), for every raw field;
-//   * every key `market::computeAllAtomicValues` writes, by running it on a
-//     scratch store — which is the whole TA suite under the active Config,
-//     without this file naming one indicator;
-//   * MarketTickComputer's own base atomics.
-std::set<std::string> candidateKeys(const util::Config& cfg,
-                                    const data::TickRecord& sample) {
-  std::set<std::string> keys;
-
-  std::vector<std::string> rawFields;
-  {
-    struct Collect final : engine::NumericFieldSink {
-      std::vector<std::string>* out;
-      void field(const std::string& name, double) override { out->push_back(name); }
-    } collect;
-    collect.out = &rawFields;
-    const engine::RecordFieldSource fields(sample);
-    fields.forEachNumber(collect);
-  }
-  for (const auto& f : rawFields) keys.insert(f);
-  for (const auto& f : listenedFields()) keys.insert(f);
-
-  FunctionMap::instance().forEach([&](const std::string& fn, const Func&) {
-    keys.insert(fn);
-    for (const auto& f : rawFields) keys.insert(f + "." + fn);
-  });
-
-  // MarketTickComputer's base atomics (MarketTA.cpp, "Symbol admitted" block).
-  keys.insert("bid");
-  keys.insert("ask");
-  keys.insert("spread");
-  keys.insert("timestamp");
-
-  // The TA suite, enumerated by running it rather than by listing it.
-  {
-    AtomicStore scratch;
-    std::vector<TickEntry> hist;
-    for (int i = 0; i < 8; ++i) {
-      hist.push_back(TickEntry{100.0 + i, 10.0 + i, 99.0 + i, 101.0 + i, 0});
-    }
-    for (const auto& [k, v] : computeAllAtomicValues("SCRATCH", hist,
-                                                             scratch, cfg)) {
-      (void)v;
-      keys.insert(k);
-    }
-  }
-  return keys;
-}
-
-// Renders a store as one line per present key, for the candidate set.
-std::vector<std::string> dumpStore(const AtomicStore& store,
-                                   const std::set<std::string>& keys) {
+// THE FIRST VERSION OF THIS COMPARISON WAS BLIND, and an adversarial probe
+// proved it rather than argued it. `AtomicStore` had no enumeration accessor,
+// so the comparison ran over a CANDIDATE key list the test derived from
+// `FunctionMap`, `computeAllAtomicValues` and the record→field mapping. That
+// covers every key either path is *supposed* to write — and therefore covers
+// nothing else. A one-line perturbation on the record path only,
+//
+//     if (_store) _store->set(symbol, "zzGhost", 1.0);
+//
+// left all three parity assertions GREEN, because `zzGhost` was not a name the
+// test knew to ask for. A parity assertion that can only see keys it already
+// guessed is not a parity assertion; it is a spot check wearing one's name.
+//
+// `AtomicStore::snapshot()` (ENC-1486) now enumerates everything the store
+// holds, so the comparison is total: ANY key, under ANY stream key, written by
+// one path and not the other, fails. That also removes the derived key set and
+// the drift risk that came with it.
+std::vector<std::string> dumpStore(const AtomicStore& store) {
   std::vector<std::string> out;
-  for (const auto& k : keys) {
-    auto v = store.get(kTicker, k);
-    if (!v) continue;
-    out.push_back(k + " = " + describe(*v));
+  for (const auto& [streamKey, field, value] : store.snapshot()) {
+    out.push_back(streamKey + " / " + field + " = " + describe(value));
   }
   return out;
 }
@@ -389,7 +374,11 @@ struct Observed {
   std::vector<std::string> computers;
 };
 
-enum class Path { Json, Record };
+// `JsonReversed` is the same tick — same field names, same values — with its
+// JSON members added in the opposite order. Semantically identical; observably
+// different once `maxFieldsPerSymbol` truncates admission. It exists so the
+// cap test can prove field order is observable instead of asserting it.
+enum class Path { Json, Record, JsonReversed };
 
 // `mutate` runs on each record before it is driven, so a negative control can
 // perturb ONE path's input while leaving the drive identical.
@@ -399,17 +388,17 @@ Observed drive(Path path, const util::Config& cfg,
   auto recs = corpus(rig.symbolId);
   for (auto& rec : recs) {
     if (mutate) mutate(rec);
-    if (path == Path::Record) {
-      rig.disp.onRecord(rec);
-    } else {
-      rig.disp.onTick(equivalentEvent(kTicker, rec));
+    switch (path) {
+      case Path::Record:       rig.disp.onRecord(rec); break;
+      case Path::Json:         rig.disp.onTick(equivalentEvent(kTicker, rec)); break;
+      case Path::JsonReversed: rig.disp.onTick(reversedEvent(kTicker, rec)); break;
     }
   }
   rig.quiesce();
 
   Observed o;
   o.deliveries = rig.log.rows();
-  o.store      = dumpStore(rig.store, candidateKeys(cfg, recs.front()));
+  o.store      = dumpStore(rig.store);
   o.computers  = rig.computerLog;
   return o;
 }
