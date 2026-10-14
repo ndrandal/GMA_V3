@@ -68,12 +68,15 @@
 #include "gma/nodes/INode.hpp"
 #include "gma/rt/ThreadPool.hpp"
 #include "gma/util/Config.hpp"
+#include "gma/util/Logger.hpp"
 
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
 
 #include <cctype>
 #include <cstdio>
+#include <fstream>
+#include <unistd.h>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -1287,4 +1290,187 @@ TEST(RecordIngressRefusalTest, UnresolvableSymbolDeliversNothing) {
     EXPECT_EQ(deliveries, 0u);
     EXPECT_FALSE(leaked);
   }
+}
+
+// ===========================================================================
+// 6. THE REFUSAL LOGS ONCE, NOT ONCE PER RECORD
+// ===========================================================================
+//
+// WHY THIS TEST EXISTS AT ALL, stated plainly because the history is the
+// argument: the once-guard was reported as landed while only HALF of it was.
+// `Dispatcher.hpp` declared `_warnedNoSymbolTable` / `_warnedUnresolvedSymbol`
+// and `DispatcherRecord.cpp` used neither, so the members were DEAD and both
+// refusals still logged per record. A `git checkout --` in a perturbation
+// script reverted the half that lived in the .cpp, and nothing noticed, because
+// nothing could: no test observed the log.
+//
+// Dead flags are worse than no attempt — the next reader greps the header,
+// finds `_warnedNoSymbolTable`, and concludes it is handled. So the guard now
+// has an instrument, and the instrument reads the actual log output rather
+// than the presence of a member.
+//
+// WHAT IS BEING PROTECTED IS A MEASUREMENT. `onRecord` is step 2 of ENC-1487's
+// five-step B2, the number SPEC D13 sizes the project by, and it carries MBO at
+// tens of millions of records per symbol-day. `util::Logger` has no throttling
+// API, so an unguarded `Warn` here makes B2 measure logging.
+
+namespace {
+
+// Redirects the PROCESS-GLOBAL logger to a private file for the duration of a
+// test, then puts it back.
+//
+// Three deliberate choices:
+//   * The ticket id is in the path and the suffix comes from `mkstemp`, because
+//     parallel agents share one /tmp and a bare name gets clobbered.
+//   * It restores the LEVEL it found (the `QuietLogger` pattern in
+//     tests/ws/ClientSessionBackpressureTest.cpp), and restores the
+//     DESTINATION to stdout. `Logger` exposes no getter for its current file,
+//     so "" is the only restorable value — which is correct here precisely
+//     because nothing in src/ or tests/ ever points the singleton at a file
+//     (verified: the only singleton mutation in the tree is that QuietLogger's
+//     setLevel). If that ever stops being true, this guard needs a real
+//     save/restore and this comment is the warning.
+//   * It is the global logger and not a local `Logger`, because the Dispatcher
+//     logs through `gma::util::logger()` and a test against a local instance
+//     would prove nothing about the code under test.
+class GlobalLogCapture {
+public:
+  GlobalLogCapture() : savedLevel_(gma::util::logger().level()) {
+    char tmpl[] = "/tmp/ENC-1486-logcap-XXXXXX";
+    const int fd = ::mkstemp(tmpl);
+    path_ = tmpl;
+    if (fd >= 0) ::close(fd);
+    gma::util::logger().setLevel(gma::util::LogLevel::Warn);
+    gma::util::logger().setFile(path_);
+  }
+
+  ~GlobalLogCapture() {
+    gma::util::logger().setFile("");          // flush + close, back to stdout
+    gma::util::logger().setLevel(savedLevel_);
+    std::remove(path_.c_str());
+  }
+
+  // Flushes by closing, so call this once, at the end of a drive.
+  std::string contents() const {
+    gma::util::logger().setFile("");
+    std::ifstream f(path_);
+    return std::string((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+  }
+
+  static std::size_t count(const std::string& hay, const std::string& needle) {
+    std::size_t n = 0;
+    for (std::size_t at = hay.find(needle); at != std::string::npos;
+         at = hay.find(needle, at + needle.size())) {
+      ++n;
+    }
+    return n;
+  }
+
+private:
+  gma::util::LogLevel savedLevel_;
+  std::string         path_;
+};
+
+// Big enough that "once" and "once per record" cannot be confused, small
+// enough to stay instant.
+constexpr int kRefusalDrives = 50;
+
+}  // namespace
+
+TEST(RecordIngressRefusalTest, MissingSymbolTableIsLoggedOnceNotPerRecord) {
+  const auto cfg = defaultCfg();
+  std::string log;
+  {
+    GlobalLogCapture capture;
+    Rig rig(cfg);
+    rig.disp.setSymbolTable(nullptr);
+    for (int i = 0; i < kRefusalDrives; ++i) {
+      rig.disp.onRecord(makeRecord(rig.symbolId, 100.0 + i, 10, 99.0, 101.0));
+    }
+    rig.quiesce();
+    log = capture.contents();
+  }
+
+  const std::size_t n =
+      GlobalLogCapture::count(log, "onRecord with no SymbolTable installed");
+
+  // ONE assertion, self-controlling in BOTH directions, which is why it is
+  // `EQ(1)` and not `LT(kRefusalDrives)`:
+  //   n == 0            -> the capture never saw the log; the test is broken,
+  //                        not passing.
+  //   n == 50           -> the guard is missing (the state this branch shipped
+  //                        in once already).
+  //   1 < n < 50        -> the guard is racy.
+  EXPECT_EQ(n, 1u)
+      << "drove " << kRefusalDrives << " records with no SymbolTable and the "
+         "refusal logged " << n << " times; expected exactly 1. 0 means the "
+         "log capture is broken (so every other assertion here is vacuous); "
+         << kRefusalDrives << " means the once-guard is gone and ENC-1487's "
+         "step-2 measurement would be measuring Logger.";
+}
+
+TEST(RecordIngressRefusalTest, UnresolvableSymbolIsLoggedOnceNotPerRecord) {
+  const auto cfg = defaultCfg();
+  std::string log;
+  {
+    GlobalLogCapture capture;
+    Rig rig(cfg);
+    for (int i = 0; i < kRefusalDrives; ++i) {
+      // An id the table never issued — route 2 of the three.
+      rig.disp.onRecord(makeRecord(99'999, 100.0 + i, 10, 99.0, 101.0));
+    }
+    rig.quiesce();
+    log = capture.contents();
+  }
+
+  const std::size_t n = GlobalLogCapture::count(
+      log, "onRecord symbolId does not resolve to a ticker");
+  EXPECT_EQ(n, 1u)
+      << "drove " << kRefusalDrives << " unresolvable records and the refusal "
+         "logged " << n << " times; expected exactly 1 (0 = broken capture, "
+      << kRefusalDrives << " = missing guard)";
+}
+
+TEST(RecordIngressRefusalTest, AnEmptyTickerIsRefusedAndSaidOutLoud) {
+  // ROUTE 3, which previously fell through with NO log at all:
+  // `SymbolTable::intern("")` issues a real, contains()-true id whose `name()`
+  // is "". The ruling is that this is a refusal — see the block comment in
+  // src/core/DispatcherRecord.cpp for why admitting "" is a silent wrong
+  // answer rather than a degraded one.
+  const auto cfg = defaultCfg();
+  std::string log;
+  std::size_t deliveries = 0;
+  bool leaked = false;
+
+  {
+    GlobalLogCapture capture;
+    Rig rig(cfg);
+
+    // The id is REAL — this is the part that makes route 3 distinct from the
+    // other two, so assert it rather than assuming it.
+    const auto emptyId = rig.symbols.intern("");
+    ASSERT_NE(emptyId, data::kInvalidSymbolId)
+        << "SymbolTable folded intern(\"\") onto kInvalidSymbolId; route 3 no "
+           "longer exists and this test should be deleted, not relaxed";
+    ASSERT_TRUE(rig.symbols.contains(emptyId));
+    ASSERT_TRUE(rig.symbols.name(emptyId).empty());
+
+    for (int i = 0; i < kRefusalDrives; ++i) {
+      rig.disp.onRecord(makeRecord(emptyId, 100.0 + i, 10, 99.0, 101.0));
+    }
+    rig.quiesce();
+
+    deliveries = rig.log.rows().size();
+    leaked = rig.store.get("", "price").has_value() ||
+             rig.store.get(kTicker, "price").has_value();
+    log = capture.contents();
+  }
+
+  EXPECT_EQ(deliveries, 0u) << "an empty ticker delivered to a listener";
+  EXPECT_FALSE(leaked) << "an empty ticker reached the AtomicStore";
+  EXPECT_EQ(GlobalLogCapture::count(
+                log, "onRecord symbolId does not resolve to a ticker"),
+            1u)
+      << "route 3 must be refused ONCE and out loud — it used to be silent";
 }
