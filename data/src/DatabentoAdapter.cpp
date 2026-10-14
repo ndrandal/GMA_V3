@@ -711,8 +711,6 @@ arrow::Status DatabentoAdapter::onMbo(const dbn::MboMsg& m) {
 
   std::uint16_t flags = m.flags;
   const auto side = static_cast<dbn::Side>(m.side);
-  const bool isPrint = m.action == static_cast<char>(dbn::Action::Trade) ||
-                       m.action == static_cast<char>(dbn::Action::Fill);
 
   // `BookRecord::side`, and this is the subtle one.
   //

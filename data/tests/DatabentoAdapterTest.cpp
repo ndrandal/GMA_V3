@@ -419,7 +419,7 @@ class DbnFixtureTest : public testing::TestWithParam<const char*> {};
 INSTANTIATE_TEST_SUITE_P(MboVersions, DbnFixtureTest,
                          testing::Values("mbo.v1.dbn", "mbo.v2.dbn", "mbo.v3.dbn"),
                          [](const testing::TestParamInfo<const char*>& i) {
-                           return std::string{"v"} + i.param[4];
+                           return std::string{"v"} + i.param[5];  // "mbo.vN.dbn"
                          });
 
 TEST_P(DbnFixtureTest, MboDecodesToTheVendorsValues) {
@@ -555,7 +555,7 @@ class DbnTradesFixtureTest : public testing::TestWithParam<const char*> {};
 INSTANTIATE_TEST_SUITE_P(TradesVersions, DbnTradesFixtureTest,
                          testing::Values("trades.v1.dbn", "trades.v2.dbn"),
                          [](const testing::TestParamInfo<const char*>& i) {
-                           return std::string{"v"} + i.param[7];
+                           return std::string{"v"} + i.param[8];  // "trades.vN.dbn"
                          });
 
 TEST_P(DbnTradesFixtureTest, TradesDecodeToTheVendorsValues) {
