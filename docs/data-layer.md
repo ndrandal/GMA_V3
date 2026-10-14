@@ -960,7 +960,10 @@ profile small. Meanwhile 90% of the SDK — `historical.cpp` (56 KB), `publisher
 What we actually need is small and static: two packed PODs (56 and 48 bytes,
 **byte-identical across DBN v1/v2/v3** — the vendor aliases `v1::MboMsg = v2::MboMsg =
 v3::MboMsg`), a 100-byte fixed metadata block, and one variable-length symbology section.
-`data/src/DatabentoAdapter.cpp` is ~700 lines including the comments.
+`data/src/DatabentoAdapter.cpp` is 926 lines, of which roughly a third is comments recording
+where each layout fact came from, and the header is 564. The word `double` appears in neither
+except inside the phrase "double-count" — D8's integer path is a property of DBN's own
+encoding, not something the adapter has to achieve.
 
 **The honest cost.** DBN is a wire format we do not own and now have to track: a v4 lands on
 us rather than on a vendor bump, and metadata/symbology is precisely where a hand-rolled
