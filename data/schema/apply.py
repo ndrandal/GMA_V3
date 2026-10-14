@@ -24,6 +24,19 @@ and normalized away, not ignored: the server backticks identifiers, writes
 "from scratch, then twice in a row"; it destroys every row in L1 and there is no
 undo other than re-ingest (which SPEC D6 does make possible — the raw DBN files
 are retained precisely so this is survivable).
+
+WHICH SERVER, and this is safety-critical rather than configuration:
+
+    --url <u>  >  CH_HTTP_URL  >  CH_HTTP_PORT  >  8123 + STACK_PORT_OFFSET
+
+The last term is how tools/stack.sh derives `CH_HTTP_PORT`, so a worktree at
+STACK_PORT_OFFSET=270 reaches its own server on 8393 rather than the offset-zero
+store. `resolve-target` prints the resolution and touches nothing. See
+`resolve_target` and `guard_fresh` for the two refusals --fresh carries.
+
+`self-test` needs no server: it drives `_diff_table`, `_bare_name` and
+`resolve_target` over cases that must report a difference and cases that must
+not. Exit codes throughout: 0 clean, 1 a difference was found, 2 could not run.
 """
 
 import argparse
