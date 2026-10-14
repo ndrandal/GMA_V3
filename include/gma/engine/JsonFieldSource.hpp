@@ -64,7 +64,8 @@ public:
 
   bool has(const std::string& name) const override {
     if (!isObject()) return false;
-    return payload_->FindMember(name.c_str()) != payload_->MemberEnd();
+    auto it = payload_->FindMember(name.c_str());
+    return it != payload_->MemberEnd() && it->value.IsNumber();
   }
 
   bool tryGetNumber(const std::string& name, double& out) const override {
