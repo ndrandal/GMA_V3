@@ -357,22 +357,69 @@ def check_a_includes(root: str, sources: list[str], foreign_roots: list[str],
     return problems
 
 
+def _under(path: str, base: str) -> bool:
+    """`path` is `base` or lies beneath it.  Both must already be realpaths.
+
+    Written out rather than inlined because the naive `startswith(base)` makes
+    `third_party_evil/` a sibling that passes as `third_party/`, and check B's
+    exemption is exactly where that bug would be load-bearing.  The selftest
+    pins the sibling case.
+    """
+    return path == base or path.startswith(base + os.sep)
+
+
 def check_b_include_dirs(root: str, dirs: list[str]) -> list[str]:
-    """gma_engine's in-repo include dirs are exactly {<root>/include}."""
+    """gma_engine's in-repo include dirs are <root>/include or vendored.
+
+    The weakest of the four checks, deliberately so, and bounded -- read CHECK
+    B IS THE WEAKEST OF THE FOUR in the module docstring before widening it.
+    Permitted, for an include dir that resolves inside the repo:
+
+      * `<root>/include`, which must be present;
+      * anything under `<root>/third_party/` whose relative path does not name
+        a forbidden dependency (ENC-1497).
+
+    Everything else in-repo fails, and that set is the check's actual job:
+    `data/include`, `connectors/market/include`, `connectors/synthetic/include`.
+    Comparison is on `os.path.realpath`, so the exemption cannot be reached by
+    symlinking a foreign include root into `third_party/` -- it resolves back
+    out and fails on the general rule.
+    """
     allowed = os.path.realpath(os.path.join(root, "include"))
+    vendor = os.path.realpath(os.path.join(root, VENDOR_SUBDIR))
     real_root = os.path.realpath(root)
     problems: list[str] = []
     in_repo: list[str] = []
     for d in dirs:
         real = os.path.realpath(d)
-        if real == real_root or real.startswith(real_root + os.sep):
+        if _under(real, real_root):
             in_repo.append(real)
     for real in in_repo:
-        if real != allowed and not real.startswith(allowed + os.sep):
+        if _under(real, allowed):
+            continue
+        rel = os.path.relpath(real, root)
+        # The bounded exemption.  `vendor` is only inside the repo when
+        # third_party/ is a real directory there; if it is a symlink pointing
+        # out, nothing under it reaches this loop in the first place.
+        if _under(real, vendor) and _under(vendor, real_root):
+            under_vendor = os.path.relpath(real, vendor)
+            hit = FORBIDDEN_VENDOR_RE.search(under_vendor)
+            if hit is None:
+                continue
             problems.append(
-                f"gma_engine include directory {os.path.relpath(real, root)} is "
-                f"inside the repo but is not include/ -- the engine's include "
-                f"path must expose engine headers only")
+                f"gma_engine include directory {rel} is a vendored tree whose "
+                f"path names '{hit.group(0)}' -- {VENDOR_SUBDIR}/ is exempt from "
+                f"the include-path rule so that a vendored rapidjson resolves "
+                f"the same way in the shared checkout and in a worktree "
+                f"(ENC-1497), but Arrow, Parquet, Gandiva, the ClickHouse "
+                f"client, DuckDB and gma_data are exactly what that exemption "
+                f"may not be used to carry (SPEC D14)")
+            continue
+        problems.append(
+            f"gma_engine include directory {rel} is "
+            f"inside the repo but is not include/ -- the engine's include "
+            f"path must expose engine headers only (a vendored third-party "
+            f"tree under {VENDOR_SUBDIR}/ is the one exception)")
     if allowed not in in_repo:
         problems.append(
             "gma_engine's include directories do not contain include/ at all; "
