@@ -607,12 +607,38 @@ SETTINGS index_granularity = 1024;
 -- missing-telemetry one, so it belongs in the store a query can join against
 -- rather than in a metrics backend a query cannot.
 --
--- No ts_event and no provider_seq of its own, so this table cannot carry the
--- common sort key: it is keyed on when the discontinuity was DETECTED and the
--- seq range it covers.
+-- ⚠ PARTITIONED ON THE DAY OF THE HOLE, NOT THE DAY IT WAS DETECTED, AND THAT
+-- CHANGED UNDER ENC-1480. Revision 2 had `PARTITION BY toYYYYMMDD(ts_detected)`,
+-- which is a different day from the data it describes — a hole in Monday's feed
+-- can be detected on Tuesday, or on any later day by a re-scan. The consequence
+-- is that the §8.6 re-ingest mechanism CANNOT REACH THESE ROWS: dropping the
+-- event tables' partition for Monday leaves Monday's gap rows behind, so a
+-- corrected re-pull that fills the hole ends with a row still asserting the
+-- discontinuity, and a research run joining `gaps` sees a PHANTOM HOLE in data
+-- that is now complete. That is the same class of wrong answer as the gap it
+-- was recording.
+--
+-- Partitioning on `toYYYYMMDD(ts_from)` puts these rows on the same partition
+-- key as the event tables, so re-ingesting a day drops its gap rows with the
+-- rest of it and one `DROP PARTITION` per day is uniform across trades,
+-- book_events, book_snapshots and gaps. The per-symbol collateral damage that
+-- creates is covered by the invariant in gma.ingest_windows above — this table
+-- is named there for exactly that reason.
+--
+-- The cost, recorded: the detector must supply event-time bounds for the hole,
+-- not only seq bounds. It has them — a seq discontinuity is found between two
+-- messages, and both carry ts_event — but it is an obligation on ENC-1483 that
+-- revision 2 did not impose. ts_detected stays as a diagnostic column.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS gma.gaps
 (
+    -- Event-time bounds of the missing run, half-open [ts_from, ts_to): the
+    -- ts_event of the last message before the hole and of the first message
+    -- after it. These are what the partition key and the sort key are built on.
+    ts_from       DateTime64(9, 'UTC')  CODEC(DoubleDelta, ZSTD(1)),
+    ts_to         DateTime64(9, 'UTC')  CODEC(DoubleDelta, ZSTD(1)),
+    -- Diagnostics: when the detector noticed. May be a different day, which is
+    -- the whole reason it is not the partition key.
     ts_detected   DateTime64(9, 'UTC')  CODEC(DoubleDelta, ZSTD(1)),
     session_id    UInt32                CODEC(DoubleDelta, ZSTD(1)),
     symbol        LowCardinality(String),
@@ -627,8 +653,8 @@ CREATE TABLE IF NOT EXISTS gma.gaps
     recovery      UInt8                 CODEC(ZSTD(1))
 )
 ENGINE = MergeTree
-PARTITION BY toYYYYMMDD(ts_detected)
-ORDER BY (symbol, ts_detected, seq_from)
+PARTITION BY toYYYYMMDD(ts_from)
+ORDER BY (symbol, ts_from, seq_from)
 SETTINGS index_granularity = 1024;
 
 -- ---------------------------------------------------------------------------
