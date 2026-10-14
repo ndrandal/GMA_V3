@@ -58,11 +58,11 @@ TEST(SyntheticConnectorTest, ComputerWritesSinCosToStore) {
   synthetic::SyntheticEventComputer computer;
   engine::ComputeContext ctx{ &store, &dispatcher, &pool };
 
-  computer.compute(makeSyntheticEvent("SYN", 0.0), ctx);
+  computer.computeEvent(makeSyntheticEvent("SYN", 0.0), ctx);
   EXPECT_DOUBLE_EQ(asDouble(store.get("SYN", "synthetic.sin"), 42.0), std::sin(0.0));
   EXPECT_DOUBLE_EQ(asDouble(store.get("SYN", "synthetic.cos"), 42.0), std::cos(0.0));
 
-  computer.compute(makeSyntheticEvent("SYN", 10.0), ctx);
+  computer.computeEvent(makeSyntheticEvent("SYN", 10.0), ctx);
   EXPECT_DOUBLE_EQ(asDouble(store.get("SYN", "synthetic.sin")), std::sin(1.0));
   EXPECT_DOUBLE_EQ(asDouble(store.get("SYN", "synthetic.cos")), std::cos(1.0));
 

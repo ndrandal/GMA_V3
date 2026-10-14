@@ -31,7 +31,9 @@ public:
   explicit CountingComputer(std::string type, std::atomic<int>* invocations)
     : _type(std::move(type)), _invocations(invocations) {}
   std::string_view eventType() const override { return _type; }
-  void compute(const Event&, engine::ComputeContext&) override {
+  // ENC-1486: compute takes a FieldSource, not an Event.
+  void compute(const std::string&, const engine::FieldSource&,
+               engine::ComputeContext&) override {
     if (_invocations) _invocations->fetch_add(1);
   }
 private:
