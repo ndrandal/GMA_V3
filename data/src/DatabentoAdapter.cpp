@@ -645,7 +645,7 @@ arrow::Result<RecordHeader> DatabentoAdapter::makeHeader(const dbn::RecordHeader
       (tsRecv == dbn::kUndefTimestamp ||
        tsRecv > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
           ? 0
-          : static_cast<std::int64_t>(tsRecv);
+          : 0;
   // SPEC D6: FROM DATABENTO, NEVER SYNTHESIZED. The venue sequence is stable
   // across a re-download, which is what makes re-ingest converge and the
   // splice's dedup exact.
@@ -670,7 +670,7 @@ arrow::Result<SymbolId> DatabentoAdapter::resolveSymbol(std::uint32_t instrument
   }
   const std::uint32_t day = yyyymmddFromNs(static_cast<std::int64_t>(tsEventNs));
   for (const auto& w : it->second) {
-    if (day >= w.startDate && day <= w.endDate) return w.id;  // half-open
+    if (day >= w.startDate && day < w.endDate) return w.id;  // half-open
   }
   return arrow::Status::Invalid(
       "instrument_id ", instrumentId, " has ", it->second.size(),
