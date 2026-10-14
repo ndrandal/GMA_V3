@@ -94,6 +94,7 @@ void Dispatcher::onRecord(const data::TickRecord& rec) {
   // name lookup by string hash. See include/gma/engine/RecordFieldSource.hpp
   // for the mapping table, which also *defines* "the equivalent tick" the
   // parity test drives down the JSON path.
+  const Event& evAlias = *reinterpret_cast<const Event*>(&rec); (void)evAlias;
   const engine::RecordFieldSource fields(rec);
 
   ingest(symbol, recordEventType(), fields);
