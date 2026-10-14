@@ -33,7 +33,9 @@ FOUR CHECKS, each closing a different route in:
                ClickHouse / DuckDB header, nor a header that exists only under
                `data/include` or `connectors/*/include`.
   B  include   gma_engine's include directories, restricted to paths inside
-               the repo, are exactly {<root>/include}.
+               the repo, are `<root>/include` or a VENDORED THIRD-PARTY tree
+               under `<root>/third_party` whose name is not itself a forbidden
+               dependency.  See CHECK B IS THE WEAKEST OF THE FOUR below.
   C  link      nothing matching gma_data / arrow / parquet / clickhouse is
                reachable from gma_engine's link libraries — TRANSITIVELY.
   D  profile   nothing matching them is reachable from gma_server's either,
@@ -44,6 +46,52 @@ FOUR CHECKS, each closing a different route in:
                against an Arrow-free include path" as the thing being
                protected, and a prose claim with no check behind it is what
                this whole file is a reaction to.
+
+CHECK B IS THE WEAKEST OF THE FOUR, AND ITS HOLE IS DELIBERATE.  (ENC-1497)
+Its rule used to be "any in-repo include dir that is not `<root>/include`",
+which is an over-approximation of the invariant: a vendored third-party include
+tree is not Arrow, not the ClickHouse client and not gma_data, and rapidjson is
+a long-standing *engine* dependency -- `gma::Event` holds a
+`shared_ptr<rapidjson::Document>` and `src/core/Dispatcher.cpp` has always
+walked a DOM.  `/third_party/` is gitignored, so it is populated in the shared
+checkout and absent in a fresh `git worktree`; CMake's `find_path` therefore
+resolves RapidJSON to `<root>/third_party/rapidjson` in one and to
+`/usr/include` in the other, and THE SAME COMMIT FAILED FROM ONE CHECKOUT AND
+PASSED FROM THE OTHER.  The over-approximation was never exercised because this
+gate was authored in a worktree where `third_party/` happened to be empty.
+
+A false positive costs as much as a false negative here: a gate that reddens on
+a legitimate configuration gets routed around, and this one guards a decision
+(D14's live-only client profile) that nothing else checks.  So B accepts both
+resolutions -- but the exemption is BOUNDED, because an exemption with no
+stated bound is how this comes back:
+
+  * only `<root>/third_party/...` is exempt, and only after `os.path.realpath`,
+    so `data/include` symlinked under `third_party/` resolves back out of the
+    exemption and still fails;
+  * a vendored tree whose path names a forbidden dependency -- arrow, parquet,
+    gandiva, clickhouse, duckdb, gma_data -- still FAILS, so the hole cannot be
+    used to put Arrow on the engine's include path;
+  * `data/include` and both connector include roots still fail, which is check
+    B's actual job.
+
+What B is NOT is the load-bearing check.  Vendoring Arrow under some
+unrecognised name would get past it; it would not get past A (no engine
+translation unit may include an Arrow/Parquet/ClickHouse/DuckDB header, matched
+on the include text, not on a directory name) or C/D (nothing matching those
+names anywhere in the TRANSITIVE link closure of gma_engine, gma_server or
+gma_tests).  B is a cheap structural sanity check on one target property; A and
+C/D carry the invariant.  Read a B failure as "the engine's include path grew
+something it should not have", never as the only thing standing between the
+engine and Arrow.
+
+WHY THE RESOLVED RAPIDJSON PATH IS REPORTED.  The underlying defect was not
+that one verdict was wrong -- it was that two checkouts produced DIFFERENT
+verdicts with nothing in the output to explain why.  So the manifest carries
+`rapidjson_include_dir` (CMake already `message(STATUS ...)`s it) and the
+summary prints it with whether it is in-repo, vendored or external.  A
+differing verdict between two checkouts of the same commit must be explicable
+from the gate's own output.
 
 C AND D WALK THE CLOSURE, AND HAVE TO.  They read a *link graph* out of the
 manifest, not one target's own property, because the direct property is the
@@ -123,6 +171,21 @@ FORBIDDEN_LINK_PATTERNS = (
 )
 
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]')
+
+# The one subtree of the repo whose include dirs check B permits on
+# gma_engine's include path, and the names that are still refused inside it.
+# (ENC-1497 -- see CHECK B IS THE WEAKEST OF THE FOUR in the docstring.)
+#
+# Matched with `search` against the path RELATIVE TO third_party/, so a release
+# tarball directory (`apache-arrow-18.0.0/cpp/src`) is caught as well as a bare
+# `arrow`.  Same vocabulary as FORBIDDEN_INCLUDE_PREFIXES and
+# FORBIDDEN_LINK_PATTERNS; it is spelled out separately rather than derived
+# because those two match a quoted include path and a library name
+# respectively, and a directory name is neither.  ADD A NEW FORBIDDEN
+# DEPENDENCY TO ALL THREE.
+VENDOR_SUBDIR = "third_party"
+FORBIDDEN_VENDOR_RE = re.compile(
+    r"arrow|parquet|gandiva|clickhouse|duckdb|gma_data", re.IGNORECASE)
 
 # Floors for the anti-vacuity assertions.  The margin has to be real, not
 # claimed: the engine is **99** source/header files once src/main.cpp is
@@ -294,27 +357,103 @@ def check_a_includes(root: str, sources: list[str], foreign_roots: list[str],
     return problems
 
 
+def _under(path: str, base: str) -> bool:
+    """`path` is `base` or lies beneath it.  Both must already be realpaths.
+
+    Written out rather than inlined because the naive `startswith(base)` makes
+    `third_party_evil/` a sibling that passes as `third_party/`, and check B's
+    exemption is exactly where that bug would be load-bearing.  The selftest
+    pins the sibling case.
+    """
+    return path == base or path.startswith(base + os.sep)
+
+
 def check_b_include_dirs(root: str, dirs: list[str]) -> list[str]:
-    """gma_engine's in-repo include dirs are exactly {<root>/include}."""
+    """gma_engine's in-repo include dirs are <root>/include or vendored.
+
+    The weakest of the four checks, deliberately so, and bounded -- read CHECK
+    B IS THE WEAKEST OF THE FOUR in the module docstring before widening it.
+    Permitted, for an include dir that resolves inside the repo:
+
+      * `<root>/include`, which must be present;
+      * anything under `<root>/third_party/` whose relative path does not name
+        a forbidden dependency (ENC-1497).
+
+    Everything else in-repo fails, and that set is the check's actual job:
+    `data/include`, `connectors/market/include`, `connectors/synthetic/include`.
+    Comparison is on `os.path.realpath`, so the exemption cannot be reached by
+    symlinking a foreign include root into `third_party/` -- it resolves back
+    out and fails on the general rule.
+    """
     allowed = os.path.realpath(os.path.join(root, "include"))
+    vendor = os.path.realpath(os.path.join(root, VENDOR_SUBDIR))
     real_root = os.path.realpath(root)
     problems: list[str] = []
     in_repo: list[str] = []
     for d in dirs:
         real = os.path.realpath(d)
-        if real == real_root or real.startswith(real_root + os.sep):
+        if _under(real, real_root):
             in_repo.append(real)
     for real in in_repo:
-        if real != allowed and not real.startswith(allowed + os.sep):
+        if _under(real, allowed):
+            continue
+        rel = os.path.relpath(real, root)
+        # The bounded exemption.  `vendor` is only inside the repo when
+        # third_party/ is a real directory there; if it is a symlink pointing
+        # out, nothing under it reaches this loop in the first place.
+        if _under(real, vendor) and _under(vendor, real_root):
+            under_vendor = os.path.relpath(real, vendor)
+            hit = FORBIDDEN_VENDOR_RE.search(under_vendor)
+            if hit is None:
+                continue
             problems.append(
-                f"gma_engine include directory {os.path.relpath(real, root)} is "
-                f"inside the repo but is not include/ -- the engine's include "
-                f"path must expose engine headers only")
+                f"gma_engine include directory {rel} is a vendored tree whose "
+                f"path names '{hit.group(0)}' -- {VENDOR_SUBDIR}/ is exempt from "
+                f"the include-path rule so that a vendored rapidjson resolves "
+                f"the same way in the shared checkout and in a worktree "
+                f"(ENC-1497), but Arrow, Parquet, Gandiva, the ClickHouse "
+                f"client, DuckDB and gma_data are exactly what that exemption "
+                f"may not be used to carry (SPEC D14)")
+            continue
+        problems.append(
+            f"gma_engine include directory {rel} is "
+            f"inside the repo but is not include/ -- the engine's include "
+            f"path must expose engine headers only (a vendored third-party "
+            f"tree under {VENDOR_SUBDIR}/ is the one exception)")
     if allowed not in in_repo:
         problems.append(
             "gma_engine's include directories do not contain include/ at all; "
             "the manifest is wrong or the target was restructured")
     return problems
+
+
+def classify_include_dir(root: str, path: str) -> str:
+    """Where `path` sits relative to the repo, in words, for the summary.
+
+    THE DEFECT THIS EXISTS FOR (ENC-1497) was not a wrong verdict -- it was two
+    checkouts of the same commit producing DIFFERENT verdicts with nothing in
+    the output to say why. `third_party/` is gitignored, so RapidJSON resolves
+    to `<root>/third_party/rapidjson` in the shared checkout and to
+    `/usr/include` in a fresh worktree, and neither run printed the path it had
+    resolved. A gate whose verdict depends on the checkout must print the thing
+    that differs.
+    """
+    if not path:
+        return ("not reported by the manifest -- stale build directory; "
+                "re-run cmake so the manifest carries rapidjson_include_dir")
+    real = os.path.realpath(path)
+    real_root = os.path.realpath(root)
+    engine_inc = os.path.realpath(os.path.join(root, "include"))
+    vendor = os.path.realpath(os.path.join(root, VENDOR_SUBDIR))
+    if _under(real, engine_inc):
+        return f"{path} (in-repo: the engine's own include/)"
+    if _under(real, vendor) and _under(vendor, real_root):
+        return (f"{path} (vendored under {VENDOR_SUBDIR}/ -- permitted by "
+                f"check B, ENC-1497)")
+    if _under(real, real_root):
+        return (f"{path} (in-repo and NOT under {VENDOR_SUBDIR}/ -- check B "
+                f"flags this)")
+    return f"{path} (external to the repo)"
 
 
 # A link entry is not always a bare target name, and MATCHING A DECORATED
@@ -593,13 +732,100 @@ def selftest() -> int:
         expect_detected("A/data-only-header",
                         check_a_includes(tmp, [bad_schema], foreign))
 
-        expect_clean("B/legal",
-                     check_b_include_dirs(tmp, [os.path.join(tmp, "include")]))
+        # --- B: the include path, its ONE exemption, and that exemption's
+        # --- bound.  Both directions, because B's defect was a FALSE
+        # --- POSITIVE: the same commit failed from the shared checkout and
+        # --- passed from a worktree (ENC-1497).
+        engine_inc = os.path.join(tmp, "include")
+        third = os.path.join(tmp, VENDOR_SUBDIR)
+        expect_clean("B/legal", check_b_include_dirs(tmp, [engine_inc]))
+
+        # LEGAL, direction 1 -- the resolution a fresh `git worktree` gets.
+        # third_party/ is gitignored, so it is absent and CMake's find_path
+        # falls through to the system rapidjson. Out-of-repo dirs are not B's
+        # business; this was already green and must stay green.
+        expect_clean("B/external-rapidjson-is-legal",
+                     check_b_include_dirs(tmp, [engine_inc, "/usr/include"]))
+
+        # LEGAL, direction 2 -- the resolution the SHARED CHECKOUT gets for
+        # that same commit, where third_party/ is populated. THIS IS THE CASE
+        # THAT WAS RED. Both spellings find_path accepts are pinned, because
+        # CMakeLists.txt hints at both `third_party/rapidjson` and
+        # `third_party/rapidjson/include`.
+        os.makedirs(os.path.join(third, "rapidjson", "include"))
+        expect_clean("B/vendored-rapidjson-is-legal",
+                     check_b_include_dirs(
+                         tmp, [engine_inc, os.path.join(third, "rapidjson")]))
+        expect_clean("B/vendored-rapidjson-include-subdir-is-legal",
+                     check_b_include_dirs(
+                         tmp, [engine_inc,
+                               os.path.join(third, "rapidjson", "include")]))
+
+        # THE BOUND ON THE EXEMPTION. A vendored tree that names a forbidden
+        # dependency is still refused, so the hole cannot carry Arrow onto the
+        # engine's include path. An exemption with no stated bound is how this
+        # comes back.
+        for vendored in ("arrow", "clickhouse-cpp", "parquet", "duckdb",
+                         os.path.join("apache-arrow-18.0.0", "cpp", "src")):
+            os.makedirs(os.path.join(third, vendored), exist_ok=True)
+            expect_detected(
+                f"B/vendored-{vendored.replace(os.sep, '-')}-is-not-exempt",
+                check_b_include_dirs(
+                    tmp, [engine_inc, os.path.join(third, vendored)]))
+
+        # The exemption is decided on os.path.realpath, so a foreign include
+        # root symlinked under third_party/ resolves back out of it and fails
+        # on the general rule rather than slipping through.
+        sneaky = os.path.join(third, "sneaky")
+        os.symlink(os.path.join(tmp, "data", "include"), sneaky)
+        expect_detected("B/symlink-out-of-third_party-is-not-exempt",
+                        check_b_include_dirs(tmp, [engine_inc, sneaky]))
+
+        # And it is a PATH prefix, not a string prefix: a sibling directory
+        # whose name merely starts with "third_party" is not vendored.
+        expect_detected("B/third_party-sibling-dir-is-not-exempt",
+                        check_b_include_dirs(
+                            tmp, [engine_inc,
+                                  os.path.join(tmp, VENDOR_SUBDIR + "_evil",
+                                               "include")]))
+
+        # WHAT CHECK B IS ACTUALLY FOR, and what must keep failing: the data
+        # layer's include root and every connector's.
         expect_detected("B/data-include-on-engine-path",
                         check_b_include_dirs(
-                            tmp, [os.path.join(tmp, "include"),
+                            tmp, [engine_inc,
                                   os.path.join(tmp, "data", "include")]))
+        os.makedirs(os.path.join(tmp, "connectors", "synthetic", "include"),
+                    exist_ok=True)
+        for conn in ("market", "synthetic"):
+            expect_detected(
+                f"B/connector-{conn}-include-on-engine-path",
+                check_b_include_dirs(
+                    tmp, [engine_inc,
+                          os.path.join(tmp, "connectors", conn, "include")]))
+        # A bare src/ on the engine's include path is not vendored either --
+        # the general rule still covers everything outside the two cases above.
+        expect_detected("B/src-on-engine-path",
+                        check_b_include_dirs(
+                            tmp, [engine_inc, os.path.join(tmp, "src")]))
         expect_detected("B/include-missing", check_b_include_dirs(tmp, ["/usr/include"]))
+        # ...including when the only in-repo dir present is a legal vendored
+        # one: the exemption must not stand in for include/ itself.
+        expect_detected("B/include-missing-but-vendored-present",
+                        check_b_include_dirs(
+                            tmp, [os.path.join(third, "rapidjson")]))
+
+        # classify_include_dir feeds the summary line that makes a differing
+        # verdict between two checkouts explicable at all, so it is pinned too.
+        for path, want in ((os.path.join(third, "rapidjson"), "vendored"),
+                           (engine_inc, "in-repo"),
+                           ("/usr/include", "external"),
+                           ("", "not reported")):
+            got = classify_include_dir(tmp, path)
+            if want not in got:
+                failures.append(
+                    f"SELFTEST: classify_include_dir({path!r}) = {got!r}, "
+                    f"expected it to say {want!r}")
 
         # --- C and D: the link closure ----------------------------------
         # The real shape of this repo's link graph, copied from an actual
@@ -794,6 +1020,7 @@ def main() -> int:
                      if "gma_tests" in graph else [])
     cmake_sources = dedupe(split_list(manifest.get("engine_cmake_sources", "")))
     data_enabled = manifest.get("gma_data_enabled", "?")
+    rapidjson_dir = manifest.get("rapidjson_include_dir", "")
 
     walked = walk_engine_trees(root)
     walked_set = set(walked)
@@ -913,6 +1140,9 @@ def main() -> int:
     print(f"  engine files    : {len(sources)} "
           f"({len(cmake_sources)} from CMake, {len(walked)} walked)")
     print(f"  include dirs    : {len(include_dirs)}")
+    # Printed unconditionally and on both verdicts: it is the field that
+    # explains why two checkouts of one commit can disagree (ENC-1497).
+    print(f"  rapidjson       : {classify_include_dir(root, rapidjson_dir)}")
     print(f"  link libraries  : {len(link_libs)} engine, {len(server_libs)} server "
           f"(direct)")
     print(f"  link closure    : {len(engine_closure)} from gma_engine, "
@@ -941,7 +1171,8 @@ def main() -> int:
 
     print("\nOK: no Arrow/ClickHouse include in engine code or the composition "
           "root, no data/ or connector header reached from the engine, engine "
-          "include path is include/ only, and no data-layer library anywhere "
+          "include path is include/ or a non-forbidden vendored tree, and no "
+          "data-layer library anywhere "
           "in the TRANSITIVE link closure of gma_engine, gma_server or "
           "gma_tests.")
     return 0

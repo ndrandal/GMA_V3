@@ -65,10 +65,27 @@ code" but:
 that, as the ctest cases `gma_engine_isolation` and `gma_engine_isolation_selftest`. It
 checks four things — no forbidden include in engine code or in the composition root, no
 `data/`-only or connector header reached from the engine, `gma_engine`'s in-repo include
-path is `include/` only, and no data-layer library anywhere in `gma_engine`'s or
-`gma_server`'s **transitive** link closure — refuses to report a pass on vacuous input, and
-ships a `--selftest` that runs each predicate against an input that violates it. Every way
-of breaking this invariant otherwise still compiles and still passes every existing test.
+dirs are `include/` or a vendored `third_party/` tree, and no data-layer library anywhere in
+`gma_engine`'s or `gma_server`'s **transitive** link closure — refuses to report a pass on
+vacuous input, and ships a `--selftest` that runs each predicate against an input that
+violates it. Every way of breaking this invariant otherwise still compiles and still passes
+every existing test.
+
+The include-path check is the **weakest of the four, deliberately** (ENC-1497). It used to
+read "any in-repo include dir that is not `include/`", which is an over-approximation:
+`/third_party/` is gitignored, so it is populated in the shared checkout and absent in a
+fresh `git worktree`, and CMake's `find_path` resolves RapidJSON to
+`third_party/rapidjson` in the first and `/usr/include` in the second — **the same commit
+failed the gate from one checkout and passed from the other**, with nothing in either run's
+output to explain the difference. A vendored third-party include tree is not Arrow, and
+rapidjson is a long-standing engine dependency (`gma::Event` holds a
+`shared_ptr<rapidjson::Document>`), so both resolutions are legal. The exemption is bounded
+— only under `third_party/`, decided on `realpath`, and never for a path naming arrow /
+parquet / gandiva / clickhouse / duckdb / `gma_data` — and the resolved rapidjson path is
+now in the manifest and in the gate's summary, because a verdict that depends on the
+checkout has to print the thing that differs. `data/include` and both connector include
+roots still fail: that is what this check is for. The *invariant* is carried by the include
+scan and the two link-closure checks, not by this one.
 
 The last of the four is transitive because the direct property is the wrong place to look:
 `gma_server` links the `gma` umbrella and nothing else, so one
