@@ -621,6 +621,16 @@ endif()
 # cross-checks GMA_BUILD_DATA against the presence of the row, so the two
 # cannot disagree silently.
 #
+# THE RESOLVED RAPIDJSON PATH IS IN THE MANIFEST (ENC-1497). `/third_party/`
+# is gitignored, so it is populated in the shared checkout and absent in a
+# fresh `git worktree`; find_path above therefore resolves RapidJSON to
+# ${CMAKE_SOURCE_DIR}/third_party/rapidjson in one and to /usr/include in the
+# other. That made ONE COMMIT FAIL THIS GATE FROM ONE CHECKOUT AND PASS FROM
+# THE OTHER, with nothing in either run's output to explain the difference.
+# Check B now accepts both (bounded -- see the checker's docstring), and the
+# path is reported either way, because a verdict that depends on the checkout
+# has to print the thing that differs.
+#
 # The manifest is produced with file(GENERATE) rather than passed on the
 # command line because the properties are generator expressions, and because a
 # resolved list on an add_test COMMAND would be split into separate arguments
@@ -672,6 +682,7 @@ engine_include_dirs=$<JOIN:$<TARGET_PROPERTY:gma_engine,INCLUDE_DIRECTORIES>,|>
 engine_interface_include_dirs=$<JOIN:$<TARGET_PROPERTY:gma_engine,INTERFACE_INCLUDE_DIRECTORIES>,|>
 engine_cmake_sources=$<JOIN:$<TARGET_PROPERTY:gma_engine,SOURCES>,|>
 gma_data_enabled=${GMA_BUILD_DATA}
+rapidjson_include_dir=${RAPIDJSON_INCLUDE_DIR}
 ${_gma_iso_link_rows}")
 
   if (Python3_Interpreter_FOUND)
