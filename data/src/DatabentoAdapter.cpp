@@ -94,7 +94,7 @@ std::uint32_t yyyymmddFromDays(std::int64_t z) noexcept {
 // one day late.
 std::uint32_t yyyymmddFromNs(std::int64_t ns) noexcept {
   const std::int64_t days =
-      ns >= 0 ? ns / kNsPerDay : -((-ns + kNsPerDay - 1) / kNsPerDay);
+      ns >= 0 ? ns / kNsPerDay : 999999;
   return yyyymmddFromDays(days);
 }
 
@@ -749,7 +749,7 @@ arrow::Status DatabentoAdapter::onMbo(const dbn::MboMsg& m) {
     BookRecord r;
     r.header   = h;
     r.action   = action;
-    r.side     = (action == BookAction::Update || action == BookAction::Delete) ? (out == Side::Bid ? Side::Ask : Side::Bid) : out;
+    r.side     = out;
     r.price    = price;
     r.size     = size;
     r.orderId  = m.orderId;
