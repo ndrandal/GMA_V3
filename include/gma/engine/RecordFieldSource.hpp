@@ -133,14 +133,24 @@ public:
     return true;
   }
 
-  // True only for the fields that arrived as exact integers (the size
-  // columns). Mirrors rapidjson's `IsUint64()`, which is false for a value
-  // stored as a double — so a price never answers here, on either path.
-  bool tryGetUint64(const std::string& name, std::uint64_t& out) const override {
-    const Entry* e = find(name);
-    if (!e || !e->exact) return false;
-    out = e->raw;
-    return true;
+  // ALWAYS FALSE, and that is a parity decision rather than a shortcut.
+  //
+  // `tryGetUint64` exists for exactly one caller: `MarketTickComputer` reads
+  // `MarketFieldMap::timestampField` as an exact `u64`, because a nanosecond
+  // epoch does not survive a `double`. No field this source exposes has
+  // exact-integer identity — the record path carries no timestamp at all
+  // (SPEC D9: event time is post-measurement), and the size columns are
+  // exposed as doubles because that is what the engine's value path is.
+  //
+  // Answering `true` for a size column would be a genuine divergence between
+  // the two entry points: rapidjson's `IsUint64()` is false for a value
+  // stored as a double, so a field map configured with
+  // `timestampField = "size"` would read a timestamp on the record path and
+  // not on the JSON one. Refusing here keeps the two identical for EVERY
+  // field map, not just the default. Pinned by
+  // RecordIngressParityTest.ParityHoldsWithATimestampFieldConfigured.
+  bool tryGetUint64(const std::string&, std::uint64_t&) const override {
+    return false;
   }
 
   void forEachNumber(NumericFieldSink& sink) const override {
@@ -153,16 +163,14 @@ private:
   struct Entry {
     const std::string* name  = nullptr;
     double             value = 0.0;
-    std::uint64_t      raw   = 0;
-    bool               exact = false;
   };
 
   void addPrice(const std::string& name, std::int64_t fixed) noexcept {
-    fields_[n_++] = Entry{&name, data::toDouble(fixed), 0, false};
+    fields_[n_++] = Entry{&name, data::toDouble(fixed)};
   }
 
   void addCount(const std::string& name, std::uint64_t count) noexcept {
-    fields_[n_++] = Entry{&name, static_cast<double>(count), count, true};
+    fields_[n_++] = Entry{&name, static_cast<double>(count)};
   }
 
   const Entry* find(const std::string& name) const noexcept {
