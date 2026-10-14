@@ -1,0 +1,10 @@
+-- Fixture: comments and nothing else. Expected verdict: REJECT.
+--
+-- Not a D2 violation — an ANTI-VACUITY one. A scan whose parser produced no
+-- input finds no violations, and "no violations found" is exactly what a clean
+-- pass looks like. This repo has shipped that failure more than once (see
+-- docs/data-layer.md §5.4), so the check asserts a non-zero statement count
+-- and fails here.
+--
+-- CREATE TABLE IF NOT EXISTS fixture.nothing (x UInt8) ENGINE = MergeTree
+-- ORDER BY x;
