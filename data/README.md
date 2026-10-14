@@ -108,8 +108,13 @@ needs OpenSSL, zstd, nlohmann_json, cpp-httplib, HowardHinnant/date *and a Rust 
 the full trade-off, stated in both directions, is `../docs/data-layer.md` §15.2. zstd is
 deliberately not a dependency: `.dbn.zst` is decompressed by the ingest job, and feeding a
 zstd frame here is refused by name. The mapping is a re-encoding of `ItchAdapter`'s tested
-MBO vocabulary, and the three invariants it preserves are the book-neutral print, the
-epoch bump on a clear, and `Cancel` being a **delta** that needs the resting size. The DBN
+MBO vocabulary, and the three invariants it preserves are the book-neutral print, the epoch
+bump on a clear (whose mechanism here is the Clear case's **erase loop**, not an epoch in the
+adapter's own order key — that key has two members), and `Cancel` being a **delta** that needs
+the resting size. One thing it does *not* inherit: `bookNeutral` is not a repo-wide invariant
+(`FeedEvent.hpp` defaults it false and `WsFeedClient` has a live branch that consumes the
+book), so "every `BookAction::Trade` row is book-neutral" is **this adapter's** decision,
+justified by DBN's own contract, and a future non-DBN provider owes its own answer. The DBN
 layout is established by five committed files of **real vendor bytes** (`tests/fixtures/dbn/`,
 Apache-2.0) rather than by assertion — the test's first act is to prove a DBN encoder
 reproduces each of them byte for byte, and only then uses it to reach the actions a
