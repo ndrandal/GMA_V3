@@ -932,8 +932,16 @@ TEST(RecordIngressRefusalTest, UnresolvableSymbolDeliversNothing) {
     data::TickRecord r = makeRecord(id, 100.25, 10, 100.20, 100.30);
     rig.disp.onRecord(r);
     rig.quiesce();
-    return std::make_pair(rig.log.rows().size(),
-                          rig.store.get(kTicker, "price").has_value());
+    // BOTH halves matter. "no delivery to PARITY" alone is satisfied by a
+    // path that routes everything under the EMPTY stream key — nothing is
+    // subscribed there, so the listener log stays empty while the AtomicStore
+    // quietly accumulates a `""` symbol. That is the actual failure mode of
+    // dropping the refusal, and perturbing the refusal away left a check on
+    // the first half alone completely green.
+    const bool leaked = rig.store.get(kTicker, "price").has_value() ||
+                        rig.store.get("", "price").has_value() ||
+                        rig.store.get("", "size").has_value();
+    return std::make_pair(rig.log.rows().size(), leaked);
   };
 
   // POSITIVE CONTROL FIRST: the rig does deliver for a resolvable id, so the
@@ -949,20 +957,20 @@ TEST(RecordIngressRefusalTest, UnresolvableSymbolDeliversNothing) {
 
   // No table installed.
   {
-    auto [deliveries, stored] = drove(/*installTable=*/false, 2);
+    auto [deliveries, leaked] = drove(/*installTable=*/false, 2);
     EXPECT_EQ(deliveries, 0u);
-    EXPECT_FALSE(stored);
+    EXPECT_FALSE(leaked);
   }
   // kInvalidSymbolId — "this record names no symbol".
   {
-    auto [deliveries, stored] = drove(true, data::kInvalidSymbolId);
+    auto [deliveries, leaked] = drove(true, data::kInvalidSymbolId);
     EXPECT_EQ(deliveries, 0u);
-    EXPECT_FALSE(stored);
+    EXPECT_FALSE(leaked);
   }
   // An id this table never issued.
   {
-    auto [deliveries, stored] = drove(true, 99'999);
+    auto [deliveries, leaked] = drove(true, 99'999);
     EXPECT_EQ(deliveries, 0u);
-    EXPECT_FALSE(stored);
+    EXPECT_FALSE(leaked);
   }
 }
