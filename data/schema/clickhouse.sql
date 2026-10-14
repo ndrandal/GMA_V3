@@ -122,12 +122,18 @@
 --   re-ingest. If the DBN files are ever not retained, a ReplacingMergeTree
 --   with a PROVABLY unique book_events key becomes mandatory and C12 returns.
 --
---   Two tables are ReplacingMergeTree, and each says why at its definition:
---   gma.symbology and gma.ingest_windows. Both are tiny metadata tables with a
---   key that is unique by construction, and for both the point of the version
---   column is that an UPDATE to an existing row (closing a half-open interval;
---   an in-flight window becoming complete) is a replace rather than two
---   contradictory rows.
+--   EXACTLY ONE TABLE IS ReplacingMergeTree: gma.symbology, and it says why at
+--   its definition. Its key is unique by construction, the table is tiny, and
+--   its version column is a WRITE clock (`ingested_at`), which is what makes
+--   closing a half-open interval a replace rather than two contradictory rows.
+--
+--   gma.ingest_windows was ReplacingMergeTree(completed_at) in revision 2 and is
+--   NOT any more. completed_at is zero while a window is in flight, so on a
+--   re-ingest the engine resolves to the STALE complete row and then deletes
+--   the in-flight one at merge time — an incomplete window reads as complete,
+--   forever and silently, which is the one thing D11 exists to prevent. That is
+--   measured, not reasoned; see the table's own comment. It is a plain-MergeTree
+--   append-only transition log, with a read rule written down beside it.
 -- ---------------------------------------------------------------------------
 
 CREATE DATABASE IF NOT EXISTS gma;
@@ -414,46 +420,76 @@ SETTINGS index_granularity = 1024;
 -- and recovery is re-running the window — which DROP PARTITION + reload
 -- (docs §8.6) makes exact.
 --
--- ENGINE: ReplacingMergeTree(completed_at). The ticket for this schema named
--- symbology as "the one exception" to plain MergeTree; this is the second, and
--- the justification is the same three-part one:
+-- ENGINE: PLAIN MergeTree, AND THIS TABLE IS AN APPEND-ONLY TRANSITION LOG.
+-- One row per state transition of one window, never an update in place.
 --
---   * the key (symbol, kind, from_ts, session_id) is unique by construction —
---     one ingest session loads a given kind over a given window once;
---   * the table has one row per symbol-kind-window, so merge amplification is
---     not a consideration;
---   * and the version column is what makes a state transition a REPLACE rather
---     than two contradictory rows. The job writes state=0 (in-flight) and later
---     state=1 (complete) or state=2 (failed) for the SAME key. Without a
---     version, "in-flight" and "complete" coexist and the engine may keep
---     either. completed_at is zero on the in-flight row, so any real completion
---     wins.
+-- ⚠ THIS REVERSES THE REVISION-2 DDL, WHICH WAS
+-- `ReplacingMergeTree(completed_at)`, AND THE REASON IS MEASURED RATHER THAN
+-- ARGUED (ENC-1480, against the server tools/stack.sh runs). completed_at is a
+-- COMPLETION clock, not a WRITE clock: it is zero while a window is in flight.
+-- So on a re-ingest — the exact case this table exists to make safe — the
+-- sequence is
 --
--- ⚠ READ-PATH HAZARD — WRITE IT DOWN RATHER THAN DISCOVER IT. Replacement
--- happens at merge time, not at insert time, so between the two writes BOTH
--- rows exist and a plain SELECT may return either. The dangerous direction is
--- not the obvious one:
+--     write 1   state=1, completed_at=2026-10-02T01:00   (loaded)
+--     write 2   state=0, completed_at=0                  (re-ingest starts;
+--                                                         DROP PARTITION has
+--                                                         already emptied the
+--                                                         data)
 --
---     stale state=0 served while state=1 exists  -> a complete window reads as
---         incomplete. The query fails. Annoying; fail-safe.
---     stale state=1 served while state=0 exists  -> AN INCOMPLETE WINDOW READS
---         AS COMPLETE. This happens on every re-ingest: DROP PARTITION empties
---         the data while the old state=1 row is still in an unmerged part, so a
---         reader is told the window is loaded while the partition is empty, and
---         gets a flat market with no error. That is precisely the failure D11
---         exists to prevent.
+-- and because 0 < 2026-10-02T01:00, ReplacingMergeTree keeps write 1. Observed:
+-- a bare SELECT returns both rows and may serve either; `FINAL` and an argMax
+-- over completed_at BOTH resolve to the stale state=1; and after
+-- `OPTIMIZE TABLE … FINAL` the in-flight row is GONE and only state=1 survives.
+-- That is not a transient read hazard — it is the engine permanently deleting
+-- the row that says "this window is not loaded right now" and keeping the one
+-- that says it is. The window then reads as complete forever, with no error,
+-- and the query returns a flat market: precisely the failure D11 exists to
+-- prevent.
 --
--- So IL1Store::isComplete MUST resolve the version on read — FINAL, or an
--- argMax over completed_at per key — and never a bare SELECT.
+-- Fixing the version column (a write clock instead of a completion clock) would
+-- close that, but it still does not earn the exception, because THE READER
+-- NEEDS VERSION RESOLUTION EITHER WAY — see the read rule below.
+-- ReplacingMergeTree would then buy only storage compaction, on a table with a
+-- handful of rows per symbol-day, in exchange for destroying the re-ingest
+-- audit trail. So: plain MergeTree, per SPEC D5's default, and gma.symbology
+-- stays the ONE exception in this file — its version column IS a write clock
+-- (`ingested_at`), verified in the same run resolving an open interval's later
+-- closure correctly.
 --
--- AND THAT IS NOT A D2 VIOLATION, so do not "fix" it by removing the
--- resolution. D2 governs the MANIFEST -> SELECT path that feeds operators:
--- values that reach gma's DAG must arrive unaggregated, because a value
--- computed in SQL is a second implementation of gma's math. This read is
--- control-plane metadata — "is this window loaded", answered before any row is
--- selected — and its result is a boolean the planner acts on, not a number any
--- operator consumes. Resolving a version column here computes nothing about
--- the market.
+-- ⚠ THE READ RULE, AND IT IS NOT OPTIONAL. `state = 1` on SOME row does not
+-- mean the window is loaded. A window accumulates rows forever, including rows
+-- from older sessions that WERE complete before a re-ingest emptied the
+-- partition, and session_id is part of the sort key, so a re-ingest under a new
+-- session adds a row rather than superseding one. Measured, same run: after
+-- (session 1, state=1) then (session 7, state=0), `WHERE state = 1` matches one
+-- row and the window reads as complete while its data is gone.
+--
+--     isComplete(symbol, kind, window) :=
+--         take the single NEWEST row by updated_at for that
+--         (symbol, kind, from_ts), ACROSS ALL session_ids,
+--         and require state = 1.
+--         No row at all -> not ingested -> the query FAILS (D11).
+--
+-- updated_at is the last element of the sort key so that newest row is the tail
+-- of a key-prefix range rather than a scan. The key is not unique and does not
+-- need to be: nothing dedups here, which is the entire point of plain MergeTree
+-- (SPEC D5).
+--
+-- AND RESOLVING THE NEWEST ROW IS NOT A D2 VIOLATION, so do not "fix" it by
+-- removing the resolution. D2 governs the MANIFEST -> SELECT path that feeds
+-- operators: values that reach gma's DAG must arrive unaggregated, because a
+-- value computed in SQL is a second implementation of gma's math (D1). This
+-- read is control-plane metadata — "is this window loaded", answered before any
+-- market row is selected — and its result is a boolean the planner acts on, not
+-- a number any operator consumes. An ORDER BY … LIMIT 1, or an argMax over
+-- updated_at, computes nothing about the market.
+--
+-- OPEN, and it belongs to the ingest job (ENC-1483) rather than to the schema:
+-- whether a re-ingest reuses its window's session_id or takes a new one. The
+-- read rule above is correct under both, which is why it is written in terms of
+-- "across all session_ids" — but docs §8.8 names the key
+-- (symbol, kind, from_ts, session_id) without saying which, and "the key is
+-- unique by construction" is only true of the reuse answer.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS gma.ingest_windows
 (
@@ -465,19 +501,25 @@ CREATE TABLE IF NOT EXISTS gma.ingest_windows
     from_ts       DateTime64(9, 'UTC'),
     to_ts         DateTime64(9, 'UTC'),     -- half-open [from_ts, to_ts)
     session_id    UInt32,
-    -- 0 in-flight, 1 complete, 2 failed. A window is only readable at 1.
+    -- 0 in-flight, 1 complete, 2 failed. A window is only readable at 1, and
+    -- only on the newest row — see the read rule above.
     state         UInt8,
     -- Diagnostics ONLY. A row count can never establish completeness (see
     -- above); `state` is the authority.
     rows_inserted UInt64,
-    -- Version column — see the ENGINE note above. Zero while in-flight.
+    -- WRITE CLOCK. Set on EVERY row, in-flight rows included. This is what
+    -- orders the transition log, and the reason it is a separate column from
+    -- completed_at is the measurement above.
+    updated_at    DateTime64(3, 'UTC'),
+    -- Semantic: when this window finished loading. Zero on an in-flight or a
+    -- failed row. Never use it to order rows.
     completed_at  DateTime64(3, 'UTC'),
     -- Provenance, so a window can be re-pulled identically.
     source        LowCardinality(String),   -- 'databento' | 'feedsim' | ...
     source_ref    String                    -- DBN batch id / file name
 )
-ENGINE = ReplacingMergeTree(completed_at)
-ORDER BY (symbol, kind, from_ts, session_id)
+ENGINE = MergeTree
+ORDER BY (symbol, kind, from_ts, session_id, updated_at)
 SETTINGS index_granularity = 1024;
 
 -- ---------------------------------------------------------------------------
