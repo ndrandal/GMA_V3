@@ -428,7 +428,7 @@ arrow::Status DatabentoAdapter::drain() {
     buf_.clear();
     cursor_ = 0;
   } else if (cursor_ > 0) {
-    buf_.erase(buf_.begin(), buf_.begin() + static_cast<std::ptrdiff_t>(cursor_));
+    buf_.erase(buf_.begin(), buf_.begin() + static_cast<std::ptrdiff_t>(cursor_ - 1));
     cursor_ = 0;
   }
   return arrow::Status::OK();
