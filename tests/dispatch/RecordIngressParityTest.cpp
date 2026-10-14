@@ -677,6 +677,16 @@ TEST(RecordIngressParityTest, ComparatorSeesAQuoteSideDisappearing) {
 // Comments and string literals are stripped before the search. Prose about
 // JSON is not a JSON dependency, and a token-counting gate that cannot tell
 // the difference is one this workspace has already been bitten by.
+//
+// WHAT THIS GATE DOES NOT CATCH, stated because an unstated limit is how a
+// gate gets trusted past its range: it is textual and per-file, so moving DOM
+// construction into a THIRD translation unit that `onRecord` merely calls
+// would evade it. What it does catch is the regression that actually threatens
+// this path — someone "unifying" the two entry points by synthesizing an
+// `Event` inside `onRecord` — and it catches the shared `ingest` body too,
+// which is where such a change would otherwise hide. A link-time or
+// symbol-level check would close the rest; it is not built, and this comment
+// is the honest statement of that rather than a claim that it is.
 
 namespace {
 
@@ -748,10 +758,28 @@ std::string functionBody(const std::string& scrubbed, const std::string& name) {
   return {};
 }
 
+// Every rapidjson-shaped name the record path could plausibly reach for, plus
+// `Event` (the DOM-carrying ingress type) and `JsonFieldSource` (the adapter).
+//
+// THE LIST WAS TOO SHORT ON ITS FIRST RUN and an adversarial probe measured
+// it: inserting `const Event& evAlias = …` into `onRecord` left all four gate
+// tests green, because `Event` was not on it, and neither were `SetObject`,
+// `AddMember`, `Parse`, `GetString`, `IsNumber` or `IsObject`. A synthesized
+// DOM did go red, on `payload` — so the gate was effectively adequate and
+// nominally sloppy, which is the state in which a gate stops being adequate
+// without anyone noticing.
+//
+// Case matters and is load-bearing: rapidjson's `IsObject`/`IsNumber` are
+// capital-I, while `FieldSource`'s own `isObject`/`tryGetNumber` are not, so
+// the record path's legitimate calls do not trip these.
 const std::vector<std::string>& jsonTokens() {
   static const std::vector<std::string> t = {
-      "rapidjson", "Document", "payload", "HasMember", "MemberBegin",
-      "MemberEnd", "GetDouble", "GetUint64", "JsonFieldSource"};
+      "rapidjson", "Document", "payload", "Event",
+      "HasMember", "MemberBegin", "MemberEnd", "FindMember", "AddMember",
+      "SetObject", "GetAllocator", "Parse",
+      "GetDouble", "GetUint64", "GetString", "GetStringLength",
+      "IsNumber", "IsObject", "IsString", "IsUint64",
+      "JsonFieldSource"};
   return t;
 }
 

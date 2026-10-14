@@ -68,10 +68,20 @@ public:
   virtual std::size_t fieldCountHint() const noexcept = 0;
 
   // Is `name` present AT ALL — numeric or not? This is the predicate the
-  // listener fan-out has always used (`payload->HasMember(field)`), kept
-  // distinct from `tryGetNumber` because the two differ for a present
-  // non-numeric field and `onTick` has always treated that case as
-  // "subscribed, but no value this tick".
+  // listener fan-out has always used (`payload->HasMember(field)`).
+  //
+  // THE DISTINCTION FROM `tryGetNumber` IS BEHAVIOURALLY DEAD TODAY, and this
+  // comment used to claim otherwise. An adversarial probe measured it: making
+  // `JsonFieldSource::has()` additionally require `IsNumber()` left the whole
+  // 728-test suite green, because a present-but-non-numeric field enters
+  // `ingest`'s `toNotify` and is then dropped by the `tryGetNumber` that
+  // follows — so both routes end in the same silent `continue`.
+  //
+  // It is kept separate anyway, for one reason: `onTick`'s two-step read
+  // (`HasMember`, then fetch) is the shape being preserved byte-for-byte, and
+  // collapsing it into one step is a behaviour change this ticket has no
+  // mandate to make — however invisible it currently is. A later ticket may
+  // collapse it; it should do so deliberately, and delete this paragraph.
   virtual bool has(const std::string& name) const = 0;
 
   // Reads `name` as a double. False if absent or not a number; `out` is then
