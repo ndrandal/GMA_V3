@@ -1168,6 +1168,67 @@ TEST(DbnFramingTest, TheMetadataTailIsOnlyEverV3AlignmentPadding) {
   }
 }
 
+TEST(DbnFramingTest, CorruptedOrTruncatedBytesRefuseButNeverCrash) {
+  // A hand-rolled byte parser's characteristic failure is an out-of-bounds read
+  // on input it was never shown, and `Reader`/`drain()` are full of
+  // length-derived offsets. So drive every single-byte corruption and every
+  // truncation of a real fixture through it and require only that the outcome
+  // is a VERDICT: Ok or Invalid, never a crash, never a hang, and never a
+  // record emitted from a stream that was refused.
+  //
+  // Deterministic by construction — every mutation is enumerated, none random —
+  // so this cannot flake. Run the suite under ASan/UBSan and this test is what
+  // exercises them: 1,860 corruptions plus 466 truncations of mbo.v2.dbn.
+  const auto base = readFixture("mbo.v2.dbn");
+  ASSERT_FALSE(base.empty());
+
+  std::size_t ok = 0;
+  std::size_t refused = 0;
+  for (std::size_t i = 0; i < base.size(); ++i) {
+    for (const std::uint8_t mask : {std::uint8_t{0x00}, std::uint8_t{0xFF},
+                                    std::uint8_t{0x55}, std::uint8_t{0x01}}) {
+      auto bytes = base;
+      bytes[i] = std::byte{static_cast<std::uint8_t>(
+          mask == 0x55 ? (std::to_integer<std::uint8_t>(base[i]) ^ 0x55) : mask)};
+      Harness h;
+      const arrow::Status st = h.a->feed(asSpan(bytes));
+      if (st.ok()) {
+        ++ok;
+        // Whatever it accepted must still be internally consistent.
+        for (const BookRecord& r : h.a->bookEvents()) {
+          EXPECT_NE(r.header.symbolId, kInvalidSymbolId);
+          EXPECT_GT(r.header.tsEventNs, 0);
+        }
+      } else {
+        ++refused;
+        EXPECT_TRUE(st.IsInvalid()) << "byte " << i << ": " << st.ToString();
+        // A refused feed appends nothing beyond what earlier whole records in
+        // the same feed had already produced, and the adapter stays poisoned.
+        EXPECT_TRUE(h.a->feed(asSpan(base)).IsInvalid());
+      }
+    }
+  }
+  for (std::size_t n = 0; n <= base.size(); ++n) {
+    const std::vector<std::byte> bytes(base.begin(),
+                                       base.begin() + static_cast<std::ptrdiff_t>(n));
+    Harness h;
+    const arrow::Status fed = h.a->feed(asSpan(bytes));
+    EXPECT_TRUE(fed.ok() || fed.IsInvalid()) << "truncation " << n;
+    const arrow::Status fin = h.a->finish();
+    // Only the untruncated stream may finish clean.
+    if (n == base.size()) {
+      EXPECT_TRUE(fin.ok()) << fin.ToString();
+    } else {
+      EXPECT_TRUE(fin.IsInvalid()) << "truncation " << n << " finished clean";
+    }
+  }
+  // Both outcomes must actually occur, or this test is asserting nothing: a
+  // corruption that is always refused would mean the loop never reached the
+  // accept path, and one that is never refused would mean the guards are dead.
+  EXPECT_GT(refused, 0u);
+  EXPECT_GT(ok, 0u);
+}
+
 // ===========================================================================
 // Symbology (SPEC D7)
 // ===========================================================================

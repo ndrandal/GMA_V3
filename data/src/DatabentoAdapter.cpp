@@ -645,7 +645,7 @@ arrow::Result<RecordHeader> DatabentoAdapter::makeHeader(const dbn::RecordHeader
       (tsRecv == dbn::kUndefTimestamp ||
        tsRecv > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
           ? 0
-          : 0;
+          : static_cast<std::int64_t>(tsRecv);
   // SPEC D6: FROM DATABENTO, NEVER SYNTHESIZED. The venue sequence is stable
   // across a re-download, which is what makes re-ingest converge and the
   // splice's dedup exact.
