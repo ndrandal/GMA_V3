@@ -168,6 +168,12 @@ void Dispatcher::ingest(const std::string& symbol,
           std::unordered_set<std::string>*                     admitted;
           std::vector<std::pair<std::string, ArgType>>*        out;
           std::size_t                                          cap;
+          // Explicit ctor: a class that declares a virtual override is not an
+          // aggregate, so braced init of the members alone does not compile.
+          Admit(std::unordered_set<std::string>* a,
+                std::vector<std::pair<std::string, ArgType>>* o,
+                std::size_t c)
+            : admitted(a), out(o), cap(c) {}
           void field(const std::string& name, double value) override {
             if (admitted->find(name) == admitted->end()) {
               if (admitted->size() >= cap) return;
@@ -175,7 +181,7 @@ void Dispatcher::ingest(const std::string& symbol,
             }
             out->emplace_back(name, ArgType{ value });
           }
-        } admit{ &sit->second, &raw, _maxFieldsPerSymbol };
+        } admit( &sit->second, &raw, _maxFieldsPerSymbol );
         raw.reserve(fields.fieldCountHint());
         fields.forEachNumber(admit);
       }
