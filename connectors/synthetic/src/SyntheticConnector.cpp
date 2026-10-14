@@ -19,14 +19,18 @@ namespace gma::synthetic {
 
 // ---------- SyntheticEventComputer ----------
 
-void SyntheticEventComputer::compute(const Event& e, engine::ComputeContext& ctx) {
-  if (!ctx.store || !e.payload) return;
-  if (!e.payload->HasMember("counter")) return;
-  const auto& v = (*e.payload)["counter"];
-  if (!v.IsNumber()) return;
-  double n = v.GetDouble();
-  ctx.store->set(e.symbol, "synthetic.sin", std::sin(n * 0.1));
-  ctx.store->set(e.symbol, "synthetic.cos", std::cos(n * 0.1));
+// ENC-1486: reads `counter` through the FieldSource. Behaviour is unchanged —
+// `tryGetNumber` is exactly the old `HasMember(...) && IsNumber()` pair, and a
+// field that is present but not a number is still a no-op.
+void SyntheticEventComputer::compute(const std::string& symbol,
+                                     const engine::FieldSource& fields,
+                                     engine::ComputeContext& ctx) {
+  if (!ctx.store) return;
+  static const std::string kCounter = "counter";
+  double n = 0.0;
+  if (!fields.tryGetNumber(kCounter, n)) return;
+  ctx.store->set(symbol, "synthetic.sin", std::sin(n * 0.1));
+  ctx.store->set(symbol, "synthetic.cos", std::cos(n * 0.1));
 }
 
 // ---------- SyntheticConnector ----------

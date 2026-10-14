@@ -55,7 +55,11 @@ private:
 class SyntheticEventComputer final : public engine::IEventComputer {
 public:
   std::string_view eventType() const override { return "synthetic.tick"; }
-  void compute(const Event& e, engine::ComputeContext& ctx) override;
+  // ENC-1486: a FieldSource, not an Event — one implementation reachable from
+  // both Dispatcher ingress paths. See gma/engine/IEventComputer.hpp.
+  void compute(const std::string& symbol,
+               const engine::FieldSource& fields,
+               engine::ComputeContext& ctx) override;
 };
 
 } // namespace gma::synthetic
