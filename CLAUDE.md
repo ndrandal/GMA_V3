@@ -84,6 +84,13 @@ connectors/synthetic/     # libgma_connector_synthetic (demo; linked only into t
   include/gma/synthetic/SyntheticConnector.hpp
   src/SyntheticConnector.cpp
 
+data/                     # libgma_data — L1 data/query layer (ENC-1481; see data/README.md)
+  include/gma/data/Schema.hpp   # the three L1 arrow::Schemas + the column-wise codec
+  src/Schema.cpp                #   (the rest of include/gma/data/ is still a design sketch)
+  cmake/GmaDataArrow.cmake      # find_package(Arrow) else FetchContent, trimmed hard
+  schema/clickhouse.sql         # L1 DDL
+  tests/                        # gma_data_tests — a SEPARATE binary from gma_tests
+
 tests/                    # GoogleTest suites
   engine/                 # Registry tests
   connectors/             # SyntheticConnectorTest
@@ -107,15 +114,54 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full picture including 
 ## Tech Stack
 
 - **C++20** (`-DCMAKE_CXX_STANDARD=20`)
-- **CMake 3.20+** — produces `libgma_engine.a`, `libgma_connector_market.a`, `libgma_connector_synthetic.a`, `gma_server`, `gma_tests`
+- **CMake 3.20+** — produces `libgma_engine.a`, `libgma_connector_market.a`, `libgma_connector_synthetic.a`, `libgma_data.a`, `gma_server`, `gma_tests`, `gma_data_tests`
+- **Apache Arrow** (`gma_data` only) — found with `find_package(Arrow CONFIG)`, else built
+  from source by `data/cmake/GmaDataArrow.cmake`. A cold configure downloads a 17 MB
+  archive (2m33s on this link) and the build costs 45s Debug / 63s Release on 16 cores;
+  measured numbers and the full `ARROW_*=OFF` rationale are in `docs/data-layer.md` §15.1.
+  **`GMA_BUILD_DATA` defaults to `GMA_BUILD_TESTS`**, so a bare
+  `cmake -B build -DCMAKE_BUILD_TYPE=Release` fetches no Arrow at all and still builds
+  `gma_server`, while `-DGMA_BUILD_TESTS=ON` builds and tests the data layer. An explicit
+  `-DGMA_BUILD_DATA=ON|OFF` always wins and the configure says which way it resolved.
+  `-DGMA_DATA_ARROW_FORCE_FETCH=ON` skips `find_package` when an installed Arrow is
+  present but unusable — **it only exists when the data layer is in the build**, because it
+  is declared in `data/cmake/GmaDataArrow.cmake`, so pass it with `-DGMA_BUILD_DATA=ON` or
+  alongside `-DGMA_BUILD_TESTS=ON`. On its own with tests off it is an unused-variable
+  warning and nothing else. Conversely, `GMA_BUILD_DATA=OFF` while `GMA_BUILD_TESTS=ON`
+  now emits a `CMake Warning`: `gma_data_tests` is absent and the isolation gate's Arrow
+  positive control cannot run, so a green `ctest` there excludes the data layer. That is
+  intended for D14's live-only variant and is a stale cache otherwise — `option()` writes
+  `GMA_BUILD_DATA` on a build dir's first configure and a later `-DGMA_BUILD_TESTS=ON`
+  does not move it.
 - **Boost.Asio / Beast** — networking + WebSocket
 - **RapidJSON** — JSON parsing and validation
 - **GoogleTest** — unit + integration tests
 
 ## Code Conventions
 
-- Engine code under `include/gma/` + `src/`; connector code under `connectors/<name>/`
+- Engine code under `include/gma/` + `src/`; connector code under `connectors/<name>/`;
+  data-layer code under `data/`
 - Engine CMake target (`gma_engine`) must not depend on any connector headers
+- **`gma_engine` must not depend on Arrow, the ClickHouse client, or `gma_data` (ENC-1481).**
+  `gma_data` depends on `gma_engine`, never the reverse. This is a shipping constraint, not
+  taste — and the constraint is about **`gma_engine`**, not about the product. The
+  data-layer SPEC's D14 client profile reads *"live-only **or** reads a central L1 over the
+  wire with no local store"*: the **live-only** variant omits the library, so
+  `cmake -DGMA_BUILD_DATA=OFF` must build and link `gma_server` with no Arrow anywhere,
+  while the over-the-wire variant needs Arrow IPC and therefore does ship `gma_data`. Don't
+  shorten that to "the client profile omits the library" — that is true of one variant.
+  **The engine-facing PODs are the one thing that crosses**, and they cross deliberately:
+  `include/gma/data/Record.hpp` and `include/gma/data/SymbolTable.hpp` are in `gma_engine`,
+  Arrow-free, because `Dispatcher::onRecord` is engine code and has to name a record. Every
+  way of breaking the invariant still compiles and still passes every other test, so it is
+  asserted by `tools/check_engine_isolation.py` as the ctest cases `gma_engine_isolation`
+  (four checks, refuses to pass on vacuous input) and `gma_engine_isolation_selftest` (runs
+  each predicate against an input that violates it). Run them before claiming a layering
+  change is safe; `--selftest` needs no build. **Checks C and D walk the transitive link
+  closure**, because `gma_server` links only the `gma` umbrella: one
+  `target_link_libraries(gma INTERFACE gma_data)` breaks the live-only build while both
+  roots' own link properties stay clean. CMake emits a `link.<target>` manifest row per
+  first-party target — add one when you add a library target.
 - Namespace: `gma::` for public types, `gma::engine::` for engine contracts, `gma::market::` / `gma::synthetic::` for connector code
 - Globals: `gma::gThreadPool` (shared_ptr<ThreadPool>, set up in main.cpp)
 - Runtime config: INI-style key=value files (see `src/util/gma.conf`)

@@ -28,6 +28,12 @@ compile_commands.json
 
 # VS intermediate output folders
 /[Bb]uild/
+# Suffixed build trees. `/[Bb]uild/` alone matched only `build/`, so the second
+# build dir data/README.md asks for (`build-liveonly`, SPEC D14's live-only
+# profile) and any `build-<whatever>` landed as untracked noise in `git status`
+# — which the workspace checkpoint daemon snapshots and someone eventually
+# `git add -A`s. ENC-1481.
+/[Bb]uild-*/
 /[Bb]in/
 /[Ll]ib/
 /[Dd]ebug/
@@ -130,3 +136,8 @@ Thumbs.db
 # Node (tools/smoke-test)
 ##############################
 node_modules/
+
+# Python bytecode from running tools/*.py (e.g. tools/check_engine_isolation.py).
+# ENC-1481 committed one of these by accident; it is build output, not source.
+__pycache__/
+*.pyc

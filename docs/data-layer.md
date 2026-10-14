@@ -413,6 +413,20 @@ One column-wise function producing `TickRecord` / `BookRecord`. Two details:
 - **No DOM is constructed anywhere.** This is `onRecord` (C2), and it is a net *reduction*
   in per-tick work versus the shipped JSON ingress.
 
+**Where the two halves live — settled by ENC-1481.** The PODs are in
+`include/gma/data/Record.hpp`, i.e. inside **`gma_engine`**, not under `data/`. C2's
+`Dispatcher::onRecord(const data::TickRecord&)` is engine code and has to be able to name
+the type, so a POD reachable only from `gma_data` would make C2 unimplementable without
+breaking §4 rule 6. The PODs are Arrow-free and dependency-free; the `arrow::Schema`s and
+this decode stay in `data/include/gma/data/Schema.hpp`, which is where Arrow stops. Same
+namespace (`gma::data`), one definition per type — the library boundary is a *dependency*
+boundary, not a naming one. `SymbolTable` sits beside the PODs for the same reason:
+interning happens in decode, but resolving an id back to a ticker happens at an output
+boundary, and every output boundary is engine code (`StreamValue` carries a `std::string`).
+So the invariant to enforce is not "no `gma/data` header reaches the engine" but **"Arrow,
+the ClickHouse client and `gma_data` are not engine dependencies"** —
+`tools/check_engine_isolation.py`, ctest case `gma_engine_isolation`.
+
 ### 5.4 The lint — the structural guarantee
 
 Every emitted `SELECT` is parsed and checked against §1.2's forbidden list. A violation is
@@ -837,19 +851,97 @@ wall-clock cadence by construction; formerly Q13), and multi-symbol graphs where
 
 ## 15. Dependency budget
 
-**Estimates; measure on this toolchain.**
+**Estimates, except where §15.1 has measured them on this toolchain.**
 
 | dep | why | verdict |
 |---|---|---|
-| Arrow C++ | the shim's currency and the research output type | required; trim with `ARROW_*=OFF` |
+| Arrow C++ | the shim's currency and the research output type | required; trim with `ARROW_*=OFF`. **Measured — §15.1** |
 | ClickHouse client (`clickhouse-cpp` **or** HTTP) | the only transport to L1 | required; which is **B1** |
 | Parquet | — | **dropped** |
 | DuckDB | — | **dropped.** Largest dependency; existed only to query Parquet |
 | Databento client | avoidable by decoding DBN directly | **Q14** |
 
-The client profile (C10) needs Arrow plus a wire client and no store — far smaller than
-Arrow+Parquet+DuckDB. Build `gma_data` separately linkable so a live-only deployment omits
-it.
+D14's client profile has two variants and they do not cost the same. The **over-the-wire**
+variant (C10) needs Arrow plus a wire client and no store — far smaller than
+Arrow+Parquet+DuckDB. The **live-only** variant needs no Arrow at all, which is the whole
+premise of `GMA_BUILD_DATA=OFF`. `gma_data` is separately linkable so that one omits it,
+and §15.1's Release row sizes the first, not the second.
+
+### 15.1 Arrow, measured — ENC-1481, 2026-10-14
+
+The line above said *estimates; measure on this toolchain*, and the ticket that built the
+target budgeted **45 minutes** for the source build with an instruction to escalate rather
+than grind if it ran over. **It takes 45 seconds.** The estimate was wrong by a factor of
+about sixty, which is worth recording in the direction it fell: nothing in this design is
+gated on Arrow's build cost, and no sharding, vendoring or caching work needs to be done to
+make it tolerable.
+
+Box: Fedora 44, 16 cores, GCC 16.2.1, CMake 4.3.0, Ninja. Arrow **23.0.1** from
+`archive.apache.org`, `SOURCE_SUBDIR cpp`, trimmed by
+`GMA_V3/data/cmake/GmaDataArrow.cmake`.
+
+| phase | wall clock | artifact |
+|---|---|---|
+| download `apache-arrow-23.0.1.tar.gz` | **2m 33s** | 17.3 MB (`sha256 bd09adb4…de6b18`) |
+| configure, cold (extract + Arrow's own configure) | **3.1 s** | — |
+| configure, warm | 0.6 s | — |
+| build, **Debug**, `-j16` | **45.0 s** | `libarrow.a` **366 MB**, bundled deps 7.2 MB |
+| build, **Release**, `-j16` | **1m 02.7 s** | `libarrow.a` **33.0 MB**, bundled deps 1.4 MB |
+| `gma_data` itself (Debug) | ~2 s | `libgma_data.a` 3.4 MB |
+
+The download dominates, and it is a one-time cost per build tree; a warm tree pays none of
+it. Debug `libarrow.a` is an order of magnitude larger than Release because it is `-O0`
+with full debug info — size the over-the-wire client variant off the Release row (the
+live-only variant links no Arrow at all).
+
+**Who pays it: `GMA_BUILD_DATA` defaults to `GMA_BUILD_TESTS`.** `-DGMA_BUILD_TESTS=ON` —
+the acceptance command and every gate configuration — builds `gma_data` and runs both
+engine-isolation cases plus `gma_data_tests`, so nothing is silently skipped where tests
+run. A bare `cmake -B build -DCMAKE_BUILD_TYPE=Release` fetches **nothing** and still
+builds `gma_server`, which is what the documented quickstart needs offline (before this
+library existed, a default configure fetched nothing at all — googletest sits behind
+`GMA_BUILD_TESTS=OFF` too — and a fixed `GMA_BUILD_DATA=ON` had made that configure
+hard-fail at the download behind a firewall). An explicit `-DGMA_BUILD_DATA=ON|OFF` always
+wins, and the configure prints which way it resolved and why.
+
+**What is off, and which entries are decisions rather than tweaks.** Arrow 23 already
+defaults most of this off, but every one is set explicitly, because a default is something
+a future release is free to change and a decision is not:
+
+- `ARROW_PARQUET=OFF` and no DuckDB — **D14. Dropped from the design**, not trimmed.
+- `ARROW_COMPUTE=OFF`, `ARROW_ACERO=OFF`, `ARROW_SUBSTRAIT=OFF`, `ARROW_GANDIVA=OFF` —
+  **D1.** A kernel, a query plan or an expression JIT evaluating a value is a second
+  implementation of an operator. This is the group most likely to be switched back on
+  "for convenience".
+- `ARROW_IPC=ON` — the only non-core module kept, and only because **B1** (ENC-1485)
+  measures ClickHouse `FORMAT ArrowStream` over HTTP, which is Arrow IPC on the wire.
+- `ARROW_WITH_LZ4=ON`, `ARROW_WITH_ZSTD=ON` — **not a size tweak either.** ClickHouse's
+  `output_format_arrow_compression_method` defaults to `lz4_frame`, so a codec-free Arrow
+  cannot read ENC-1485's stream at all without a per-query `SETTINGS` override. Both are
+  bundled builds (lz4 ≈ 1 MB, zstd ≈ 2.3 MB of source); `-DGMA_DATA_ARROW_IPC_CODECS=OFF`
+  drops them. Brotli, bz2, snappy and zlib stay off.
+- Off and uncontroversial: shared libs, jemalloc, mimalloc, filesystem, S3/GCS/Azure/HDFS,
+  Flight and Flight SQL, ORC, CSV and JSON readers, RE2, utf8proc, OpenTelemetry, UCX,
+  testing, benchmarks, examples, integration and the CLI utilities.
+
+**One honest caveat about `ARROW_COMPUTE=OFF`.** The build still compiles an
+`arrow_compute_core` object group — cast and vector-hash kernels that dictionary arrays and
+IPC need internally. `ARROW_COMPUTE=OFF` excludes the full kernel suite, not that core, and
+there is no option that excludes it. D1 is therefore enforced by gma **never calling** an
+Arrow kernel to produce a value, not by the kernels being absent from the archive. Worth
+knowing before someone reads "compute is off" as a structural guarantee: it is a
+scope-of-linkage fact, and the structural guarantee for D1 remains the SQL lint (§5.4).
+
+**No system Arrow is available on this box**, which is why the source path is the measured
+one. `pkg-config --modversion arrow` fails and no `/usr/lib64/cmake/arrow` exists. Fedora
+44 *does* package it (`libarrow-devel` 23.0.1 — so the common claim that `dnf` only has the
+unrelated `arrows` package is wrong), but installing it needs a sudo password this
+environment does not have. `find_package(Arrow CONFIG QUIET)` is tried first and kept
+working for machines that have one; it is **untested here** for that reason.
+`-DGMA_DATA_ARROW_FORCE_FETCH=ON` skips it — the escape hatch for an installed Arrow that
+is present but unusable (a config package exporting target names outside the candidate
+list makes the module a `FATAL_ERROR`, and that error used to name this flag before it
+existed).
 
 ---
 

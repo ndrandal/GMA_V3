@@ -6,6 +6,87 @@ option(GMA_BUILD_TESTS "Build unit tests in tests/" OFF)
 option(GMA_BUILD_BENCHMARKS "Build Google Benchmark suite in benchmarks/" OFF)
 option(GMA_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 
+# Data layer (ENC-1481, specs/2026-10-14-gma-data-layer/SPEC.md).
+#
+# THE DEFAULT FOLLOWS GMA_BUILD_TESTS, and an explicit -DGMA_BUILD_DATA always
+# wins. Three constraints had to hold at once and no fixed default holds all
+# three:
+#
+#   * Nothing may be silently skipped in a configuration that runs tests. A
+#     skipped target reads exactly like a passing one and this repo has paid for
+#     that twice (ENC-994 / ENC-1095). The acceptance command and every gate
+#     configuration pass -DGMA_BUILD_TESTS=ON, so gma_data, gma_data_tests and
+#     both engine-isolation cases are built and run there.
+#   * The documented quickstart — `cmake -B build -DCMAKE_BUILD_TYPE=Release`,
+#     tests off — must still work offline. A fixed ON made it fetch a 17 MB
+#     Arrow release unconditionally and HARD-FAIL at the download behind a
+#     firewall, where before this library existed it fetched nothing at all
+#     (googletest sits behind GMA_BUILD_TESTS=OFF too).
+#   * GMA_BUILD_DATA=OFF is SPEC D14's live-only CLIENT VARIANT: no local store,
+#     no Arrow. `gma_server` must build, link and run identically with it off,
+#     which is the whole reason the library is separately linkable. (D14's other
+#     client variant reads a central L1 over the wire — that one needs Arrow IPC,
+#     i.e. it needs this library. The invariant is about gma_engine, not about
+#     the product: see the engine isolation gate at the bottom of this file.)
+#
+# The cost of ON, measured on this toolchain 2026-10-14 and recorded in
+# docs/data-layer.md §15: a cold configure fetches a 17 MB Arrow source release
+# (2m33s on this link) and the build adds 45s Debug / 63s Release on 16 cores.
+# A warm build dir pays none of it.
+# Resolve, then report the value AGAINST the default rather than claiming to
+# know the provenance. `option()` writes the cache on the first configure, so
+# `if (DEFINED GMA_BUILD_DATA)` is true on every configure after that and
+# cannot tell "the user passed -D today" from "we defaulted it last week" —
+# a status line that said "explicit or cached" was wrong in the common case,
+# and the "why" is the only reason the line exists. Comparing the resolved
+# value with the default this GMA_BUILD_TESTS would produce is always true and
+# never goes stale.
+set(_gma_data_default ${GMA_BUILD_TESTS})
+option(GMA_BUILD_DATA
+  "Build gma_data: the L1 Arrow schema and codec. Defaults to GMA_BUILD_TESTS. OFF selects SPEC D14's live-only client variant (no Arrow fetched or built)."
+  ${_gma_data_default})
+
+if (GMA_BUILD_DATA AND _gma_data_default)
+  set(_gma_data_why "matches the default for GMA_BUILD_TESTS=${GMA_BUILD_TESTS}")
+elseif (NOT GMA_BUILD_DATA AND NOT _gma_data_default)
+  set(_gma_data_why "matches the default for GMA_BUILD_TESTS=${GMA_BUILD_TESTS}")
+else()
+  set(_gma_data_why
+    "OVERRIDDEN — the default for GMA_BUILD_TESTS=${GMA_BUILD_TESTS} is ${_gma_data_default}, and this build dir's cache says otherwise")
+endif()
+
+if (GMA_BUILD_DATA)
+  message(STATUS
+    "GMA_BUILD_DATA=ON [${_gma_data_why}] — gma_data is built; Arrow is "
+    "found via find_package(Arrow CONFIG) or fetched and built from source.")
+else()
+  message(STATUS
+    "GMA_BUILD_DATA=OFF [${_gma_data_why}] — SPEC D14's live-only client "
+    "variant: NO Arrow is fetched or built, and gma_data / gma_data_tests do not "
+    "exist in this build. Pass -DGMA_BUILD_DATA=ON to build them regardless.")
+endif()
+
+# A SKIP IN A CONFIGURATION THAT RUNS TESTS MUST NOT BE SILENT. The default
+# above makes `GMA_BUILD_TESTS=ON` imply the data layer, but a CACHE ENTRY
+# OUTLIVES IT: configure a dir with tests off (data defaults off), then
+# re-run with -DGMA_BUILD_TESTS=ON, and `option()` leaves GMA_BUILD_DATA=OFF.
+# ctest then goes green over a build with no gma_data_tests and no positive
+# control — exactly the ENC-994 / ENC-1095 mode this default was chosen to
+# avoid, arriving through the cache instead of through the default. It cannot
+# be fixed by forcing the value (that would silently discard a deliberate
+# -DGMA_BUILD_DATA=OFF), so it is NAMED instead.
+if (GMA_BUILD_TESTS AND NOT GMA_BUILD_DATA)
+  message(WARNING
+    "GMA_BUILD_DATA=OFF while GMA_BUILD_TESTS=ON: gma_data_tests is NOT "
+    "registered with ctest and gma_engine_isolation's gma_data positive "
+    "control cannot run, so a green `ctest` in this build directory EXCLUDES "
+    "the entire data layer. Intended if you asked for SPEC D14's live-only "
+    "client variant. If you did not: this is a STALE CACHE — `option()` wrote "
+    "GMA_BUILD_DATA on the first configure of this directory and a later "
+    "-DGMA_BUILD_TESTS=ON does not move it. Re-run with an explicit "
+    "-DGMA_BUILD_DATA=ON, or configure a fresh build directory.")
+endif()
+
 # Microarchitecture (ENC-790 / H5): -march=native pins the binary to the exact
 # build CPU and SIGILLs on older hosts. Release/RelWithDebInfo therefore default
 # to a portable baseline (GMA_ARCH_BASELINE, x86-64-v2 ≈ any 2009+ x86_64 CPU);
@@ -484,4 +565,139 @@ if (GMA_BUILD_BENCHMARKS)
     bench_thread_pool
     bench_window_nodes
   )
+endif()
+
+# =======================
+# Data layer (ENC-1481)
+# =======================
+# After the tests block on purpose: data/CMakeLists.txt registers its own ctest
+# case against GTest::gtest_main, which only exists once the block above has
+# run FetchContent on googletest.
+if (GMA_BUILD_DATA)
+  add_subdirectory(data)
+else()
+  message(STATUS
+    "gma_data: DISABLED (GMA_BUILD_DATA=OFF) — SPEC D14's live-only client "
+    "variant. No Arrow is fetched or built, and gma_data_tests is not "
+    "registered with ctest. gma_engine_isolation still runs (with its "
+    "gma_data positive control reported as unavailable).")
+endif()
+
+# =======================
+# Engine isolation gate (ENC-1481)
+# =======================
+# THE INVARIANT: gma_engine must not acquire a dependency on Arrow, the
+# ClickHouse client, or the gma_data library target (SPEC D14,
+# docs/data-layer.md §4 rule 6). SPEC D14's live-only client variant omits
+# gma_data entirely and must still link, so this is a shipping constraint and
+# not a style preference.
+#
+# It is checked rather than claimed because every way of breaking it still
+# compiles and still passes every existing test: one `target_link_libraries`
+# line would make the live-only variant impossible and nothing would say so.
+#
+# ONE ROW PER FIRST-PARTY TARGET, BECAUSE THE CHECK WALKS THE CLOSURE.
+# gma_server links the `gma` umbrella and nothing else, so reading only
+# gma_engine's and gma_server's own LINK_LIBRARIES is blind to exactly the line
+# that breaks the invariant: `target_link_libraries(gma INTERFACE gma_data)`,
+# or `gma::arrow` on a connector `gma` pulls in. Both leave the two roots'
+# properties unchanged and both make GMA_BUILD_DATA=OFF unlinkable. The
+# checker therefore reads a link GRAPH — `link.<target>` /
+# `interface_link.<target>` — and walks it transitively from gma_engine and
+# gma_server. Add a first-party library target here when you add one; a target
+# with no row is treated as a leaf and only pattern-matched, which is correct
+# for system and imported libraries and wrong for ours.
+#
+# THE CHECKED ROOTS are gma_engine, gma_server and gma_tests. gma_tests is
+# there because data/CMakeLists.txt names "the engine test suite is built
+# against an Arrow-free include path" as the thing being protected, and a
+# prose claim with no check behind it is what finding 1 was about.
+#
+# gma_data gets a row too. It is not a checked root — it is the gate's
+# POSITIVE CONTROL: its own closure must trip a
+# forbidden pattern, since it links gma::arrow by construction. If it does not,
+# the patterns match nothing in this build and a clean verdict about gma_engine
+# is a verdict from a search that cannot find anything. The control also
+# cross-checks GMA_BUILD_DATA against the presence of the row, so the two
+# cannot disagree silently.
+#
+# The manifest is produced with file(GENERATE) rather than passed on the
+# command line because the properties are generator expressions, and because a
+# resolved list on an add_test COMMAND would be split into separate arguments
+# at every semicolon.
+if (GMA_BUILD_TESTS AND TARGET gma_server)
+  set(GMA_ISOLATION_MANIFEST "${CMAKE_BINARY_DIR}/gma_engine_isolation.manifest")
+
+  # THE TARGET LIST IS ENUMERATED FROM CMAKE, NOT HAND-WRITTEN. A hand-written
+  # list reproduces the original hole one level deeper: a new first-party
+  # library would arrive with no row, be treated by the checker as a leaf, and
+  # have its own dependencies never walked — so `gma_store -> gma_data` would
+  # pass green exactly the way `gma -> gma_data` used to. BUILDSYSTEM_TARGETS
+  # registers a target by its existing. UTILITY targets are dropped because
+  # they have no link line. (CMake does not report IMPORTED or ALIAS targets
+  # here, which is why the checker ALSO fails on any first-party-looking name
+  # that has no row — belt and braces, and the braces are producer-independent.)
+  set(_gma_iso_dirs "${CMAKE_SOURCE_DIR}")
+  if (GMA_BUILD_DATA)
+    list(APPEND _gma_iso_dirs "${CMAKE_SOURCE_DIR}/data")
+  endif()
+  set(_gma_iso_link_targets "")
+  foreach (_gma_iso_dir IN LISTS _gma_iso_dirs)
+    get_directory_property(_gma_iso_dir_targets
+      DIRECTORY "${_gma_iso_dir}" BUILDSYSTEM_TARGETS)
+    foreach (_gma_iso_t IN LISTS _gma_iso_dir_targets)
+      get_target_property(_gma_iso_type ${_gma_iso_t} TYPE)
+      if (NOT _gma_iso_type STREQUAL "UTILITY")
+        list(APPEND _gma_iso_link_targets ${_gma_iso_t})
+      endif()
+    endforeach()
+  endforeach()
+  list(REMOVE_DUPLICATES _gma_iso_link_targets)
+  list(SORT _gma_iso_link_targets)
+
+  set(_gma_iso_link_rows "")
+  foreach (_gma_iso_t IN LISTS _gma_iso_link_targets)
+    string(APPEND _gma_iso_link_rows
+"link.${_gma_iso_t}=$<JOIN:$<TARGET_PROPERTY:${_gma_iso_t},LINK_LIBRARIES>,|>
+interface_link.${_gma_iso_t}=$<JOIN:$<TARGET_PROPERTY:${_gma_iso_t},INTERFACE_LINK_LIBRARIES>,|>
+")
+  endforeach()
+  message(STATUS
+    "gma_engine_isolation: link graph covers ${_gma_iso_link_targets}")
+
+  file(GENERATE OUTPUT "${GMA_ISOLATION_MANIFEST}" CONTENT
+"# Generated by CMake for tools/check_engine_isolation.py (ENC-1481). Do not edit.
+root=${CMAKE_SOURCE_DIR}
+engine_include_dirs=$<JOIN:$<TARGET_PROPERTY:gma_engine,INCLUDE_DIRECTORIES>,|>
+engine_interface_include_dirs=$<JOIN:$<TARGET_PROPERTY:gma_engine,INTERFACE_INCLUDE_DIRECTORIES>,|>
+engine_cmake_sources=$<JOIN:$<TARGET_PROPERTY:gma_engine,SOURCES>,|>
+gma_data_enabled=${GMA_BUILD_DATA}
+${_gma_iso_link_rows}")
+
+  if (Python3_Interpreter_FOUND)
+    add_test(NAME gma_engine_isolation
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tools/check_engine_isolation.py"
+              --manifest "${GMA_ISOLATION_MANIFEST}")
+    set_tests_properties(gma_engine_isolation PROPERTIES TIMEOUT 120)
+
+    # The gate's own gate. A predicate that stopped detecting its violation
+    # would turn gma_engine_isolation into a green no-op; this runs each one
+    # against an input that violates it and fails unless it is caught. The
+    # anti-vacuity rule of docs/data-layer.md §5.4, applied to the checker.
+    add_test(NAME gma_engine_isolation_selftest
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tools/check_engine_isolation.py"
+              --selftest)
+    set_tests_properties(gma_engine_isolation_selftest PROPERTIES TIMEOUT 120)
+  else()
+    message(WARNING
+      "gma_engine_isolation test SKIPPED: no Python3 interpreter. The SPEC D14 "
+      "engine-isolation invariant is NOT being checked in this build.")
+  endif()
+elseif (GMA_BUILD_TESTS)
+  message(WARNING
+    "gma_engine_isolation test SKIPPED: no gma_server target (src/main.cpp is "
+    "absent), so check D cannot read its link libraries. The SPEC D14 "
+    "engine-isolation invariant is NOT being checked in this build.")
 endif()
