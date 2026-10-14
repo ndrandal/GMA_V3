@@ -283,7 +283,7 @@ Concrete recipe to add a connector named `cool`:
 
    - **Custom atomic namespace:** `AtomicProviderRegistry::registerNamespace("cool", ...)`.
    - **Custom node type:** `engine::NodeTypeRegistry::registerNodeType("CoolNode", builder)`. JSON trees can now specify `"type":"CoolNode"`.
-   - **Per-event computation:** write a class that implements `engine::IEventComputer`; then either `reg.dispatcher->addComputer(std::make_unique<YourComputer>())` for a per-instance add, or install via a `Dispatcher::setDefaultComputerFactory` hook if you want every dispatcher in the program to get one.
+   - **Per-event computation:** write a class that implements `engine::IEventComputer` — one method, `compute(const std::string& symbol, const engine::FieldSource& fields, ComputeContext&)`; read your inputs through `fields.tryGetNumber(name, out)` and your computer works on BOTH ingress paths with no further work (§3, "Two ingress shapes"). Then either `reg.dispatcher->addComputer(std::make_unique<YourComputer>())` for a per-instance add, or install via a `Dispatcher::setDefaultComputerFactory` hook if you want every dispatcher in the program to get one.
    - **Ingress source:** construct your listener/timer/client against `reg.io` and register a shutdown step on `reg.shutdown`.
 
 4. **Add one line to `main.cpp`** (the composition root):
