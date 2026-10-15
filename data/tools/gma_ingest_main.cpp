@@ -18,9 +18,11 @@
 
 #include "gma/data/IngestJob.hpp"
 
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <optional>
 #include <string>
@@ -90,6 +92,44 @@ bool parseArgs(int argc, char** argv, Args& a) {
       }
       return argv[++i];
     };
+    // ⚠ CODE-REVIEW FINDINGS #2 AND #4, which are one bug with two volumes.
+    //
+    // Both numeric flags went through an unchecked `strtoul`, which returns 0
+    // on anything unparseable and reports nothing:
+    //
+    //   #2 LOUD: `--dbn-version notanumber` became version 0, which
+    //      `DbnWriter::build()` rejects by THROWING `std::logic_error` out of
+    //      the `arrow::Result` path with nothing to catch it. Reproduced:
+    //      exit 134. **A crash is not one of this tool's three documented exit
+    //      codes**, and an abort skips every refusal path including the
+    //      `state=2` write.
+    //   #4 QUIET, AND WORSE: `--session-id notanumber` became 0, which this
+    //      tool defines as "derive it", so the run proceeded under the derived
+    //      FNV session, exited 0, and said nothing. The comment directly above
+    //      this function condemns precisely that shape — "a tool that accepts
+    //      `--session_id 7` and silently ingests under a derived session is the
+    //      same shape of lie".
+    //
+    // So both parse exactly or exit 2. `--dbn-version` is additionally bounded
+    // by the versions the DECODER accepts, because emitting a version the
+    // adapter refuses is how finding #3 destroyed a retained D6 baseline.
+    const auto num = [&](const char* name, auto lo, auto hi) -> std::uint64_t {
+      const char* text = next(name);
+      std::uint64_t v = 0;
+      const char* last = text + std::strlen(text);
+      const auto r = std::from_chars(text, last, v);
+      if (r.ec != std::errc{} || r.ptr != last) {
+        std::cerr << "gma_ingest: " << name << " must be an integer (got \""
+                  << text << "\")\n";
+        std::exit(kCouldNotRun);
+      }
+      if (v < static_cast<std::uint64_t>(lo) || v > static_cast<std::uint64_t>(hi)) {
+        std::cerr << "gma_ingest: " << name << " must be in [" << +lo << ", " << +hi
+                  << "] (got " << v << ")\n";
+        std::exit(kCouldNotRun);
+      }
+      return v;
+    };
     if (f == "--url") {
       a.url = next("--url");
     } else if (f == "--data-root") {
@@ -97,9 +137,14 @@ bool parseArgs(int argc, char** argv, Args& a) {
     } else if (f == "--symbol") {
       a.symbol = next("--symbol");
     } else if (f == "--session-id") {
-      a.sessionId = static_cast<std::uint32_t>(std::strtoul(next("--session-id"), nullptr, 10));
+      // 1.. : 0 is reserved as "derive from the retained file", and accepting
+      // it here would make an explicit --session-id 0 indistinguishable from
+      // not passing the flag — the #4 ambiguity, re-created deliberately.
+      a.sessionId = static_cast<std::uint32_t>(
+          num("--session-id", 1u, std::numeric_limits<std::uint32_t>::max()));
     } else if (f == "--dbn-version") {
-      a.dbnVersion = static_cast<std::uint8_t>(std::strtoul(next("--dbn-version"), nullptr, 10));
+      a.dbnVersion = static_cast<std::uint8_t>(
+          num("--dbn-version", dbn::kMinVersion, dbn::kMaxVersion));
     } else if (f == "--no-insert") {
       a.noInsert = true;
     } else if (f == "--force-reencode") {
@@ -211,8 +256,22 @@ int cmdIngest(const Args& a, bool fromDbnOnly) {
 
   auto res = ingest::run(o);
   if (!res.ok()) {
-    std::cerr << "gma_ingest: " << res.status().ToString() << "\n";
-    return kCouldNotRun;
+    // ⚠ CODE-REVIEW FINDING #1. This was an unconditional `return
+    // kCouldNotRun`, so every one of the job's data refusals — a round-trip
+    // mismatch, a retained DBN that would not read back, two tickers for one
+    // `instrument_id`, an empty delivered window — reported as "the gate never
+    // ran". That is the conflation this file's own header warns about, inverted,
+    // and it is the worse direction: a sweep that reads 2 as "environment,
+    // retry later" throws the finding away. The classification is made at each
+    // refusal site and carried on the status; see Verdict.hpp.
+    const int code = exitCodeFor(res.status());
+    std::cerr << "gma_ingest: " << res.status().ToString() << "\n"
+              << "gma_ingest: exiting " << code << " — "
+              << (code == kFinding
+                      ? "A FINDING: the job ran and what it found is wrong."
+                      : "COULD NOT RUN: no verdict was reached.")
+              << "\n";
+    return code;
   }
   const auto& rep = *res;
   printTarget(rep.target);
