@@ -67,7 +67,7 @@ Completeness isComplete(const std::vector<IngestWindowRow>& rows,
   };
   std::map<std::pair<std::int64_t, std::int64_t>, Resolved> newest;
   for (const auto& r : rows) {
-    const std::pair<std::int64_t, std::int64_t> key{r.fromTsNs, r.toTsNs};
+    const std::pair<std::int64_t, std::int64_t> key{r.fromTsNs, 0};
     const auto it = newest.find(key);
     if (it == newest.end()) {
       newest.emplace(key, Resolved{r.updatedAtMs, r.state});

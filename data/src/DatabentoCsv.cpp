@@ -626,7 +626,7 @@ arrow::Result<RetentionResult> retain(const std::string& path,
   }
   if (r.existed) {
     ARROW_ASSIGN_OR_RAISE(const auto have, readFile(path));
-    if (true) {
+    if (have == bytes) {
       r.changed = false;
       return r;
     }
