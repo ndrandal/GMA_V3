@@ -9,10 +9,11 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <map>
+#include <cstdlib>
 #include <set>
+#include <span>
 #include <sstream>
-#include <unordered_map>
+#include <vector>
 
 namespace gma::data::ingest {
 
@@ -22,48 +23,48 @@ namespace gma::data::ingest {
 // ===========================================================================
 
 const char* const kSessionIdRuling =
-    "A RE-INGEST REUSES ITS session_id, AND session_id IS DERIVED FROM THE "
-    "PULL RATHER THAN ALLOCATED PER RUN.\n"
+    "A RE-INGEST REUSES ITS session_id, AND session_id IS DERIVED FROM THE PULL "
+    "RATHER THAN ALLOCATED PER RUN.\n"
     "  Decided here because the alternative breaks two locked decisions. D6 "
     "makes L1 'a derived, rebuildable projection of the raw DBN files'; a "
-    "projection whose output changes when you rebuild it from unchanged input "
-    "has a hidden input, and a per-run counter is exactly that. D5's re-ingest "
+    "projection whose output changes when rebuilt from unchanged input has a "
+    "hidden input, and a per-run counter is exactly that. D5's re-ingest "
     "('DROP PARTITION + reload reproduces identical rows') and ENC-1487's "
     "bit-identical assertions both fail on the session_id column alone if a "
-    "reload renumbers it. And DatabentoAdapter's own note on provider_seq — "
+    "reload renumbers it. And DatabentoAdapter's own note on provider_seq -- "
     "'FROM DATABENTO, NEVER SYNTHESIZED ... stable across a re-download, which "
-    "is what makes re-ingest converge and the splice's dedup exact' — is about "
-    "the PAIR (session_id, provider_seq) (docs §8.3); a fresh session_id each "
-    "run makes the stable half useless.\n"
+    "is what makes re-ingest converge and the splice's dedup exact' -- is about "
+    "the PAIR (session_id, provider_seq) (docs 8.3); a fresh session_id each run "
+    "makes the stable half useless.\n"
     "  So session_id = FNV-1a-32(dataset | schema | vendor job_id), forced "
     "non-zero. Same retained file, same rows, forever; a NEW PULL of the same "
-    "window gets a new job_id and therefore a new session, which is the one "
-    "case where the distinction is real.\n"
-    "  AND A CORRECTION TO docs/data-layer.md §8.8, WHICH THE RULING DOES NOT "
-    "RESCUE: §8.8 calls (symbol, kind, from_ts, session_id) 'unique by "
-    "construction'. THAT IS FALSE UNDER BOTH ANSWERS, not just under reuse. "
+    "window gets a new job_id and therefore a new session, which is the one case "
+    "where the distinction is real.\n"
+    "  AND A CORRECTION TO docs/data-layer.md 8.8 THAT THE RULING DOES NOT "
+    "RESCUE: 8.8 calls (symbol, kind, from_ts, session_id) 'unique by "
+    "construction'. THAT IS FALSE UNDER BOTH ANSWERS, not only under reuse. "
     "ENC-1480 made the table an append-only transition log, so one window and "
-    "one session write at least two rows (state=0 then state=1) and a failed "
-    "run writes three. The claim dates from revision 2's one-row-per-window "
+    "one session write at least two rows (state=0 then state=1) and a failed run "
+    "writes three. The claim dates from revision 2's one-row-per-window "
     "ReplacingMergeTree and was voided by the rewrite that replaced it. What "
     "makes the table readable is the READ RULE, never uniqueness.";
 
 const char* const kGapsNote =
     "ZERO gma.gaps ROWS WRITTEN, AND NOT FOR LACK OF SCOPE: THE SEQ-"
     "DISCONTINUITY DETECTOR CANNOT RUN ON A SYMBOL-FILTERED PULL.\n"
-    "  docs §8.8 detects a provider hole as 'a seq discontinuity'. Databento's "
+    "  docs 8.8 detects a provider hole as 'a seq discontinuity'. Databento's "
     "`sequence` is the VENUE's, not the symbol's: in this sample consecutive "
     "MSFT records step 11404021 -> 11404028 -> 11423666, because every other "
-    "Nasdaq instrument's messages occupy the numbers in between. provider_seq "
-    "is MONOTONIC within (session_id, symbol) exactly as §8.3 says — measured "
-    "sorted, 1000/1000, both kinds — but it is not CONTIGUOUS, and gap "
-    "detection needs contiguity. Writing a gap row per jump would have "
-    "produced ~900 phantom holes per kind, each of which a research run joining "
-    "`gaps` would read as 'there was no data here': the same wrong-answer class "
-    "the table exists to prevent, manufactured by the detector. A real detector "
-    "for a filtered pull needs either an unfiltered channel feed or the "
-    "vendor's own condition.json (which for 2022-06-10 reads 'available'), and "
-    "that is a ticket, not a line in this one.";
+    "Nasdaq instrument's messages occupy the numbers in between. provider_seq is "
+    "MONOTONIC within (session_id, symbol) exactly as 8.3 says -- measured "
+    "sorted, 1000/1000, both kinds -- but it is not CONTIGUOUS, and gap "
+    "detection needs contiguity. A gap row per jump would have produced hundreds "
+    "of phantom holes per kind, each of which a research run joining `gaps` "
+    "reads as 'there was no data here': the same wrong-answer class the table "
+    "exists to prevent, manufactured by the detector. A real detector for a "
+    "filtered pull needs either an unfiltered channel feed or the vendor's own "
+    "condition.json (which for 2022-06-10 reads 'available'), and that is a "
+    "ticket, not a line in this one.";
 
 namespace {
 
@@ -72,7 +73,7 @@ namespace {
 // ---------------------------------------------------------------------------
 std::uint32_t deriveSessionId(const std::string& dataset, const std::string& schema,
                               const std::string& jobId) {
-  // FNV-1a 32. Chosen for being a fixed, written-down function of the input
+  // FNV-1a 32. Chosen for being a fixed, written-down function of its input
   // rather than for its distribution: the property that matters is that the
   // same pull yields the same number on every machine and every rebuild.
   std::uint32_t h = 0x811C9DC5u;
@@ -87,8 +88,8 @@ std::uint32_t deriveSessionId(const std::string& dataset, const std::string& sch
   mix(dataset);
   mix(schema);
   mix(jobId);
-  // 0 is reserved: a zero session_id on an event row is indistinguishable
-  // from a default-constructed header.
+  // 0 is reserved: a zero session_id on an event row is indistinguishable from
+  // a default-constructed header.
   return h == 0 ? 1u : h;
 }
 
@@ -109,11 +110,11 @@ bool fileExists(const std::string& p) {
 // ---------------------------------------------------------------------------
 // Decode a DBN buffer through the adapter, in `chunk`-byte feeds.
 //
-// The chunk size is a parameter because it is the round-trip's second axis:
-// the adapter buffers across `feed()` calls, so a chunk that straddles record
-// and metadata boundaries drives a different code path through the same
-// framing than one whole-file feed. Two chunkings that produce identical
-// canonical records is a real property; one chunking repeated is not.
+// The chunk size is a parameter because it is one of the round-trip's two axes:
+// the adapter buffers across `feed()` calls, so a chunk that straddles the
+// metadata block, the symbology section and records of both 56 and 48 bytes
+// drives the framing differently from one whole-file feed. Two chunkings
+// agreeing is a real property; one chunking repeated is not.
 // ---------------------------------------------------------------------------
 struct Decoded {
   std::vector<TickRecord> ticks;
@@ -134,19 +135,22 @@ arrow::Result<Decoded> decodeDbn(const std::vector<std::byte>& bytes,
   // `venue` empty => the adapter interns the DBN metadata's `dataset`
   // ("XNAS.ITCH"), which is what makes the column checkable by hand in
   // ClickHouse. `symbolOverride` empty => the ticker is RESOLVED from the
-  // metadata's symbology (SPEC D7) rather than asserted by us, which is the
-  // point of writing the symbology section into the DBN at all.
+  // metadata's symbology (SPEC D7) rather than asserted by us, which is why
+  // the symbology section is written into the DBN at all.
   //
   // `fillReducesRestingOrder` IS LEFT AT ITS DEFAULT, AND THE DEFAULT IS NOW
-  // MEASURED: see the comment in DatabentoAdapter.hpp. 91 of 91 `F` records in
-  // this sample are accompanied by a `C` for the SAME order_id at the same
-  // (ts_event, sequence), so the venue emits the resting reduction itself and
-  // applying the fill as a second reduction double-reduces on 100% of fills.
+  // MEASURED rather than assumed — see the comment on it in
+  // DatabentoAdapter.hpp. 91 of 91 `F` records in this sample are accompanied
+  // by a `C` for the SAME order_id at the same (ts_event, sequence), so the
+  // venue emits the resting reduction itself and applying the fill as a second
+  // reduction would double-reduce on 100% of fills.
   DatabentoAdapter adapter(cfg, symbols, venues);
 
+  if (chunk == 0) return arrow::Status::Invalid("chunk size 0");
   for (std::size_t off = 0; off < bytes.size(); off += chunk) {
     const std::size_t n = std::min(chunk, bytes.size() - off);
-    ARROW_RETURN_NOT_OK(adapter.feed(std::span<const std::byte>(bytes.data() + off, n)));
+    ARROW_RETURN_NOT_OK(
+        adapter.feed(std::span<const std::byte>(bytes.data() + off, n)));
   }
   ARROW_RETURN_NOT_OK(adapter.finish());
 
@@ -155,15 +159,10 @@ arrow::Result<Decoded> decodeDbn(const std::vector<std::byte>& bytes,
   d.book  = adapter.takeBookEvents();
   d.stats = adapter.stats();
   if (!adapter.metadata().has_value()) {
-    return arrow::Status::Invalid("adapter produced no metadata");
+    return arrow::Status::Invalid("the adapter produced no DBN metadata");
   }
   d.meta = *adapter.metadata();
 
-  // The symbol and venue the adapter RESOLVED, read back out of the interning
-  // tables rather than assumed. A single symbol is this slice's scope (SPEC
-  // §6: one symbol), and more than one is refused rather than averaged.
-  const auto* records = !d.book.empty() ? nullptr : nullptr;
-  (void)records;
   std::set<std::uint32_t> symbolIds;
   std::set<std::uint32_t> instrumentIds;
   std::uint32_t venueId = 0;
@@ -178,9 +177,9 @@ arrow::Result<Decoded> decodeDbn(const std::vector<std::byte>& bytes,
     return arrow::Status::Invalid(
         "decode yielded ", symbolIds.size(), " symbol(s) and ",
         instrumentIds.size(),
-        " instrument_id(s). This slice is one symbol (SPEC §6) and the window "
-        "is recorded per symbol in gma.ingest_windows, so a multi-symbol file "
-        "is refused rather than recorded under one of them.");
+        " instrument_id(s). This slice is one symbol (SPEC 6) and the window is "
+        "recorded PER SYMBOL in gma.ingest_windows, so a multi-symbol file is "
+        "refused rather than recorded under one of them.");
   }
   d.symbol       = symbols.name(*symbolIds.begin());
   d.venue        = venues.name(venueId);
@@ -189,34 +188,14 @@ arrow::Result<Decoded> decodeDbn(const std::vector<std::byte>& bytes,
 }
 
 // ---------------------------------------------------------------------------
-// The sort key, and sorting by it before insert.
+// Row rendering. ONE renderer, used twice: for the round-trip comparison and
+// for the insert body. That is deliberate — comparing the RENDERED rows is
+// what makes the round-trip a statement about what reaches L1, and a second
+// renderer written for the comparison could agree with itself while disagreeing
+// with the insert.
 //
-// docs §8.6: "Insert symbol-sorted batches per day partition — the key leads
-// with symbol, so raw DBN file order (time-ordered) forces a per-part re-sort.
-// The ingest job owns this; a background merge cannot fix it after the fact."
-// At one symbol and one day this sort is the identity, which is exactly why it
-// is written now: the cost of getting it wrong is invisible here and expensive
-// at the universe.
-// ---------------------------------------------------------------------------
-struct SortKey {
-  std::string   symbol;
-  std::int64_t  tsEventNs;
-  std::uint64_t providerSeq;
-  bool operator<(const SortKey& o) const {
-    if (symbol != o.symbol) return symbol < o.symbol;
-    if (tsEventNs != o.tsEventNs) return tsEventNs < o.tsEventNs;
-    return providerSeq < o.providerSeq;
-  }
-  bool operator==(const SortKey& o) const = default;
-};
-
-std::uint32_t dayPartitionOf(std::int64_t tsNs) {
-  return csv::yyyymmddUtc(static_cast<std::uint64_t>(tsNs));
-}
-
-// ---------------------------------------------------------------------------
-// Row formatting. Columns are NAMED in the INSERT so a DDL column reorder is a
-// server-side error rather than a silently transposed table.
+// Columns are NAMED in the INSERT so a DDL column reorder is a server-side
+// error rather than a silently transposed table.
 // ---------------------------------------------------------------------------
 constexpr const char* kTradesColumns =
     "ts_event, ts_recv, provider_seq, session_id, symbol, instrument_id, venue, "
@@ -226,74 +205,76 @@ constexpr const char* kBookEventsColumns =
     "ts_event, ts_recv, provider_seq, session_id, symbol, instrument_id, venue, "
     "action, side, price, size, order_id, priority, depth, epoch, flags";
 
-void appendTradeRow(std::ostringstream& os, const TickRecord& t,
-                    const std::string& symbol, const std::string& venue) {
+// A field this renderer omits is a field no round-trip assertion covers and no
+// L1 column holds, so the two facts stay tied together. TickRecord's quote half
+// (bidPx/askPx/bidSz/askSz/bidCt/askCt) is omitted because `gma.quotes` is not
+// in this slice (SPEC Non-goals) and nothing populates it.
+std::string renderTradeRow(const TickRecord& t, const std::string& symbol,
+                           const std::string& venue) {
+  std::ostringstream os;
   os << t.header.tsEventNs << '\t' << t.header.tsRecvNs << '\t'
      << t.header.providerSeq << '\t' << t.header.sessionId << '\t'
      << ch::tsvEscape(symbol) << '\t' << t.header.instrumentId << '\t'
      << ch::tsvEscape(venue) << '\t' << t.price << '\t' << t.size << '\t'
-     << static_cast<unsigned>(t.aggressor) << '\t' << (t.bookNeutral ? 1 : 0) << '\t'
-     << t.tradeId << '\t' << t.flags << '\n';
+     << static_cast<unsigned>(t.aggressor) << '\t' << (t.bookNeutral ? 1 : 0)
+     << '\t' << t.tradeId << '\t' << t.flags << '\n';
+  return os.str();
 }
 
-void appendBookRow(std::ostringstream& os, const BookRecord& b,
-                   const std::string& symbol, const std::string& venue) {
+std::string renderBookRow(const BookRecord& b, const std::string& symbol,
+                          const std::string& venue) {
+  std::ostringstream os;
   os << b.header.tsEventNs << '\t' << b.header.tsRecvNs << '\t'
      << b.header.providerSeq << '\t' << b.header.sessionId << '\t'
      << ch::tsvEscape(symbol) << '\t' << b.header.instrumentId << '\t'
      << ch::tsvEscape(venue) << '\t' << static_cast<unsigned>(b.action) << '\t'
      << static_cast<unsigned>(b.side) << '\t' << b.price << '\t' << b.size << '\t'
-     << b.orderId << '\t' << b.priority << '\t' << b.depth << '\t' << b.epoch << '\t'
-     << b.flags << '\n';
+     << b.orderId << '\t' << b.priority << '\t' << b.depth << '\t' << b.epoch
+     << '\t' << b.flags << '\n';
+  return os.str();
+}
+
+std::string renderRows(const Decoded& d) {
+  std::string out;
+  for (const auto& t : d.ticks) out += renderTradeRow(t, d.symbol, d.venue);
+  for (const auto& b : d.book) out += renderBookRow(b, d.symbol, d.venue);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
-// ingest_windows writes. updated_at IS STAMPED EXPLICITLY ON EVERY ROW,
-// including the state=0 one. The DDL's own note: with no value the column
-// defaults to epoch 0, every row ties, "the single newest row" becomes
-// arbitrary and a stale state=1 can win — the identical zero-valued-clock
-// defect the table was rewritten to eliminate. The DEFAULT now64(3) in the DDL
-// is the backstop; writing it is the contract.
+// ingest_windows writes. updated_at IS STAMPED ON EVERY ROW, including the
+// state=0 one. The DDL's own measured note: with no value the column defaults
+// to epoch 0, every row ties, "the single newest row" becomes arbitrary and a
+// stale state=1 can win — the identical zero-valued-clock defect the table was
+// rewritten to eliminate. `DEFAULT now64(3)` in the DDL is the backstop;
+// writing it is the contract.
+//
+// `now64(3)` is a FUNCTION, and TabSeparated would store the literal text, so
+// these rows go in through a SELECT. The clock is the server's either way.
 // ---------------------------------------------------------------------------
 arrow::Status writeWindowRow(const ch::Client& client, const std::string& symbol,
                              const std::string& kind, std::int64_t fromNs,
                              std::int64_t toNs, std::uint8_t state,
                              std::uint64_t rowsInserted, std::uint32_t sessionId,
                              const std::string& sourceRef) {
-  std::ostringstream os;
-  os << "INSERT INTO gma.ingest_windows (symbol, kind, from_ts, to_ts, state, "
-        "rows_inserted, updated_at, completed_at, session_id, source, source_ref) "
-        "FORMAT TabSeparated\n";
-  os << ch::tsvEscape(symbol) << '\t' << ch::tsvEscape(kind) << '\t' << fromNs << '\t'
-     << toNs << '\t' << static_cast<unsigned>(state) << '\t' << rowsInserted << '\t'
-     // updated_at: a WRITE clock, in ms, stamped now, on every state.
-     << "now64(3)" << '\t'
-     // completed_at: a COMPLETION clock. Zero unless this row IS the
-     // completion — the DDL is explicit that it is zero while in flight and
-     // that ordering by it is what made the revision-2 engine delete the
-     // in-flight row.
-     << (state == 1 ? "now64(3)" : "0") << '\t' << sessionId << '\t' << "databento"
-     << '\t' << ch::tsvEscape(sourceRef) << '\n';
-  // `now64(3)` is a FUNCTION and TabSeparated would store it as a string, so
-  // the two clock columns go through a SELECT instead. Same row, same
-  // transaction-less insert; the only difference is that the server evaluates
-  // the clock.
   std::ostringstream q;
   q << "INSERT INTO gma.ingest_windows (symbol, kind, from_ts, to_ts, state, "
        "rows_inserted, updated_at, completed_at, session_id, source, source_ref) "
        "SELECT '"
-    << symbol << "', '" << kind << "', toDateTime64(" << fromNs
-    << "/1000000000, 9, 'UTC'), toDateTime64(" << toNs << "/1000000000, 9, 'UTC'), "
+    << symbol << "', '" << kind << "', fromUnixTimestamp64Nano(toInt64(" << fromNs
+    << "), 'UTC'), fromUnixTimestamp64Nano(toInt64(" << toNs << "), 'UTC'), "
     << static_cast<unsigned>(state) << ", " << rowsInserted << ", now64(3), "
-    << (state == 1 ? "now64(3)" : "toDateTime64(0, 3, 'UTC')") << ", " << sessionId
-    << ", 'databento', '" << sourceRef << "'";
+    // completed_at: a COMPLETION clock. Zero unless this row IS the completion
+    // — the DDL is explicit that it is zero while in flight and that ordering
+    // by it is what made the revision-2 engine delete the in-flight row.
+    << (state == 1 ? "now64(3)" : "fromUnixTimestamp64Milli(toInt64(0), 'UTC')")
+    << ", " << sessionId << ", 'databento', '" << sourceRef << "'";
   return client.exec(q.str()).status();
 }
 
 std::string isoFromNs(std::int64_t ns) {
   const auto day = csv::yyyymmddUtc(static_cast<std::uint64_t>(ns));
-  const std::int64_t midnight =
-      static_cast<std::int64_t>(csv::midnightUtcNs(day));
+  const auto midnight = static_cast<std::int64_t>(csv::midnightUtcNs(day));
   std::int64_t rem = ns - midnight;
   const int h = static_cast<int>(rem / 3600000000000LL);
   rem %= 3600000000000LL;
@@ -306,6 +287,28 @@ std::string isoFromNs(std::int64_t ns) {
                 day / 10000, (day / 100) % 100, day % 100, h, m, s, frac);
   return buf;
 }
+
+// The partition days a window and its rows touch.
+std::set<std::uint32_t> daysOf(std::int64_t fromNs, std::int64_t toNs) {
+  std::set<std::uint32_t> days;
+  std::uint32_t d = csv::yyyymmddUtc(static_cast<std::uint64_t>(fromNs));
+  for (;;) {
+    days.insert(d);
+    const auto next = csv::midnightUtcNs(d) + 86400000000000ULL;
+    if (static_cast<std::int64_t>(next) >= toNs) break;
+    d = csv::yyyymmddUtc(next);
+  }
+  return days;
+}
+
+struct Staged {
+  KindReport rep;
+  Decoded decoded;
+  std::vector<csv::Transcoded::Mapping> mappings;
+  std::string table;
+  std::string dataset;
+  std::uint32_t sessionId = 0;
+};
 
 }  // namespace
 
@@ -324,10 +327,10 @@ arrow::Result<Completeness> queryCompleteness(const ch::Client& client,
                                               const std::string& kind,
                                               std::int64_t reqFromNs,
                                               std::int64_t reqToNs) {
-  // Projection + a WHERE on the sort-key prefix. No aggregate, no FINAL, no
-  // argMax, no LIMIT: the resolution and the coverage test are both done by
-  // the caller, which is the DDL's own instruction and keeps this a plain
-  // selection on this side of the D2 boundary.
+  // Projection plus a WHERE on the sort-key prefix. No aggregate, no FINAL, no
+  // argMax, no LIMIT: the version resolution and the coverage test are both
+  // done by the caller, which is the DDL's own instruction and keeps this a
+  // plain selection on this side of the D2 boundary.
   std::ostringstream q;
   q << "SELECT toUnixTimestamp64Nano(from_ts), toUnixTimestamp64Nano(to_ts), "
        "toUInt16(state), toUnixTimestamp64Milli(updated_at) "
@@ -358,9 +361,9 @@ arrow::Result<std::int64_t> rowCount(const ch::Client& client,
                                      std::int64_t fromNs, std::int64_t toNs) {
   std::ostringstream q;
   q << "SELECT count() FROM gma." << table << " WHERE symbol = '" << symbol
-    << "' AND ts_event >= toDateTime64(" << fromNs
-    << "/1000000000, 9, 'UTC') AND ts_event < toDateTime64(" << toNs
-    << "/1000000000, 9, 'UTC')";
+    << "' AND ts_event >= fromUnixTimestamp64Nano(toInt64(" << fromNs
+    << "), 'UTC') AND ts_event < fromUnixTimestamp64Nano(toInt64(" << toNs
+    << "), 'UTC')";
   ARROW_ASSIGN_OR_RAISE(const auto s, client.scalar(q.str()));
   return std::stoll(s);
 }
@@ -380,8 +383,8 @@ arrow::Result<Report> run(const Options& opts) {
 
   // The two kinds. `kind` is gma.ingest_windows' value (and the table name);
   // `dbnSchema` is the vendor's. They differ for MBO — the vendor calls the
-  // schema `mbo` and L1's table is `book_events` — and conflating them is how
-  // a completeness row gets written under a kind no reader queries.
+  // schema `mbo` and L1's table is `book_events` — and conflating them writes a
+  // completeness row under a kind no reader queries.
   struct KindSpec {
     const char* kind;
     const char* dbnSchema;
@@ -394,18 +397,10 @@ arrow::Result<Report> run(const Options& opts) {
 
   // ---- pass 1: the raw half (transcode, retain, decode, round-trip) ------
   //
-  // Every file is turned into canonical rows BEFORE anything is dropped or
-  // inserted. A `DROP PARTITION` followed by a decode failure would leave the
-  // partition empty with no row able to say so beyond a state=0; doing the
-  // whole raw half first means a bad file is refused with L1 untouched.
-  struct Staged {
-    KindReport rep;
-    std::vector<TickRecord> ticks;
-    std::vector<BookRecord> book;
-    std::vector<csv::Transcoded::Mapping> mappings;
-    std::string table;
-    std::string dataset;
-  };
+  // Every file becomes canonical rows BEFORE anything is dropped or inserted. A
+  // DROP PARTITION followed by a decode failure would leave the partition empty
+  // with nothing but a state=0 able to say so; doing the whole raw half first
+  // means a bad file is refused with L1 untouched.
   std::vector<Staged> staged;
 
   for (const auto& spec : specs) {
@@ -419,136 +414,166 @@ arrow::Result<Report> run(const Options& opts) {
     st.rep.dbnPath = dbnPath;
 
     std::vector<std::byte> dbnBytes;
-    csv::PullMetadata md;
+    std::vector<csv::Transcoded::Probe> probes;
+    bool retainedMatched = false;
 
     if (opts.fromDbnOnly) {
-      // THE PURE D6 RELOAD. No CSV, no metadata.json: the retained DBN carries
-      // `start`, `end` and `limit` in its own metadata block, which is exactly
+      // THE PURE D6 RELOAD. No CSV and no metadata.json: the retained DBN
+      // carries `start`, `end` and `limit` in its own metadata block, which is
       // what makes "reload must reload from something" a complete statement.
       if (!fileExists(dbnPath)) {
         return arrow::Status::IOError(
             "--from-dbn-only but ", dbnPath,
             " does not exist. SPEC D6 retains the raw DBN so a reload needs no "
-            "re-pull; run without the flag once to produce it from the CSV.");
+            "re-pull; run once without the flag to produce it from the CSV.");
       }
       ARROW_ASSIGN_OR_RAISE(dbnBytes, csv::readFile(dbnPath));
       st.rep.dbnExisted = true;
+      st.dataset        = "XNAS.ITCH";  // replaced from the DBN metadata below
     } else {
       // metadata.json: PER JOB, and this directory holds two jobs.
       //
-      // Each vendor zip carries its own metadata.json, and extracting both
-      // zips into one directory leaves ONE of them — silently the wrong one
-      // for one of the two CSVs. So a sidecar is preferred and a shared
+      // Each vendor zip carries its own metadata.json, and extracting both zips
+      // into one directory leaves ONE of them — silently the wrong one for one
+      // of the two CSVs. So a per-schema sidecar is preferred, and a shared
       // metadata.json is accepted ONLY if its own `query.schema` matches the
       // file being read. A mismatch is refused with the command that fixes it,
-      // because the fields at stake (`start`, `end`, `limit`) are what
-      // gma.ingest_windows has an opinion about.
-      const std::string sidecar =
-          root + "/metadata." + spec.dbnSchema + ".json";
-      const std::string shared = root + "/metadata.json";
-      std::string mdPath = fileExists(sidecar) ? sidecar : shared;
-      ARROW_ASSIGN_OR_RAISE(md, csv::readPullMetadata(mdPath));
+      // because the fields at stake (`start`, `end`, `limit`) are exactly what
+      // gma.ingest_windows forms an opinion from.
+      const std::string sidecar = root + "/metadata." + spec.dbnSchema + ".json";
+      const std::string shared  = root + "/metadata.json";
+      const std::string mdPath  = fileExists(sidecar) ? sidecar : shared;
+      ARROW_ASSIGN_OR_RAISE(const auto md, csv::readPullMetadata(mdPath));
       if (md.schema != spec.dbnSchema) {
         return arrow::Status::Invalid(
             mdPath, " describes the `", md.schema, "` job (job_id ", md.jobId,
             ") but the `", spec.dbnSchema,
             "` CSV is being read. Two batch jobs extracted into one directory "
             "leave one metadata.json, and `start`/`end`/`limit` from the wrong "
-            "job would be recorded in gma.ingest_windows as this pull's "
-            "window. Extract the per-job sidecar:\n"
-            "    for z in ", root, "/*.zip; do s=$(unzip -p \"$z\" "
-            "metadata.json | sed -n 's/.*\"schema\": \"\\([a-z0-9]*\\)\".*/\\1/p'); "
-            "unzip -p \"$z\" metadata.json > ", root, "/metadata.$s.json; done");
+            "job would be recorded in gma.ingest_windows as this pull's window. "
+            "Extract the per-job sidecars first, e.g.\n"
+            "    for z in ", root,
+            "/*.zip; do s=$(unzip -p \"$z\" metadata.json | "
+            "python3 -c 'import json,sys; print(json.load(sys.stdin)[\"query\"]"
+            "[\"schema\"])'); unzip -p \"$z\" metadata.json > ", root,
+            "/metadata.$s.json; done");
       }
       const std::string csvPath =
           root + "/xnas-itch-20220610." + spec.dbnSchema + ".csv";
       st.rep.csvPath = csvPath;
       st.rep.jobId   = md.jobId;
+      st.dataset     = md.dataset;
 
       ARROW_ASSIGN_OR_RAISE(const auto tc,
                             csv::transcodeCsv(csvPath, md, opts.dbnVersion));
-      st.rep.csvRecords         = tc.records;
-      st.rep.pullLimit          = md.limit;
-      st.rep.truncatedByLimit   = tc.truncatedByLimit;
+      st.rep.csvRecords           = tc.records;
+      st.rep.pullLimit            = md.limit;
+      st.rep.truncatedByLimit     = tc.truncatedByLimit;
       st.rep.recordsAtLastTsEvent = tc.recordsAtLastTsEvent;
-      st.rep.tsRecvMatchesDelta = tc.tsRecvMatchesDelta;
-      st.rep.actionCounts       = tc.actionCounts;
-      st.rep.requestedFromNs    = static_cast<std::int64_t>(md.start);
-      st.rep.requestedToNs      = static_cast<std::int64_t>(md.end);
-      st.rep.recordedFromNs     = static_cast<std::int64_t>(md.start);
-      st.rep.recordedToNs       = static_cast<std::int64_t>(tc.deliveredEnd(md));
-      st.mappings               = tc.mappings;
-      st.dataset                = md.dataset;
+      st.rep.tsRecvMatchesDelta   = tc.tsRecvMatchesDelta;
+      st.rep.actionCounts         = tc.actionCounts;
+      st.rep.requestedFromNs      = static_cast<std::int64_t>(md.start);
+      st.rep.requestedToNs        = static_cast<std::int64_t>(md.end);
+      st.rep.recordedFromNs       = static_cast<std::int64_t>(md.start);
+      st.rep.recordedToNs         = static_cast<std::int64_t>(tc.deliveredEnd(md));
+      st.mappings                 = tc.mappings;
+      probes                      = tc.probes;
 
       if (opts.forceReencode && fileExists(dbnPath)) std::remove(dbnPath.c_str());
       ARROW_ASSIGN_OR_RAISE(const auto ret, csv::retain(dbnPath, tc.dbn));
       st.rep.dbnExisted   = ret.existed;
       st.rep.dbnRewritten = ret.changed;
-      st.rep.dbnBytes     = ret.bytes;
+      retainedMatched     = ret.existed && !ret.changed;
 
       // Read the file BACK FROM DISK rather than reusing `tc.dbn`. The insert
-      // path is the reload path; if retention wrote something other than what
+      // path IS the reload path; if retention wrote something other than what
       // it was handed, this is where it shows.
       ARROW_ASSIGN_OR_RAISE(dbnBytes, csv::readFile(dbnPath));
       if (dbnBytes != tc.dbn) {
         return arrow::Status::IOError(
             "the retained DBN at ", dbnPath,
             " does not read back as the bytes just written. L1 is a rebuildable "
-            "projection of these files (SPEC D6); a file that does not read "
-            "back is not a baseline.");
+            "projection of these files (SPEC D6); a file that does not read back "
+            "is not a baseline.");
       }
     }
     st.rep.dbnBytes = dbnBytes.size();
 
-    const std::uint32_t sessionId =
+    st.sessionId =
         opts.sessionId != 0
             ? opts.sessionId
-            : deriveSessionId(opts.fromDbnOnly ? "XNAS.ITCH" : md.dataset,
-                              spec.dbnSchema,
-                              opts.fromDbnOnly ? std::string("from-dbn") : md.jobId);
+            : deriveSessionId(st.dataset, spec.dbnSchema,
+                              st.rep.jobId.empty() ? std::string("from-dbn")
+                                                   : st.rep.jobId);
 
-    // ---- decode, twice, at two chunkings -------------------------------
-    ARROW_ASSIGN_OR_RAISE(const auto whole,
-                          decodeDbn(dbnBytes, sessionId, dbnBytes.size()));
-    // 8191: a prime-ish chunk that lands inside the 100-byte metadata block,
-    // inside the variable symbology section and inside records of both 56 and
-    // 48 bytes, so no boundary in the file is also a feed boundary.
-    ARROW_ASSIGN_OR_RAISE(const auto chunked, decodeDbn(dbnBytes, sessionId, 8191));
+    // ---- decode twice, at two chunkings, and compare the RENDERED rows ---
+    ARROW_ASSIGN_OR_RAISE(auto whole,
+                          decodeDbn(dbnBytes, st.sessionId, dbnBytes.size()));
+    // 8191: a chunk that lands inside the 100-byte fixed metadata block, inside
+    // the variable symbology section and inside records of both 56 and 48
+    // bytes, so no boundary in the file is also a feed boundary.
+    ARROW_ASSIGN_OR_RAISE(const auto chunked, decodeDbn(dbnBytes, st.sessionId, 8191));
 
     std::ostringstream note;
     bool ok = true;
-    if (whole.ticks.size() != chunked.ticks.size() ||
-        whole.book.size() != chunked.book.size()) {
+    const std::string rowsWhole   = renderRows(whole);
+    const std::string rowsChunked = renderRows(chunked);
+    if (rowsWhole != rowsChunked) {
       ok = false;
-      note << "record counts differ between a whole-file feed and 8191-byte "
-              "feeds: ticks "
-           << whole.ticks.size() << " vs " << chunked.ticks.size() << ", book "
-           << whole.book.size() << " vs " << chunked.book.size() << ". ";
-    } else {
-      // The PODs are trivially copyable and have no padding holes that are not
-      // asserted (RecordHeader is static_assert'd at 40 bytes), so memcmp is
-      // the whole comparison rather than a field list that could omit one.
-      if (!whole.ticks.empty() &&
-          std::memcmp(whole.ticks.data(), chunked.ticks.data(),
-                      whole.ticks.size() * sizeof(TickRecord)) != 0) {
-        ok = false;
-        note << "TickRecords differ byte-for-byte between the two chunkings. ";
-      }
-      if (!whole.book.empty() &&
-          std::memcmp(whole.book.data(), chunked.book.data(),
-                      whole.book.size() * sizeof(BookRecord)) != 0) {
-        ok = false;
-        note << "BookRecords differ byte-for-byte between the two chunkings. ";
-      }
+      note << "the retained DBN decodes to DIFFERENT canonical rows depending on "
+              "the feed chunking (whole file vs 8191-byte chunks): "
+           << whole.ticks.size() << "/" << whole.book.size() << " vs "
+           << chunked.ticks.size() << "/" << chunked.book.size()
+           << " tick/book records. ";
     }
-    if (ok) {
-      note << "whole-file and 8191-byte-chunk feeds of the retained DBN produce "
-              "byte-identical canonical records ("
-           << whole.ticks.size() << " ticks, " << whole.book.size() << " book)";
-      if (st.rep.dbnExisted && !st.rep.dbnRewritten && !opts.fromDbnOnly) {
-        note << "; re-transcoding the CSV reproduced the retained file "
-                "byte-for-byte";
+
+    // The second axis, and the stronger one: the canonical rows must carry the
+    // (ts_event, provider_seq, price) the CSV carried, for every record that
+    // produces a row. This is what shows the CSV -> DBN -> canonical legs
+    // LOSSLESS without a second CSV -> canonical mapping existing to compare
+    // against (SPEC D1 forbids that second mapping). `Action::None` produces no
+    // row by design — DBN's own "has no effect on the book" — so it is the one
+    // action excluded.
+    if (ok && !probes.empty()) {
+      using Triple = std::tuple<std::int64_t, std::uint64_t, std::int64_t>;
+      std::vector<Triple> want;
+      for (const auto& p : probes) {
+        if (p.action == static_cast<char>(dbn::Action::None)) continue;
+        want.emplace_back(static_cast<std::int64_t>(p.tsEvent),
+                          static_cast<std::uint64_t>(p.sequence),
+                          p.price == dbn::kUndefPrice ? kNoPrice : p.price);
       }
+      std::vector<Triple> got;
+      for (const auto& t : whole.ticks) {
+        got.emplace_back(t.header.tsEventNs, t.header.providerSeq, t.price);
+      }
+      for (const auto& b : whole.book) {
+        got.emplace_back(b.header.tsEventNs, b.header.providerSeq, b.price);
+      }
+      std::sort(want.begin(), want.end());
+      std::sort(got.begin(), got.end());
+      if (want != got) {
+        ok = false;
+        note << "the (ts_event, provider_seq, price) multiset of the canonical "
+                "rows does not match the CSV's: "
+             << want.size() << " expected, " << got.size() << " produced. ";
+      } else {
+        note << "the (ts_event, provider_seq, price) multiset of all "
+             << got.size()
+             << " canonical rows matches the CSV's exactly; whole-file and "
+                "8191-byte-chunk feeds of the retained DBN render identical "
+                "rows";
+        if (retainedMatched) {
+          note << "; and re-transcoding the CSV reproduced the already-retained "
+                  "DBN byte-for-byte";
+        }
+      }
+    } else if (ok) {
+      note << "whole-file and 8191-byte-chunk feeds of the retained DBN render "
+              "identical rows ("
+           << whole.ticks.size() << " ticks, " << whole.book.size()
+           << " book events); no CSV was read, so there is no CSV cross-check "
+              "on this run";
     }
     st.rep.roundTripOk   = ok;
     st.rep.roundTripNote = note.str();
@@ -557,42 +582,35 @@ arrow::Result<Report> run(const Options& opts) {
                                     st.rep.roundTripNote);
     }
 
-    st.ticks = whole.ticks;
-    st.book  = whole.book;
     st.rep.decodedRecords  = whole.stats.recordsIn;
     st.rep.canonicalRows   = whole.ticks.size() + whole.book.size();
     st.rep.sideUnspecified = whole.stats.sideUnspecified;
     st.rep.symbol          = whole.symbol;
     st.rep.venue           = whole.venue;
     st.rep.instrumentId    = whole.instrumentId;
-    if (st.dataset.empty()) st.dataset = whole.meta.dataset;
+    st.dataset             = whole.meta.dataset;
 
     if (opts.fromDbnOnly) {
       // The window from the DBN's own metadata — the whole point of writing
       // `limit` into it.
-      st.rep.pullLimit        = whole.meta.limit;
-      st.rep.requestedFromNs  = static_cast<std::int64_t>(whole.meta.start);
-      st.rep.requestedToNs    = static_cast<std::int64_t>(whole.meta.end);
+      st.rep.pullLimit       = whole.meta.limit;
+      st.rep.requestedFromNs = static_cast<std::int64_t>(whole.meta.start);
+      st.rep.requestedToNs   = static_cast<std::int64_t>(whole.meta.end);
       st.rep.truncatedByLimit =
           whole.meta.limit != 0 && whole.stats.recordsIn == whole.meta.limit;
       std::int64_t lastTs = 0;
       for (const auto& t : whole.ticks) lastTs = std::max(lastTs, t.header.tsEventNs);
       for (const auto& b : whole.book) lastTs = std::max(lastTs, b.header.tsEventNs);
       st.rep.recordedFromNs = st.rep.requestedFromNs;
-      st.rep.recordedToNs =
-          st.rep.truncatedByLimit ? lastTs : st.rep.requestedToNs;
-      st.rep.mappingsFromDbn = true;
+      st.rep.recordedToNs = st.rep.truncatedByLimit ? lastTs : st.rep.requestedToNs;
       for (const auto& m : whole.meta.mappings) {
         for (const auto& iv : m.intervals) {
-          std::uint32_t id = 0;
-          try {
-            id = static_cast<std::uint32_t>(std::stoul(iv.symbol));
-          } catch (...) {
-            continue;
-          }
+          char* endp = nullptr;
+          const unsigned long id = std::strtoul(iv.symbol.c_str(), &endp, 10);
+          if (endp == nullptr || *endp != '\0' || iv.symbol.empty()) continue;
           st.mappings.push_back(csv::Transcoded::Mapping{
-              id, m.rawSymbol, iv.startDate,
-              iv.endDate > 0 ? iv.endDate - 1 : iv.startDate});
+              static_cast<std::uint32_t>(id), m.rawSymbol, iv.startDate,
+              iv.endDate > iv.startDate ? iv.endDate - 1 : iv.startDate});
         }
       }
     }
@@ -605,69 +623,60 @@ arrow::Result<Report> run(const Options& opts) {
           "nothing.");
     }
 
+    st.decoded = std::move(whole);
     staged.push_back(std::move(st));
   }
 
-  rep.sessionId = opts.sessionId != 0 ? opts.sessionId : 0;  // per-kind; see below
+  if (!staged.empty()) rep.sessionId = staged.front().sessionId;
 
   if (opts.noInsert) {
-    for (auto& st : staged) rep.kinds.push_back(st.rep);
+    for (const auto& st : staged) rep.kinds.push_back(st.rep);
     return rep;
   }
 
   // ---- pass 2: drop, insert, record -------------------------------------
   for (auto& st : staged) {
-    const std::uint32_t sessionId =
-        opts.sessionId != 0
-            ? opts.sessionId
-            : deriveSessionId(st.dataset, st.rep.dbnSchema,
-                              st.rep.jobId.empty() ? std::string("from-dbn")
-                                                   : st.rep.jobId);
-    if (rep.sessionId == 0) rep.sessionId = sessionId;
-
-    // Day partitions this kind's rows land in.
-    std::set<std::uint32_t> days;
-    for (const auto& t : st.ticks) days.insert(dayPartitionOf(t.header.tsEventNs));
-    for (const auto& b : st.book) days.insert(dayPartitionOf(b.header.tsEventNs));
-    // The recorded window's own days too: a window may claim a day the rows do
-    // not reach (a quiet tail), and that day's partition is still being
-    // asserted over.
-    for (std::uint32_t d = dayPartitionOf(st.rep.recordedFromNs);;) {
-      days.insert(d);
-      const auto nextMidnight = csv::midnightUtcNs(d) + 86400000000000ULL;
-      if (static_cast<std::int64_t>(nextMidnight) >= st.rep.recordedToNs) break;
-      d = csv::yyyymmddUtc(nextMidnight);
+    // Day partitions this kind's rows land in, plus the recorded window's own
+    // days: a window may claim a day the rows do not reach (a quiet tail), and
+    // that day's partition is still being asserted over.
+    std::set<std::uint32_t> days = daysOf(st.rep.recordedFromNs, st.rep.recordedToNs);
+    for (const auto& t : st.decoded.ticks) {
+      days.insert(csv::yyyymmddUtc(static_cast<std::uint64_t>(t.header.tsEventNs)));
+    }
+    for (const auto& b : st.decoded.book) {
+      days.insert(csv::yyyymmddUtc(static_cast<std::uint64_t>(b.header.tsEventNs)));
     }
 
     // ---- THE INVARIANT THE SCHEMA CANNOT ENFORCE -----------------------
     //
-    // From the ⚠ block in clickhouse.sql: a DROP PARTITION invalidates EVERY
-    // symbol's completeness rows for that partition, not just the symbol being
-    // re-ingested, because partitions are day-granular while completeness is
-    // per symbol. Without this step another symbol's newest row still reads
-    // state=1 over an emptied partition.
+    // From the warning block in clickhouse.sql: a DROP PARTITION invalidates
+    // EVERY symbol's completeness rows for that partition, not only the symbol
+    // being re-ingested, because partitions are day-granular while completeness
+    // is per symbol. Without this step another symbol's newest row still reads
+    // state=1 over an emptied partition, and isComplete returns true over
+    // nothing.
     //
-    // So: before dropping, find every OTHER symbol with a recorded window for
-    // this kind intersecting a partition about to go, and write it a state=3
-    // (invalidated) row. Our own symbol gets state=0 below, which covers it.
+    // So before dropping: every OTHER symbol with a recorded window for this
+    // kind intersecting a partition about to go gets a state=3 (invalidated)
+    // row. Our own symbol gets the state=0 below, which covers it.
     for (const std::uint32_t day : days) {
-      const std::int64_t dayFrom = static_cast<std::int64_t>(csv::midnightUtcNs(day));
-      const std::int64_t dayTo   = dayFrom + 86400000000000LL;
+      const auto dayFrom = static_cast<std::int64_t>(csv::midnightUtcNs(day));
+      const std::int64_t dayTo = dayFrom + 86400000000000LL;
       std::ostringstream q;
       q << "SELECT DISTINCT symbol, toUnixTimestamp64Nano(from_ts), "
            "toUnixTimestamp64Nano(to_ts) FROM gma.ingest_windows WHERE kind = '"
         << st.rep.kind << "' AND symbol != '" << st.rep.symbol
-        << "' AND from_ts < toDateTime64(" << dayTo
-        << "/1000000000, 9, 'UTC') AND to_ts > toDateTime64(" << dayFrom
-        << "/1000000000, 9, 'UTC') FORMAT TabSeparated";
+        << "' AND from_ts < fromUnixTimestamp64Nano(toInt64(" << dayTo
+        << "), 'UTC') AND to_ts > fromUnixTimestamp64Nano(toInt64(" << dayFrom
+        << "), 'UTC') FORMAT TabSeparated";
       ARROW_ASSIGN_OR_RAISE(const auto others, client.select(q.str()));
       for (const auto& r : others) {
         if (r.size() != 3) continue;
         ARROW_RETURN_NOT_OK(writeWindowRow(
             client, r[0], st.rep.kind, std::stoll(r[1]), std::stoll(r[2]),
-            /*state=*/3, /*rowsInserted=*/0, sessionId,
-            "invalidated by DROP PARTITION " + std::to_string(day) +
-                " for " + st.rep.symbol));
+            /*state=*/3, /*rowsInserted=*/0, st.sessionId,
+            "invalidated by DROP PARTITION " + std::to_string(day) + " for " +
+                st.rep.symbol));
         rep.invalidationRows.push_back(r[0] + "/" + st.rep.kind + " " + r[1] +
                                        ".." + r[2] + " -> state=3 (partition " +
                                        std::to_string(day) + ")");
@@ -677,8 +686,8 @@ arrow::Result<Report> run(const Options& opts) {
     // ---- state=0, in flight --------------------------------------------
     ARROW_RETURN_NOT_OK(writeWindowRow(client, st.rep.symbol, st.rep.kind,
                                        st.rep.recordedFromNs, st.rep.recordedToNs,
-                                       /*state=*/0, /*rowsInserted=*/0, sessionId,
-                                       st.rep.jobId));
+                                       /*state=*/0, /*rowsInserted=*/0,
+                                       st.sessionId, st.rep.jobId));
 
     // ---- DROP PARTITION, then reload (D5) ------------------------------
     for (const std::uint32_t day : days) {
@@ -688,90 +697,84 @@ arrow::Result<Report> run(const Options& opts) {
       rep.partitionsDropped.push_back(st.table + ":" + std::to_string(day));
     }
 
-    // ---- sort, then insert, per day partition --------------------------
-    std::ostringstream body;
-    std::size_t inserted = 0;
-    std::vector<SortKey> keys;
-
+    // ---- sort by the physical sort key, then insert ---------------------
+    //
+    // docs 8.6: "Insert symbol-sorted batches per day partition — the key leads
+    // with symbol, so raw DBN file order (time-ordered) forces a per-part
+    // re-sort. The ingest job owns this; a background merge cannot fix it after
+    // the fact." At one symbol and one day this sort is the identity, which is
+    // exactly why it goes in now: getting it wrong is invisible here and
+    // expensive at the universe.
+    struct Row {
+      std::int64_t  tsEventNs = 0;
+      std::uint64_t providerSeq = 0;
+      std::string   text;
+    };
+    std::vector<Row> rows;
     if (st.rep.kind == "trades") {
-      std::vector<const TickRecord*> ptrs;
-      ptrs.reserve(st.ticks.size());
-      for (const auto& t : st.ticks) ptrs.push_back(&t);
-      std::stable_sort(ptrs.begin(), ptrs.end(),
-                       [&](const TickRecord* a, const TickRecord* b) {
-                         return SortKey{st.rep.symbol, a->header.tsEventNs,
-                                        a->header.providerSeq} <
-                                SortKey{st.rep.symbol, b->header.tsEventNs,
-                                        b->header.providerSeq};
-                       });
-      body << "INSERT INTO gma.trades (" << kTradesColumns
-           << ") FORMAT TabSeparated\n";
-      for (const auto* t : ptrs) {
-        appendTradeRow(body, *t, st.rep.symbol, st.rep.venue);
-        keys.push_back(SortKey{st.rep.symbol, t->header.tsEventNs,
-                               t->header.providerSeq});
-        ++inserted;
+      for (const auto& t : st.decoded.ticks) {
+        rows.push_back(Row{t.header.tsEventNs, t.header.providerSeq,
+                           renderTradeRow(t, st.decoded.symbol, st.decoded.venue)});
       }
     } else {
-      std::vector<const BookRecord*> ptrs;
-      ptrs.reserve(st.book.size());
-      for (const auto& b : st.book) ptrs.push_back(&b);
-      std::stable_sort(ptrs.begin(), ptrs.end(),
-                       [&](const BookRecord* a, const BookRecord* b) {
-                         return SortKey{st.rep.symbol, a->header.tsEventNs,
-                                        a->header.providerSeq} <
-                                SortKey{st.rep.symbol, b->header.tsEventNs,
-                                        b->header.providerSeq};
-                       });
-      body << "INSERT INTO gma.book_events (" << kBookEventsColumns
-           << ") FORMAT TabSeparated\n";
-      for (const auto* b : ptrs) {
-        appendBookRow(body, *b, st.rep.symbol, st.rep.venue);
-        keys.push_back(SortKey{st.rep.symbol, b->header.tsEventNs,
-                               b->header.providerSeq});
-        ++inserted;
+      for (const auto& b : st.decoded.book) {
+        rows.push_back(Row{b.header.tsEventNs, b.header.providerSeq,
+                           renderBookRow(b, st.decoded.symbol, st.decoded.venue)});
       }
     }
+    // One symbol, so the symbol leg of (symbol, ts_event, provider_seq) is
+    // constant and `stable_sort` on the remaining two is the same order — with
+    // ties left in arrival order, which matters because the key is NOT unique.
+    std::stable_sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+      return a.tsEventNs != b.tsEventNs ? a.tsEventNs < b.tsEventNs
+                                        : a.providerSeq < b.providerSeq;
+    });
 
     // ENC-1484's number, free while the keys are in hand: D5 picked plain
-    // MergeTree because this sort key is NOT unique, and here is by how much.
-    std::vector<SortKey> uniq = keys;
-    std::sort(uniq.begin(), uniq.end());
-    const auto last = std::unique(uniq.begin(), uniq.end());
-    st.rep.distinctSortKeys = static_cast<std::size_t>(last - uniq.begin());
-    st.rep.duplicateSortKeys = keys.size() - st.rep.distinctSortKeys;
+    // MergeTree because this sort key is NOT unique, and this is by how much.
+    std::vector<std::pair<std::int64_t, std::uint64_t>> keys;
+    keys.reserve(rows.size());
+    for (const auto& r : rows) keys.emplace_back(r.tsEventNs, r.providerSeq);
+    std::sort(keys.begin(), keys.end());
+    const auto last = std::unique(keys.begin(), keys.end());
+    st.rep.distinctSortKeys  = static_cast<std::size_t>(last - keys.begin());
+    st.rep.duplicateSortKeys = rows.size() - st.rep.distinctSortKeys;
+
+    std::string body = "INSERT INTO gma.";
+    body += st.table;
+    body += " (";
+    body += st.rep.kind == "trades" ? kTradesColumns : kBookEventsColumns;
+    body += ") FORMAT TabSeparated\n";
+    for (const auto& r : rows) body += r.text;
 
     const arrow::Status ins =
-        inserted == 0 ? arrow::Status::OK() : client.exec(body.str()).status();
+        rows.empty() ? arrow::Status::OK() : client.exec(body).status();
     if (!ins.ok()) {
       // state=2, failed. Written before returning so the window never reads as
       // anything but unloaded: the state=0 row above is already the newest, and
       // this makes the failure explicit rather than leaving it in flight
       // forever.
-      ARROW_RETURN_NOT_OK(writeWindowRow(client, st.rep.symbol, st.rep.kind,
-                                         st.rep.recordedFromNs,
-                                         st.rep.recordedToNs, /*state=*/2, 0,
-                                         sessionId, st.rep.jobId));
+      ARROW_RETURN_NOT_OK(writeWindowRow(
+          client, st.rep.symbol, st.rep.kind, st.rep.recordedFromNs,
+          st.rep.recordedToNs, /*state=*/2, 0, st.sessionId, st.rep.jobId));
       return ins;
     }
-    st.rep.rowsInserted = inserted;
+    st.rep.rowsInserted = rows.size();
 
-    // ---- symbology (SPEC D7, docs §8.9) --------------------------------
+    // ---- symbology (SPEC D7, docs 8.9) ---------------------------------
     for (const auto& m : st.mappings) {
       const std::uint64_t validFrom = csv::midnightUtcNs(m.firstDay);
-      // HALF-OPEN: [valid_from, valid_to). The DBN interval is already
-      // half-open in days, so valid_to is midnight of the day AFTER the last
-      // day the mapping was observed on.
-      const std::uint64_t validTo = csv::midnightUtcNs(m.lastDay) + 86400000000000ULL;
+      // HALF-OPEN [valid_from, valid_to): valid_to is midnight of the day AFTER
+      // the last day the mapping was observed on.
+      const std::uint64_t validTo =
+          csv::midnightUtcNs(m.lastDay) + 86400000000000ULL;
       std::ostringstream q;
       q << "INSERT INTO gma.symbology (dataset, instrument_id, raw_symbol, "
            "valid_from, valid_to, source_ref, ingested_at) SELECT '"
         << st.dataset << "', " << m.instrumentId << ", '" << m.rawSymbol
-        << "', toDateTime64(" << validFrom << "/1000000000, 9, 'UTC'), "
-           "toDateTime64("
-        << validTo << "/1000000000, 9, 'UTC'), '"
-        << (st.rep.jobId.empty() ? st.rep.dbnPath : st.rep.jobId)
-        << "', now64(3)";
+        << "', fromUnixTimestamp64Nano(toInt64(" << validFrom
+        << "), 'UTC'), fromUnixTimestamp64Nano(toInt64(" << validTo << "), 'UTC'), '"
+        << (st.rep.jobId.empty() ? st.rep.dbnPath : st.rep.jobId) << "', now64(3)";
       ARROW_RETURN_NOT_OK(client.exec(q.str()).status());
       ++rep.symbologyRows;
     }
@@ -779,7 +782,7 @@ arrow::Result<Report> run(const Options& opts) {
     // ---- state=1, complete ---------------------------------------------
     ARROW_RETURN_NOT_OK(writeWindowRow(client, st.rep.symbol, st.rep.kind,
                                        st.rep.recordedFromNs, st.rep.recordedToNs,
-                                       /*state=*/1, inserted, sessionId,
+                                       /*state=*/1, rows.size(), st.sessionId,
                                        st.rep.jobId));
     rep.kinds.push_back(st.rep);
   }
