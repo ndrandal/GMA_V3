@@ -11,9 +11,26 @@
 namespace gma::data {
 
 std::vector<Interval> mergeIntervals(std::vector<Interval> in) {
-  // Drop empty and inverted intervals first: a recorded [t, t) covers nothing,
-  // and letting one through would make it a free adjacency bridge between two
-  // real windows.
+  // Drop empty and inverted intervals: a recorded [t, t) covers nothing, and an
+  // inverted one is a caller bug.
+  //
+  // HONEST ABOUT WHAT THIS BUYS, because the first version of this comment
+  // claimed more. It said an empty interval "would be a free adjacency bridge
+  // between two real windows", and a falsification sweep showed that is FALSE:
+  // removing the filter leaves every `isComplete` verdict unchanged, because an
+  // empty [t, t) can only merge where the intervals are already adjacent and it
+  // extends nothing (`toNs = max(back.toNs, t)` with `t <= back.toNs`). The
+  // filter is belt-and-braces for the `covered` REPORT, which a reader looks
+  // at, not a safety property of the verdict. It is kept because a zero-width
+  // interval in a human-facing coverage list is noise, and deleted claims are
+  // better than impressive ones.
+  //
+  // The same sweep found that the ADJACENCY JOIN below is likewise not
+  // load-bearing for the verdict: the coverage walk in `isComplete` advances a
+  // cursor across sorted intervals and therefore joins adjacent ones itself. It
+  // IS load-bearing for `covered`, and `IngestWindowsMerge` is where both are
+  // asserted directly. Neither is dead code; both are over-claimed if described
+  // as protecting the answer.
   in.erase(std::remove_if(in.begin(), in.end(),
                           [](const Interval& i) { return i.toNs <= i.fromNs; }),
            in.end());
