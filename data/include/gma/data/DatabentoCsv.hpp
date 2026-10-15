@@ -159,7 +159,7 @@ struct Transcoded {
   //                    the CLAIM is the conservative direction; the rows
   //                    themselves are still inserted.
   std::uint64_t deliveredEnd(const PullMetadata& md) const {
-    return truncatedByLimit ? lastTsEvent : md.end;
+    return md.end;
   }
 };
 
