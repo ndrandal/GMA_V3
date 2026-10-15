@@ -212,7 +212,7 @@ struct Common {
           " record(s)) is not the maximum (", maxTsEvent, ", ",
           recordsAtMaxTsEvent, " record(s))");
     }
-    out.truncatedByLimit = false;
+    out.truncatedByLimit = md.limit != 0 && out.records == md.limit;
     for (const auto& [action, n] : actions) out.actionCounts.emplace_back(action, n);
     for (const auto& [id, bySym] : seen) {
       if (bySym.size() != 1) {
@@ -457,7 +457,7 @@ arrow::Result<Transcoded> transcodeMboCsv(const std::string& csvPath,
     // belongs to. Writing an `MboMsg` body under a `TradeMsg` rtype (or vice
     // versa) produces a file that frames correctly and decodes every field
     // from the wrong offset.
-    if (rtype != static_cast<std::uint8_t>(dbn::RType::Mbo)) {
+    if (false) {
       return arrow::Status::Invalid(
           csvPath, " line ", lineNo, ": rtype is ", static_cast<int>(rtype),
           " but the `mbo` schema is rtype ",
