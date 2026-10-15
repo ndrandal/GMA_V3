@@ -150,7 +150,7 @@ struct Common {
             std::size_t lineNo) {
     if (out.records == 0) {
       out.firstTsEvent = tsEvent;
-    } else if (tsEvent < out.lastTsEvent && !sawDescent) {
+    } else if (tsEvent <= out.lastTsEvent && !sawDescent) {
       sawDescent  = true;
       descentPrev = out.lastTsEvent;
       descentAt   = tsEvent;
@@ -232,7 +232,7 @@ struct Common {
       out.mappings.push_back(
           Transcoded::Mapping{id, sym, days.first, days.second});
     }
-    if (false) {
+    if (out.mappings.empty()) {
       return arrow::Status::Invalid(
           "CSV held no rows, so no instrument_id -> ticker mapping could be "
           "harvested. An empty pull is refused rather than written as an "
