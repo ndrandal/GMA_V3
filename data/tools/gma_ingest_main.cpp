@@ -343,6 +343,58 @@ int cmdVerify(const Args& a) {
                 << "   <- DIAGNOSTIC ONLY; a quiet window and a missing window "
                    "have the same count (D11)\n";
     }
+
+    // ---------------------------------------------------------------------
+    // A COUNT CANNOT ESTABLISH COMPLETENESS. IT CAN REFUTE A CLAIM.
+    //
+    // D11 forbids inferring completeness from row counts, and this does not do
+    // that — the verdicts above came entirely from the read rule. But the
+    // implication runs one way only: a window whose newest row says
+    // `state = 1` with `rows_inserted = N > 0` and which now holds ZERO rows is
+    // not "quiet", it is a LIE, and the arithmetic is sound in that direction.
+    //
+    // This exists because the hazard was MEASURED on this ingest. The DDL's
+    // invariant block makes maintaining the table a code obligation of the
+    // ingest job: when the job drops a partition it writes a state=3 or
+    // state=0 row first. A `DROP PARTITION` typed at the server by hand
+    // bypasses that entirely — and when it was, `isComplete` for the in-window
+    // request returned COMPLETE over an empty table, with every probe above
+    // still reading [ok] because the rule was behaving correctly over a table
+    // that had been lied to. `gma_ingest reload` restored both. There is no way
+    // for the schema to prevent it (no foreign key, no trigger), so the next
+    // best thing is for the verifier to notice.
+    for (const auto& c : wide->covered) {
+      std::ostringstream q;
+      q << "SELECT max(rows_inserted) FROM gma.ingest_windows WHERE symbol = '"
+        << a.symbol << "' AND kind = '" << k.kind << "' AND state = 1";
+      auto claimed = client.scalar(q.str());
+      if (!claimed.ok()) {
+        std::cerr << "gma_ingest: " << claimed.status().ToString() << "\n";
+        return kCouldNotRun;
+      }
+      auto actual = ingest::rowCount(client, k.table, a.symbol, c.fromNs, c.toNs);
+      if (!actual.ok()) {
+        std::cerr << "gma_ingest: " << actual.status().ToString() << "\n";
+        return kCouldNotRun;
+      }
+      const long long claimedN = std::stoll(*claimed);
+      if (claimedN > 0 && *actual == 0) {
+        std::cout << "  [FAIL] a state=1 window claiming " << claimedN
+                  << " inserted row(s) holds ZERO rows in "
+                  << ingest::formatWindow(c.fromNs, c.toNs) << ".\n"
+                     "         The read rule is behaving correctly over a table "
+                     "that has been lied to — the usual\n"
+                     "         cause is a DROP PARTITION that did not go through "
+                     "the ingest job (it writes a\n"
+                     "         state=3 or state=0 row first; a hand-typed ALTER "
+                     "does not). Run `gma_ingest reload`.\n";
+        ++findings;
+      } else {
+        std::cout << "  [ok]   the state=1 claim is not refuted by the data: "
+                  << *actual << " row(s) present, " << claimedN
+                  << " claimed inserted\n";
+      }
+    }
   }
 
   // Symbology, which is the other half of D7.
