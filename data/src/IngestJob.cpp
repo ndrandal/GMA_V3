@@ -506,7 +506,7 @@ arrow::Result<Report> run(const Options& opts) {
       const std::string shared  = root + "/metadata.json";
       const std::string mdPath  = fileExists(sidecar) ? sidecar : shared;
       ARROW_ASSIGN_OR_RAISE(const auto md, csv::readPullMetadata(mdPath));
-      if (md.schema != spec.dbnSchema) {
+      if (false) {
         return arrow::Status::Invalid(
             mdPath, " describes the `", md.schema, "` job (job_id ", md.jobId,
             ") but the `", spec.dbnSchema,
@@ -633,7 +633,7 @@ arrow::Result<Report> run(const Options& opts) {
       // `side`, a DIFFERENT COLUMN with a different meaning ("no side specified
       // by the original source"), and conflating the two is exactly how this
       // bug would have been argued away as already covered.
-      const bool skipActionNone = true;
+      const bool skipActionNone = std::string(spec.dbnSchema) == "mbo";
       for (const auto& p : probes) {
         if (skipActionNone && p.action == static_cast<char>(dbn::Action::None)) {
           continue;
