@@ -33,6 +33,7 @@
 //
 
 #include "gma/data/DatabentoAdapter.hpp"
+#include "gma/data/DbnEncoder.hpp"
 
 #include <arrow/array.h>
 #include <arrow/record_batch.h>
@@ -52,192 +53,42 @@ namespace gma::data {
 namespace {
 
 // ===========================================================================
-// Byte helpers
+// The DBN encoder — PROMOTED to gma_data under ENC-1483.
+//
+// It used to live right here, in this translation unit. ENC-1483's ingest job
+// feeds the adapter DBN re-encoded from a real Databento CSV sample, and must
+// not hand-roll DBN bytes (that would make every format conclusion in this repo
+// circular again), so the encoder moved to
+// `data/include/gma/data/DbnEncoder.hpp` + `data/src/DbnEncoder.cpp` where the
+// ingest path can link it. (The move was begun under ENC-1498, for a synthetic
+// corpus; that ticket is cancelled and the reasoning does not depend on it.)
+//
+// WHAT DID NOT CHANGE, AND IT IS THE WHOLE POINT. The byte-for-byte gate below
+// still builds with THIS encoder — the one the ingest job uses, not a copy of
+// it — and still compares against the REAL VENDOR BYTES read off disk
+// from `data/tests/fixtures/dbn/`. The non-circularity argument is therefore
+// about the same code, the same files and the same assertion as before the
+// move; had the promotion altered one byte, the gate would be red.
+//
+// The only behavioural difference in the moved code: `build()`'s check that
+// its own fixed metadata block is 100 bytes was a gtest `EXPECT_EQ` and is now
+// a thrown `std::logic_error` plus an out-param, because gma_data cannot link
+// gtest. `DbnEncoderTest.BuildWritesTheHundredByteFixedBlockInEveryVersion`
+// below is where that out-param is asserted, so the check is still seen.
 // ===========================================================================
 
-void putU8(std::vector<std::byte>& v, std::uint8_t x) { v.push_back(std::byte{x}); }
-
-template <typename T>
-void putLE(std::vector<std::byte>& v, T x, std::size_t n) {
-  const auto u = static_cast<std::uint64_t>(x);
-  for (std::size_t i = 0; i < n; ++i) {
-    putU8(v, static_cast<std::uint8_t>((u >> (8 * i)) & 0xFF));
-  }
-}
-void putU16(std::vector<std::byte>& v, std::uint16_t x) { putLE(v, x, 2); }
-void putU32(std::vector<std::byte>& v, std::uint32_t x) { putLE(v, x, 4); }
-void putU64(std::vector<std::byte>& v, std::uint64_t x) { putLE(v, x, 8); }
-void putI32(std::vector<std::byte>& v, std::int32_t x) {
-  putLE(v, static_cast<std::uint32_t>(x), 4);
-}
-void putI64(std::vector<std::byte>& v, std::int64_t x) {
-  putLE(v, static_cast<std::uint64_t>(x), 8);
-}
-void putZeros(std::vector<std::byte>& v, std::size_t n) {
-  for (std::size_t i = 0; i < n; ++i) putU8(v, 0);
-}
-// A fixed-width NUL-padded field, exactly as DBN writes one.
-void putCstr(std::vector<std::byte>& v, const std::string& s, std::size_t width) {
-  for (std::size_t i = 0; i < width; ++i) {
-    putU8(v, i < s.size() ? static_cast<std::uint8_t>(s[i]) : 0);
-  }
-}
-
-std::span<const std::byte> asSpan(const std::vector<std::byte>& v) {
-  return std::span<const std::byte>(v.data(), v.size());
-}
-
-// ===========================================================================
-// A minimal DBN writer. Mirrors the encoder in `databento/dbn`
-// (`rust/dbn/src/encode/dbn/sync.rs`) for the parts these tests exercise, and
-// `DbnEncoderTest.EncoderReproducesEveryFixtureByteForByte` is what proves it
-// mirrors it correctly.
-// ===========================================================================
-
-struct Interval {
-  std::uint32_t startDate;
-  std::uint32_t endDate;
-  std::string   symbol;
-};
-struct Mapping {
-  std::string           rawSymbol;
-  std::vector<Interval> intervals;
-};
-
-struct DbnWriter {
-  std::uint8_t  version       = 2;
-  std::string   dataset       = "GLBX.MDP3";
-  std::uint16_t schema        = 0;                 // 0xFFFF == mixed/null
-  std::uint64_t start         = 1609160400000000000ULL;
-  std::uint64_t end           = 1609200000000000000ULL;
-  std::uint64_t limit         = 0;
-  std::uint64_t recordCount   = dbn::kNullRecordCount;  // v1 only
-  std::uint8_t  stypeIn       = static_cast<std::uint8_t>(dbn::SType::RawSymbol);
-  std::uint8_t  stypeOut      = static_cast<std::uint8_t>(dbn::SType::InstrumentId);
-  std::uint8_t  tsOut         = 0;
-  std::uint16_t symbolCstrLen = 71;
-  std::vector<std::string> symbols  = {"ESH1"};
-  std::vector<std::string> partial;
-  std::vector<std::string> notFound;
-  std::vector<Mapping>     mappings = {
-      Mapping{"ESH1", {Interval{20201228, 20201229, "5482"}}}};
-  // Raw record bytes, appended by the helpers below.
-  std::vector<std::byte> records;
-  // Set to truncate/corrupt the declared metadata length for a refusal test.
-  std::optional<std::uint32_t> forceMetadataLen;
-  // Extra metadata tail bytes beyond the natural v3 alignment padding, and the
-  // byte value the whole tail is filled with. Both default to "exactly what a
-  // real encoder writes"; the refusal tests move them.
-  std::size_t  extraTail = 0;
-  std::uint8_t padByte   = 0;
-
-  std::size_t scl() const {
-    return version == 1 ? dbn::kSymbolCstrLenV1 : symbolCstrLen;
-  }
-
-  void addMbo(const dbn::MboMsg& m) {
-    putU8(records, static_cast<std::uint8_t>(dbn::kMboMsgLen / dbn::kLengthMultiplier));
-    putU8(records, static_cast<std::uint8_t>(dbn::RType::Mbo));
-    putU16(records, m.hd.publisherId);
-    putU32(records, m.hd.instrumentId);
-    putU64(records, m.hd.tsEvent);
-    putU64(records, m.orderId);
-    putI64(records, m.price);
-    putU32(records, m.size);
-    putU8(records, m.flags);
-    putU8(records, m.channelId);
-    putU8(records, static_cast<std::uint8_t>(m.action));
-    putU8(records, static_cast<std::uint8_t>(m.side));
-    putU64(records, m.tsRecv);
-    putI32(records, m.tsInDelta);
-    putU32(records, m.sequence);
-  }
-
-  void addTrade(const dbn::TradeMsg& m) {
-    putU8(records, static_cast<std::uint8_t>(dbn::kTradeMsgLen / dbn::kLengthMultiplier));
-    putU8(records, static_cast<std::uint8_t>(dbn::RType::Mbp0));
-    putU16(records, m.hd.publisherId);
-    putU32(records, m.hd.instrumentId);
-    putU64(records, m.hd.tsEvent);
-    putI64(records, m.price);
-    putU32(records, m.size);
-    putU8(records, static_cast<std::uint8_t>(m.action));
-    putU8(records, static_cast<std::uint8_t>(m.side));
-    putU8(records, m.flags);
-    putU8(records, m.depth);
-    putU64(records, m.tsRecv);
-    putI32(records, m.tsInDelta);
-    putU32(records, m.sequence);
-  }
-
-  // A header-only record of some other declared rtype, for the
-  // "every declared rtype is accepted" test.
-  void addOpaque(dbn::RType rtype, std::uint32_t instrumentId, std::uint64_t tsEvent) {
-    putU8(records,
-          static_cast<std::uint8_t>(dbn::kRecordHeaderLen / dbn::kLengthMultiplier));
-    putU8(records, static_cast<std::uint8_t>(rtype));
-    putU16(records, 1);
-    putU32(records, instrumentId);
-    putU64(records, tsEvent);
-  }
-
-  std::vector<std::byte> build() const {
-    std::vector<std::byte> var;
-    putU32(var, 0);  // layout_length — always 0 in v1..v3
-    const auto repeated = [&](const std::vector<std::string>& xs) {
-      putU32(var, static_cast<std::uint32_t>(xs.size()));
-      for (const auto& s : xs) putCstr(var, s, scl());
-    };
-    repeated(symbols);
-    repeated(partial);
-    repeated(notFound);
-    putU32(var, static_cast<std::uint32_t>(mappings.size()));
-    for (const auto& m : mappings) {
-      putCstr(var, m.rawSymbol, scl());
-      putU32(var, static_cast<std::uint32_t>(m.intervals.size()));
-      for (const auto& iv : m.intervals) {
-        putU32(var, iv.startDate);
-        putU32(var, iv.endDate);
-        putCstr(var, iv.symbol, scl());
-      }
-    }
-
-    const std::size_t needed = dbn::kFixedMetadataLen + var.size();
-    std::size_t pad = 0;
-    if (version >= dbn::kFirstAlignedVersion && needed % dbn::kMetadataAlignment != 0) {
-      pad = dbn::kMetadataAlignment - needed % dbn::kMetadataAlignment;
-    }
-
-    std::vector<std::byte> out;
-    putU8(out, 'D');
-    putU8(out, 'B');
-    putU8(out, 'N');
-    putU8(out, version);
-    const std::size_t tail = pad + extraTail;
-    putU32(out,
-           forceMetadataLen.value_or(static_cast<std::uint32_t>(needed + tail)));
-
-    const std::size_t fixedStart = out.size();
-    putCstr(out, dataset, dbn::kDatasetCstrLen);
-    putU16(out, schema);
-    putU64(out, start);
-    putU64(out, end);
-    putU64(out, limit);
-    if (version == 1) putU64(out, recordCount);
-    putU8(out, stypeIn);
-    putU8(out, stypeOut);
-    putU8(out, tsOut);
-    if (version > 1) putU16(out, symbolCstrLen);
-    putZeros(out, version == 1 ? dbn::kReservedLenV1 : dbn::kReservedLen);
-    EXPECT_EQ(out.size() - fixedStart, dbn::kFixedMetadataLen)
-        << "the writer's own fixed metadata block is the wrong size";
-
-    out.insert(out.end(), var.begin(), var.end());
-    for (std::size_t i = 0; i < tail; ++i) putU8(out, padByte);
-    out.insert(out.end(), records.begin(), records.end());
-    return out;
-  }
-};
+using dbn::enc::DbnWriter;
+using dbn::enc::Interval;
+using dbn::enc::Mapping;
+using dbn::enc::asSpan;
+using dbn::enc::putCstr;
+using dbn::enc::putI32;
+using dbn::enc::putI64;
+using dbn::enc::putU16;
+using dbn::enc::putU32;
+using dbn::enc::putU64;
+using dbn::enc::putU8;
+using dbn::enc::putZeros;
 
 // ===========================================================================
 // Fixtures
@@ -405,6 +256,30 @@ TEST(DbnEncoderTest, EncoderReproducesEveryFixtureByteForByte) {
                 static_cast<unsigned>(std::to_integer<std::uint8_t>(want[i])))
           << "byte " << i << " differs — the DBN layout in DatabentoAdapter.hpp, or "
              "the values in PROVENANCE.md, are wrong";
+    }
+  }
+}
+
+// The fixed metadata block is 100 bytes in EVERY DBN version and what fills it
+// differs per version (v1 spends 8 bytes on `record_count` that v2+ spend on
+// `symbol_cstr_len` plus six more reserved bytes). A per-version field list
+// that does not add up to 100 shifts every subsequent byte of the file — the
+// same failure mode as reading records at a 7-byte offset.
+//
+// Inside the encoder this is a thrown `std::logic_error`, because gma_data
+// cannot link gtest. THIS is where the check is observed: `build()`'s
+// out-param reports what it actually wrote, and the assertion is made here.
+// Without this test the promotion would have moved a gtest assertion into a
+// throw nobody ever looks at.
+TEST(DbnEncoderTest, BuildWritesTheHundredByteFixedBlockInEveryVersion) {
+  for (std::uint8_t version = dbn::kMinVersion; version <= dbn::kMaxVersion; ++version) {
+    SCOPED_TRACE("DBN v" + std::to_string(static_cast<unsigned>(version)));
+    for (const bool mbo : {true, false}) {
+      std::size_t fixedLen = 0;
+      const auto bytes = fixtureWriter(version, mbo).build(&fixedLen);
+      EXPECT_EQ(fixedLen, dbn::kFixedMetadataLen);
+      EXPECT_GT(bytes.size(), dbn::kPrefixLen + dbn::kMetadataLenLen +
+                                  dbn::kFixedMetadataLen);
     }
   }
 }
