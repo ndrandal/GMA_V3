@@ -1073,7 +1073,7 @@ TEST(DatabentoCsvAntiVacuity, EveryCaseInThisFileIsRegistered) {
       found += suite->total_test_count();
     }
   }
-  EXPECT_EQ(found, 44) << "the DatabentoCsv* suites in this file lost or gained a "
+  EXPECT_EQ(found, 43) << "the DatabentoCsv* suites in this file lost or gained a "
                           "case; update the number deliberately rather than "
                           "letting the count drift";
 }
