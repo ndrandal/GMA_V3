@@ -215,8 +215,8 @@ int cmdIngest(const Args& a, bool fromDbnOnly) {
   }
   const auto& rep = *res;
   printTarget(rep.target);
-  std::cout << "session_id : derived PER KIND from (dataset | schema | job_id) — "
-               "see the ruling below\n";
+  std::cout << "session_id : FNV-1a-32 of each retained .dbn — see the ruling "
+               "below\n";
   for (const auto& k : rep.kinds) printKind(k);
 
   std::cout << "\nsymbology rows written : " << rep.symbologyRows << "\n";
