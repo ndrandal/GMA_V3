@@ -93,6 +93,7 @@ Completeness isComplete(const std::vector<IngestWindowRow>& rows,
       ++v.survived;
     }
   }
+  v.survivingWindows = w;
   v.covered = mergeIntervals(std::move(w));
 
   // ---- step 3: coverage of the REQUEST, not of a row ---------------------

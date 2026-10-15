@@ -44,6 +44,10 @@ add_library(gma_data STATIC
   "${CMAKE_CURRENT_SOURCE_DIR}/src/DbnEncoder.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/include/gma/data/DbnEncoder.hpp"
   # ENC-1483: the ingest job.
+  # Verdict first, because everything below classifies its refusals through it:
+  # a finding (exit 1) is not an inability to run (exit 2).
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/Verdict.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/gma/data/Verdict.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/DatabentoCsv.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/include/gma/data/DatabentoCsv.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/ClickHouseHttp.cpp"

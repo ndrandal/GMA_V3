@@ -40,6 +40,7 @@
 #include "gma/data/ClickHouseHttp.hpp"
 #include "gma/data/DatabentoCsv.hpp"
 #include "gma/data/IngestWindows.hpp"
+#include "gma/data/Verdict.hpp"
 
 #include <arrow/result.h>
 #include <arrow/status.h>
@@ -156,8 +157,47 @@ extern const char* const kSessionIdRuling;
 extern const char* const kGapsNote;
 
 // ---------------------------------------------------------------------------
+// D6's baseline must never be replaced by bytes the adapter refuses.
+// ---------------------------------------------------------------------------
+//
+// ⚠ CODE-REVIEW FINDING #3, THE WORST OF THE REVIEW, AND IT DESTROYED THE ONE
+// THING D6 EXISTS TO PROTECT.
+//
+// The first version ordered the work transcode -> `retain` -> read back ->
+// decode, so the retained `.dbn` — the file D5's re-ingest reloads FROM, and
+// the only copy of the pull that does not cost Databento plan allowance — was
+// overwritten BEFORE anything had established that the new bytes decode.
+// Reproduced against the binary: `--dbn-version 7` replaced
+// `xnas-itch-20220610.trades.dbn` with a file the adapter refuses (an unknown
+// DBN version is refused, never guessed — correctly) and only THEN failed,
+// after which `gma_ingest reload`, whose entire premise is "a reload must
+// reload FROM something", failed permanently on that file. The surviving files
+// were intact only because a later clean run regenerated them: luck about
+// timing, not a property of the design.
+//
+// So the order is **decode, then retain**. This function proves the bytes
+// decode through the real adapter first and writes them only if they do, which
+// makes the retained file's invariant "every byte of this was accepted by the
+// decoder that will read it back".
+//
+// It is a named function rather than two reordered statements so that the
+// ordering itself is unit-testable without a ClickHouse — see
+// `IngestRetainOnlyIfDecodable` in data/tests/DatabentoCsvTest.cpp, which
+// asserts an existing good baseline SURVIVES an attempt to replace it with
+// undecodable bytes. A reordering with no test is a reordering the next edit
+// undoes.
+arrow::Result<csv::RetentionResult> retainOnlyIfDecodable(
+    const std::string& path, const std::vector<std::byte>& bytes);
+
+// ---------------------------------------------------------------------------
 // Run it.
 // ---------------------------------------------------------------------------
+//
+// EXIT-CODE CLASSIFICATION: a non-OK status from here is tagged by
+// `gma::data::asFinding` when it is a FINDING about the data (exit 1) and left
+// untagged when the job COULD NOT RUN (exit 2). `gma::data::exitCodeFor` is the
+// only thing `main` needs. See Verdict.hpp for why the classification is
+// explicit at the refusal site rather than inferred from a status code.
 arrow::Result<Report> run(const Options& opts);
 
 // ---------------------------------------------------------------------------

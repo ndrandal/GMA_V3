@@ -5,6 +5,9 @@
 #include "gma/data/DatabentoCsv.hpp"
 
 #include "gma/data/DbnEncoder.hpp"
+#include "gma/data/Verdict.hpp"
+
+#include <unistd.h>
 
 #include <rapidjson/document.h>
 
@@ -119,15 +122,51 @@ struct Common {
       seen;  // instrument_id -> raw_symbol -> (firstDay, lastDay)
   std::map<char, std::size_t> actions;
 
+  // ⚠ CODE-REVIEW FINDING #10, AND IT SAT DIRECTLY UNDER THE COMPLETENESS
+  // CLAIM. `deliveredEnd()` publishes `lastTsEvent` as the EXCLUSIVE end written
+  // to `gma.ingest_windows`, and the justification for taking the last record's
+  // timestamp was "the vendor stops at `limit` records in time order" — an
+  // UNCHECKED ASSUMPTION ABOUT THE INPUT. If one row arrives out of order, the
+  // last row's `ts_event` is not the maximum, `recordsAtLastTsEvent` resets and
+  // miscounts the final group, and the recorded window claims coverage it does
+  // not have. An unasserted assumption underneath a completeness claim is the
+  // same shape of defect as everything else `gma.ingest_windows` exists to stop.
+  //
+  // So: the maximum is tracked independently of the last row, monotonicity is
+  // ASSERTED, and a violation is a refusal rather than a smaller number. The
+  // two are then cross-checked in `finish()` — under monotonicity they must be
+  // equal, and if they ever are not, the check that was supposed to guarantee it
+  // is itself broken.
+  std::uint64_t maxTsEvent = 0;
+  std::size_t   recordsAtMaxTsEvent = 0;
+  bool          sawDescent = false;
+  std::uint64_t descentPrev = 0;
+  std::uint64_t descentAt = 0;
+  std::size_t   descentLine = 0;
+
   void note(std::uint64_t tsEvent, std::uint32_t instrumentId,
             std::string_view symbol, char action, std::uint32_t sequence,
-            std::int64_t price, std::uint64_t tsRecv, std::int32_t tsInDelta) {
-    if (out.records == 0) out.firstTsEvent = tsEvent;
+            std::int64_t price, std::uint64_t tsRecv, std::int32_t tsInDelta,
+            std::size_t lineNo) {
+    if (out.records == 0) {
+      out.firstTsEvent = tsEvent;
+    } else if (tsEvent < out.lastTsEvent && !sawDescent) {
+      sawDescent  = true;
+      descentPrev = out.lastTsEvent;
+      descentAt   = tsEvent;
+      descentLine = lineNo;
+    }
     if (tsEvent == out.lastTsEvent) {
       ++out.recordsAtLastTsEvent;
     } else {
       out.lastTsEvent = tsEvent;
       out.recordsAtLastTsEvent = 1;
+    }
+    if (out.records == 0 || tsEvent > maxTsEvent) {
+      maxTsEvent          = tsEvent;
+      recordsAtMaxTsEvent = 1;
+    } else if (tsEvent == maxTsEvent) {
+      ++recordsAtMaxTsEvent;
     }
     ++out.records;
     ++actions[action];
@@ -148,6 +187,31 @@ struct Common {
   }
 
   arrow::Status finish(const PullMetadata& md) {
+    // THE ASSERTION #10 ASKED FOR, and it fails loudly rather than quietly
+    // publishing a smaller window.
+    if (sawDescent) {
+      return asFinding(arrow::Status::Invalid(
+          "ts_event went BACKWARDS at line ", descentLine, ": ", descentPrev,
+          " -> ", descentAt,
+          ". The recorded window's exclusive end is the LAST record's ts_event, "
+          "and that is only the delivered end if the vendor emits in time order "
+          "- which this file does not. Publishing it anyway would write a "
+          "`gma.ingest_windows` claim that is short at one end and silently "
+          "wrong at the other (SPEC D11). Refused rather than guessed; if "
+          "out-of-order delivery is real for this dataset, the window end has "
+          "to become the running maximum AND the completeness claim has to say "
+          "which it is."));
+    }
+    // Cross-check: under monotonicity the last record IS the maximum. If these
+    // ever disagree, the check above is broken rather than the data.
+    if (out.lastTsEvent != maxTsEvent ||
+        out.recordsAtLastTsEvent != recordsAtMaxTsEvent) {
+      return arrow::Status::UnknownError(
+          "internal: the monotonicity check passed but the last ts_event (",
+          out.lastTsEvent, ", ", out.recordsAtLastTsEvent,
+          " record(s)) is not the maximum (", maxTsEvent, ", ",
+          recordsAtMaxTsEvent, " record(s))");
+    }
     out.truncatedByLimit = md.limit != 0 && out.records == md.limit;
     for (const auto& [action, n] : actions) out.actionCounts.emplace_back(action, n);
     for (const auto& [id, bySym] : seen) {
@@ -160,7 +224,9 @@ struct Common {
               "symbology section this builds is a half-open interval per "
               "ticker; two tickers for one id on overlapping days cannot be "
               "expressed and must not be collapsed.";
-        return arrow::Status::Invalid(os.str());
+        // A FINDING (exit 1), not a could-not-run: the file was read fine and
+        // what it says is wrong. See Verdict.hpp.
+        return asFinding(arrow::Status::Invalid(os.str()));
       }
       const auto& [sym, days] = *bySym.begin();
       out.mappings.push_back(
@@ -416,7 +482,7 @@ arrow::Result<Transcoded> transcodeMboCsv(const std::string& csvPath,
     }
 
     common.note(m.hd.tsEvent, m.hd.instrumentId, f[cols.at("symbol")], m.action,
-                m.sequence, m.price, m.tsRecv, m.tsInDelta);
+                m.sequence, m.price, m.tsRecv, m.tsInDelta, lineNo);
     msgs.push_back(m);
   }
 
@@ -509,7 +575,7 @@ arrow::Result<Transcoded> transcodeTradesCsv(const std::string& csvPath,
     }
 
     common.note(m.hd.tsEvent, m.hd.instrumentId, f[cols.at("symbol")], m.action,
-                m.sequence, m.price, m.tsRecv, m.tsInDelta);
+                m.sequence, m.price, m.tsRecv, m.tsInDelta, lineNo);
     msgs.push_back(m);
   }
 
@@ -569,17 +635,51 @@ arrow::Result<RetentionResult> retain(const std::string& path,
   // half-written file that `ingest` would later read as the retained raw. D6
   // makes this file the thing L1 is rebuilt FROM; a torn one is worse than an
   // absent one.
-  const std::string tmp = path + ".partial";
-  {
-    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-    if (!out) return arrow::Status::IOError("cannot write ", tmp);
-    out.write(reinterpret_cast<const char*>(bytes.data()),
-              static_cast<std::streamsize>(bytes.size()));
-    if (!out) return arrow::Status::IOError("short write to ", tmp);
-  }
-  if (std::rename(tmp.c_str(), path.c_str()) != 0) {
-    return arrow::Status::IOError("cannot rename ", tmp, " -> ", path, ": ",
+  //
+  // ⚠ THE TEMP NAME IS UNIQUE PER PROCESS, AND THAT IS NOT PEDANTRY
+  // (code-review finding #9). The data root is `~/market-data/...` —
+  // deliberately OUTSIDE every git working tree, which makes it the one
+  // directory EVERY parallel session shares, and this workspace runs many
+  // sessions by design. With a fixed `<path>.partial`, two runs interleave
+  // their writes into one file and both `rename()` it over the real `.dbn`:
+  // the torn retained raw this atomic rename is here to prevent, produced by
+  // the rename itself. That is the ENC-1183/ENC-1185 shared-scratchpad hazard
+  // (one agent's backgrounded job ran the other's script) in a new place, and
+  // the mitigation recorded there is the same one used here: never a bare
+  // shared name. `mkstemp` rather than pid-plus-counter because it CREATES the
+  // file atomically, so two processes cannot even agree on a name by accident.
+  std::string tmpl = path + ".partial.XXXXXX";
+  const int fd = ::mkstemp(tmpl.data());
+  if (fd < 0) {
+    return arrow::Status::IOError("cannot create a temporary beside ", path, ": ",
                                   std::strerror(errno));
+  }
+  {
+    bool wrote = true;
+    std::size_t off = 0;
+    while (off < bytes.size()) {
+      const ssize_t n = ::write(fd, bytes.data() + off, bytes.size() - off);
+      if (n <= 0) {
+        wrote = false;
+        break;
+      }
+      off += static_cast<std::size_t>(n);
+    }
+    // fsync before the rename: the rename is only atomic with respect to the
+    // DIRECTORY entry, and a crash between write and flush would publish a
+    // name pointing at a short file.
+    if (wrote && ::fsync(fd) != 0) wrote = false;
+    ::close(fd);
+    if (!wrote) {
+      ::unlink(tmpl.c_str());
+      return arrow::Status::IOError("short write to ", tmpl, ": ",
+                                    std::strerror(errno));
+    }
+  }
+  if (std::rename(tmpl.c_str(), path.c_str()) != 0) {
+    const std::string why = std::strerror(errno);
+    ::unlink(tmpl.c_str());
+    return arrow::Status::IOError("cannot rename ", tmpl, " -> ", path, ": ", why);
   }
   r.changed = true;
   return r;

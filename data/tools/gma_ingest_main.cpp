@@ -18,10 +18,13 @@
 
 #include "gma/data/IngestJob.hpp"
 
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <sstream>
+#include <vector>
 #include <optional>
 #include <string>
 #include <vector>
@@ -90,6 +93,44 @@ bool parseArgs(int argc, char** argv, Args& a) {
       }
       return argv[++i];
     };
+    // ⚠ CODE-REVIEW FINDINGS #2 AND #4, which are one bug with two volumes.
+    //
+    // Both numeric flags went through an unchecked `strtoul`, which returns 0
+    // on anything unparseable and reports nothing:
+    //
+    //   #2 LOUD: `--dbn-version notanumber` became version 0, which
+    //      `DbnWriter::build()` rejects by THROWING `std::logic_error` out of
+    //      the `arrow::Result` path with nothing to catch it. Reproduced:
+    //      exit 134. **A crash is not one of this tool's three documented exit
+    //      codes**, and an abort skips every refusal path including the
+    //      `state=2` write.
+    //   #4 QUIET, AND WORSE: `--session-id notanumber` became 0, which this
+    //      tool defines as "derive it", so the run proceeded under the derived
+    //      FNV session, exited 0, and said nothing. The comment directly above
+    //      this function condemns precisely that shape — "a tool that accepts
+    //      `--session_id 7` and silently ingests under a derived session is the
+    //      same shape of lie".
+    //
+    // So both parse exactly or exit 2. `--dbn-version` is additionally bounded
+    // by the versions the DECODER accepts, because emitting a version the
+    // adapter refuses is how finding #3 destroyed a retained D6 baseline.
+    const auto num = [&](const char* name, auto lo, auto hi) -> std::uint64_t {
+      const char* text = next(name);
+      std::uint64_t v = 0;
+      const char* last = text + std::strlen(text);
+      const auto r = std::from_chars(text, last, v);
+      if (r.ec != std::errc{} || r.ptr != last) {
+        std::cerr << "gma_ingest: " << name << " must be an integer (got \""
+                  << text << "\")\n";
+        std::exit(kCouldNotRun);
+      }
+      if (v < static_cast<std::uint64_t>(lo) || v > static_cast<std::uint64_t>(hi)) {
+        std::cerr << "gma_ingest: " << name << " must be in [" << +lo << ", " << +hi
+                  << "] (got " << v << ")\n";
+        std::exit(kCouldNotRun);
+      }
+      return v;
+    };
     if (f == "--url") {
       a.url = next("--url");
     } else if (f == "--data-root") {
@@ -97,9 +138,14 @@ bool parseArgs(int argc, char** argv, Args& a) {
     } else if (f == "--symbol") {
       a.symbol = next("--symbol");
     } else if (f == "--session-id") {
-      a.sessionId = static_cast<std::uint32_t>(std::strtoul(next("--session-id"), nullptr, 10));
+      // 1.. : 0 is reserved as "derive from the retained file", and accepting
+      // it here would make an explicit --session-id 0 indistinguishable from
+      // not passing the flag — the #4 ambiguity, re-created deliberately.
+      a.sessionId = static_cast<std::uint32_t>(
+          num("--session-id", 1u, std::numeric_limits<std::uint32_t>::max()));
     } else if (f == "--dbn-version") {
-      a.dbnVersion = static_cast<std::uint8_t>(std::strtoul(next("--dbn-version"), nullptr, 10));
+      a.dbnVersion = static_cast<std::uint8_t>(
+          num("--dbn-version", gma::data::dbn::kMinVersion, gma::data::dbn::kMaxVersion));
     } else if (f == "--no-insert") {
       a.noInsert = true;
     } else if (f == "--force-reencode") {
@@ -116,6 +162,44 @@ bool parseArgs(int argc, char** argv, Args& a) {
 }
 
 using namespace gma::data;
+
+// Guarded integer parse for server text (finding #8). `std::stoll` throws, and
+// nothing on this path is prepared for an exception.
+bool parseLL(const std::string& text, long long& out) {
+  if (text.empty()) return false;
+  const char* last = text.data() + text.size();
+  const auto r = std::from_chars(text.data(), last, out);
+  return r.ec == std::errc{} && r.ptr == last;
+}
+
+// AN INDEPENDENT ANSWER to "is [from, to) inside the union of `held`?", written
+// for finding #14 so the probes compare two implementations instead of pinning
+// a constant.
+//
+// Deliberately a DIFFERENT ALGORITHM from `gma::data::isComplete`'s cursor
+// walk: it subtracts each held interval from the request and asks whether
+// anything is left. Same answer by a different route, which is the only version
+// of this that is worth running — a copy of the cursor walk would agree with a
+// bug in the cursor walk.
+bool expectedCovered(const std::vector<Interval>& held, std::int64_t from,
+                     std::int64_t to) {
+  if (to <= from) return false;  // matches isComplete: not trivially complete
+  std::vector<Interval> remaining{Interval{from, to}};
+  for (const auto& h : held) {
+    std::vector<Interval> next;
+    for (const auto& r : remaining) {
+      if (h.toNs <= r.fromNs || h.fromNs >= r.toNs) {
+        next.push_back(r);  // disjoint
+        continue;
+      }
+      if (h.fromNs > r.fromNs) next.push_back(Interval{r.fromNs, h.fromNs});
+      if (h.toNs < r.toNs) next.push_back(Interval{h.toNs, r.toNs});
+    }
+    remaining = std::move(next);
+    if (remaining.empty()) return true;
+  }
+  return remaining.empty();
+}
 
 void printTarget(const ch::Target& t) {
   std::cout << "clickhouse : " << t.url << "   (" << t.how << ")\n";
@@ -211,8 +295,22 @@ int cmdIngest(const Args& a, bool fromDbnOnly) {
 
   auto res = ingest::run(o);
   if (!res.ok()) {
-    std::cerr << "gma_ingest: " << res.status().ToString() << "\n";
-    return kCouldNotRun;
+    // ⚠ CODE-REVIEW FINDING #1. This was an unconditional `return
+    // kCouldNotRun`, so every one of the job's data refusals — a round-trip
+    // mismatch, a retained DBN that would not read back, two tickers for one
+    // `instrument_id`, an empty delivered window — reported as "the gate never
+    // ran". That is the conflation this file's own header warns about, inverted,
+    // and it is the worse direction: a sweep that reads 2 as "environment,
+    // retry later" throws the finding away. The classification is made at each
+    // refusal site and carried on the status; see Verdict.hpp.
+    const int code = exitCodeFor(res.status());
+    std::cerr << "gma_ingest: " << res.status().ToString() << "\n"
+              << "gma_ingest: exiting " << code << " — "
+              << (code == kFinding
+                      ? "A FINDING: the job ran and what it found is wrong."
+                      : "COULD NOT RUN: no verdict was reached.")
+              << "\n";
+    return code;
   }
   const auto& rep = *res;
   printTarget(rep.target);
@@ -295,25 +393,23 @@ int cmdVerify(const Args& a) {
       const char*  name;
       std::int64_t from;
       std::int64_t to;
-      bool expectComplete;
     };
     const Probe probes[] = {
-        // THE REFUSAL THE TICKET ASKS FOR: the full UTC trading day.
-        {"the FULL trading day", dayStart, dayStart + kDayNs, false},
-        // And the sharper one: the window the pull itself REQUESTED. Even that
-        // is not covered, because `limit: 1000` truncated the delivery.
-        {"the REQUESTED 90-minute window [12:30, 14:00)",
-         dayStart + 45000000000000LL, dayStart + 50400000000000LL, false},
+        // The request the ticket asks about: the full UTC trading day.
+        {"the FULL trading day", dayStart, dayStart + kDayNs},
+        // And the sharper one: the window the pull itself REQUESTED.
+        {"the window the pull REQUESTED [12:30, 14:00)",
+         dayStart + 45000000000000LL, dayStart + 50400000000000LL},
         // Exactly what is held — the boundary must be exact in both directions.
-        {"exactly the recorded window", held.fromNs, held.toNs, true},
+        {"exactly the recorded window", held.fromNs, held.toNs},
         // Strictly inside.
         {"strictly inside the recorded window", held.fromNs + 1,
-         held.toNs - 1 > held.fromNs + 1 ? held.toNs - 1 : held.toNs, true},
-        // One nanosecond past the end: the smallest possible overrun must fail.
-        {"one nanosecond past the recorded end", held.toNs - 1, held.toNs + 1, false},
+         held.toNs - 1 > held.fromNs + 1 ? held.toNs - 1 : held.toNs},
+        // One nanosecond past the end: the smallest possible overrun.
+        {"one nanosecond past the recorded end", held.toNs - 1, held.toNs + 1},
         // One nanosecond before the start.
-        {"one nanosecond before the recorded start", held.fromNs - 1, held.fromNs + 1,
-         false},
+        {"one nanosecond before the recorded start", held.fromNs - 1,
+         held.fromNs + 1},
     };
 
     for (const auto& p : probes) {
@@ -322,11 +418,26 @@ int cmdVerify(const Args& a) {
         std::cerr << "gma_ingest: " << v.status().ToString() << "\n";
         return kCouldNotRun;
       }
-      const bool pass = v->complete == p.expectComplete;
+      // ⚠ CODE-REVIEW FINDING #14: THE EXPECTATION IS DERIVED, NOT PINNED.
+      //
+      // It used to be a hardcoded `expectComplete=false` for the two headline
+      // probes, which encoded a property of THIS TRUNCATED SAMPLE as a property
+      // of the system: once a full day is actually ingested — the intended end
+      // state — `verify` would have reported the full-day probe as [FAIL] and
+      // exited 1. **A gate that fails when the system improves is not a gate.**
+      //
+      // `expectedCovered` computes the answer from the held set by an
+      // independently written algorithm (subtract-and-check-empty rather than
+      // the library's cursor walk), so each probe asserts that TWO
+      // implementations of "is this request inside the union of held windows"
+      // agree — which is a real cross-check and adapts by construction.
+      const bool expected = expectedCovered(wide->covered, p.from, p.to);
+      const bool pass = v->complete == expected;
       std::cout << (pass ? "  [ok]   " : "  [FAIL] ") << p.name << "\n"
                 << "         request " << ingest::formatWindow(p.from, p.to) << "\n"
                 << "         isComplete -> " << (v->complete ? "COMPLETE" : "REFUSED")
-                << " (expected " << (p.expectComplete ? "COMPLETE" : "REFUSED") << ")";
+                << ", independently derived expectation "
+                << (expected ? "COMPLETE" : "REFUSED");
       if (v->gap.has_value()) {
         std::cout << ", first uncovered "
                   << ingest::formatWindow(v->gap->fromNs, v->gap->toNs);
@@ -349,40 +460,76 @@ int cmdVerify(const Args& a) {
     // A COUNT CANNOT ESTABLISH COMPLETENESS. IT CAN REFUTE A CLAIM.
     //
     // D11 forbids inferring completeness from row counts, and this does not do
-    // that — the verdicts above came entirely from the read rule. But the
-    // implication runs one way only: a window whose newest row says
-    // `state = 1` with `rows_inserted = N > 0` and which now holds ZERO rows is
-    // not "quiet", it is a LIE, and the arithmetic is sound in that direction.
+    // that — every verdict above came from the read rule. But the implication
+    // runs one way: a window whose newest row says `state = 1` with
+    // `rows_inserted = N > 0` and which now holds ZERO rows is not "quiet", it
+    // is a LIE, and the arithmetic is sound in that direction.
     //
-    // This exists because the hazard was MEASURED on this ingest. The DDL's
-    // invariant block makes maintaining the table a code obligation of the
-    // ingest job: when the job drops a partition it writes a state=3 or
-    // state=0 row first. A `DROP PARTITION` typed at the server by hand
-    // bypasses that entirely — and when it was, `isComplete` for the in-window
-    // request returned COMPLETE over an empty table, with every probe above
-    // still reading [ok] because the rule was behaving correctly over a table
-    // that had been lied to. `gma_ingest reload` restored both. There is no way
-    // for the schema to prevent it (no foreign key, no trigger), so the next
-    // best thing is for the verifier to notice.
-    for (const auto& c : wide->covered) {
+    // This exists because the hazard was MEASURED. The DDL's invariant block
+    // makes maintaining the table a code obligation of the ingest job: when the
+    // job drops a partition it writes a `state=3`/`state=0` row first. A
+    // `DROP PARTITION` typed at the server by hand bypasses that entirely — and
+    // when it was, `isComplete` for the in-window request returned COMPLETE
+    // over an empty table, with every probe above still [ok] because the rule
+    // was behaving correctly over a table that had been lied to. There is no
+    // foreign key and no trigger that can prevent it, so the next best thing is
+    // for the verifier to notice.
+    //
+    // ⚠ CODE-REVIEW FINDING #7: IT IS SCOPED TO ONE RECORDED WINDOW NOW. The
+    // first version compared a window-INDEPENDENT `max(rows_inserted)` over the
+    // whole (symbol, kind) against the count inside one MERGED interval,
+    // ignoring both which window it was looking at and the newest-row
+    // resolution. With two disjoint covered intervals that prints a [FAIL]
+    // about a window that claimed nothing. So it iterates
+    // `survivingWindows` — the UNMERGED windows that the read rule already
+    // resolved to `state = 1` — and asks the table about exactly that
+    // `(from_ts, to_ts)`.
+    for (const auto& w : wide->survivingWindows) {
       std::ostringstream q;
-      q << "SELECT max(rows_inserted) FROM gma.ingest_windows WHERE symbol = '"
-        << a.symbol << "' AND kind = '" << k.kind << "' AND state = 1";
-      auto claimed = client.scalar(q.str());
-      if (!claimed.ok()) {
-        std::cerr << "gma_ingest: " << claimed.status().ToString() << "\n";
+      q << "SELECT rows_inserted, toUnixTimestamp64Milli(updated_at) "
+           "FROM gma.ingest_windows WHERE symbol = "
+        << ch::sqlQuote(a.symbol) << " AND kind = " << ch::sqlQuote(k.kind)
+        << " AND from_ts = fromUnixTimestamp64Nano(toInt64(" << w.fromNs
+        << "), 'UTC') AND to_ts = fromUnixTimestamp64Nano(toInt64(" << w.toNs
+        << "), 'UTC') AND state = 1 FORMAT TabSeparated";
+      auto rows = client.select(q.str());
+      if (!rows.ok()) {
+        std::cerr << "gma_ingest: " << rows.status().ToString() << "\n";
         return kCouldNotRun;
       }
-      auto actual = ingest::rowCount(client, k.table, a.symbol, c.fromNs, c.toNs);
+      // Newest state=1 row for THIS window, resolved in C++ like everything
+      // else on this path. Guarded parsing (finding #8): `\N` or an empty field
+      // from the server must not throw out of a function that reports status.
+      long long claimedN = 0;
+      long long newest = -1;
+      for (const auto& r : *rows) {
+        if (r.size() != 2) {
+          std::cerr << "gma_ingest: gma.ingest_windows row has " << r.size()
+                    << " field(s), expected 2\n";
+          return kCouldNotRun;
+        }
+        long long inserted = 0;
+        long long updated = 0;
+        if (!parseLL(r[0], inserted) || !parseLL(r[1], updated)) {
+          std::cerr << "gma_ingest: ClickHouse returned a non-integer for "
+                       "rows_inserted/updated_at (\""
+                    << r[0] << "\", \"" << r[1] << "\")\n";
+          return kCouldNotRun;
+        }
+        if (updated > newest) {
+          newest = updated;
+          claimedN = inserted;
+        }
+      }
+      auto actual = ingest::rowCount(client, k.table, a.symbol, w.fromNs, w.toNs);
       if (!actual.ok()) {
         std::cerr << "gma_ingest: " << actual.status().ToString() << "\n";
         return kCouldNotRun;
       }
-      const long long claimedN = std::stoll(*claimed);
       if (claimedN > 0 && *actual == 0) {
-        std::cout << "  [FAIL] a state=1 window claiming " << claimedN
-                  << " inserted row(s) holds ZERO rows in "
-                  << ingest::formatWindow(c.fromNs, c.toNs) << ".\n"
+        std::cout << "  [FAIL] the state=1 window "
+                  << ingest::formatWindow(w.fromNs, w.toNs) << " claims "
+                  << claimedN << " inserted row(s) and holds ZERO.\n"
                      "         The read rule is behaving correctly over a table "
                      "that has been lied to — the usual\n"
                      "         cause is a DROP PARTITION that did not go through "
@@ -391,15 +538,17 @@ int cmdVerify(const Args& a) {
                      "does not). Run `gma_ingest reload`.\n";
         ++findings;
       } else {
-        std::cout << "  [ok]   the state=1 claim is not refuted by the data: "
-                  << *actual << " row(s) present, " << claimedN
-                  << " claimed inserted\n";
+        std::cout << "  [ok]   the state=1 claim on "
+                  << ingest::formatWindow(w.fromNs, w.toNs)
+                  << " is not refuted: " << *actual << " row(s) present, "
+                  << claimedN << " claimed inserted\n";
       }
     }
   }
 
   // Symbology, which is the other half of D7.
   std::cout << "\n================ gma.symbology ================\n";
+  // No interpolation here at all — the whole statement is a literal.
   auto sym = client.select(
       "SELECT dataset, instrument_id, raw_symbol, toString(valid_from), "
       "toString(valid_to), source_ref FROM gma.symbology FINAL ORDER BY "

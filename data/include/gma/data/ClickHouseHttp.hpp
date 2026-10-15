@@ -110,4 +110,24 @@ class Client {
 // subsequent column of that row by one.
 std::string tsvEscape(std::string_view s);
 
+// A SINGLE-QUOTED SQL STRING LITERAL, escaped — `sqlQuote("a'b")` is `'a\'b'`.
+//
+// Code-review finding #5, and the argument is the one `tsvEscape` already
+// makes one paragraph up, which makes its absence here the worse omission:
+// every `symbol`, `kind`, `source_ref`, `dataset` and `raw_symbol` was
+// concatenated straight between two quote characters. **These values are not
+// only CLI arguments** — `raw_symbol` and `dataset` come out of the vendor
+// DBN's symbology section and out of `metadata.json`, i.e. out of a file this
+// process did not write. And the CLI half was directly exploitable:
+// `verify --symbol "x' OR 1=1 --"` made the completeness read answer over
+// every symbol in the table, which in a tool whose entire job is to refuse a
+// query it cannot vouch for is the worst possible shape of bug.
+//
+// Escapes backslash and single-quote, which is what ClickHouse's string-literal
+// grammar needs. It does NOT attempt to validate that the value is a plausible
+// ticker: escaping is a property of the encoding and is always correct, while a
+// whitelist is a guess about the vendor's symbology that would reject a legal
+// symbol one day.
+std::string sqlQuote(std::string_view s);
+
 }  // namespace gma::data::ch
