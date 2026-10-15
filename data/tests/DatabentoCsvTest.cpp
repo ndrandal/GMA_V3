@@ -767,6 +767,73 @@ TEST(DatabentoCsvRetention, NoTempFileIsLeftBehindByARefusal) {
 }
 
 // ===========================================================================
+// ACTION 'N' ON A `trades` RECORD — code-review finding #11.
+// ===========================================================================
+
+TEST(DatabentoCsvTranscode, ATradesRecordWithActionNoneStillYieldsATick) {
+  const TempDir d;
+  // `onMbo` accepts `Action::None` and deliberately emits NO book row. `onTrade`
+  // emits a TickRecord for EVERY trades record whatever its action. The ingest
+  // job's round-trip built its expected multiset by excluding `N` for both
+  // schemas, so one `action='N'` row in a trades file made a valid ingest abort
+  // on a round-trip "mismatch" that was the expectation's bug.
+  //
+  // UNTRIGGERED ON THE REAL SAMPLE, and the near-miss is the point: its trades
+  // `action` column is 1000/1000 `T`. The 546 `N` values there are in `side`,
+  // a different column meaning "no side specified by the original source" —
+  // conflating the two is how this would have been dismissed as covered.
+  const auto p = d.file("x.csv", std::string(kTradesHeader) +
+                                     tradeRow(kT0, 'A', 100, 7, 5) +
+                                     tradeRow(kT0 + 1, 'N', 101, 8, 6));
+  // Rewrite the second row's ACTION (not its side) from 'T' to 'N'.
+  {
+    std::ifstream in(p, std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(in)),
+                           std::istreambuf_iterator<char>());
+    const auto nl = text.find('\n', text.find('\n') + 1);  // end of row 1
+    std::string out = text;
+    const auto at = out.find(",0,2,4242,T,", nl);
+    ASSERT_NE(at, std::string::npos);
+    out.replace(at, std::strlen(",0,2,4242,T,"), ",0,2,4242,N,");
+    std::ofstream w(p, std::ios::binary | std::ios::trunc);
+    w << out;
+  }
+  const auto t = transcodeTradesCsv(p, md("trades"));
+  ASSERT_TRUE(t.ok()) << t.status().ToString();
+  ASSERT_EQ(t->actionCounts.size(), 2u);
+
+  SymbolTable symbols;
+  SymbolTable venues;
+  DatabentoAdapter adapter(DatabentoAdapter::Config{}, symbols, venues);
+  ASSERT_TRUE(
+      adapter.feed(std::span<const std::byte>(t->dbn.data(), t->dbn.size())).ok());
+  ASSERT_TRUE(adapter.finish().ok());
+  EXPECT_EQ(adapter.trades().size(), 2u)
+      << "a trades record with action 'N' still produces a TickRecord, so the "
+         "round-trip expectation must NOT exclude it for this schema";
+  EXPECT_EQ(adapter.bookEvents().size(), 0u);
+}
+
+TEST(DatabentoCsvTranscode, ActionNoneOnAnMboRecordYieldsNoBookRow) {
+  const TempDir d;
+  // The other half, so the asymmetry the fix encodes is asserted in both
+  // directions rather than assumed.
+  const auto p = d.file("x.csv", std::string(kMboHeader) +
+                                     mboRow(kT0, 'A', 'B', 100, 10, 9, 5) +
+                                     mboRow(kT0 + 1, 'N', 'B', 101, 10, 10, 6));
+  const auto t = transcodeMboCsv(p, md("mbo"));
+  ASSERT_TRUE(t.ok()) << t.status().ToString();
+  SymbolTable symbols;
+  SymbolTable venues;
+  DatabentoAdapter adapter(DatabentoAdapter::Config{}, symbols, venues);
+  ASSERT_TRUE(
+      adapter.feed(std::span<const std::byte>(t->dbn.data(), t->dbn.size())).ok());
+  ASSERT_TRUE(adapter.finish().ok());
+  EXPECT_EQ(adapter.bookEvents().size(), 1u) << "the 'N' record emits nothing";
+  EXPECT_EQ(adapter.stats().actionNone, 1u);
+}
+
+// ===========================================================================
 // THE EXIT-CODE CLASSIFICATION — code-review finding #1.
 // ===========================================================================
 
@@ -847,7 +914,7 @@ TEST(DatabentoCsvAntiVacuity, EveryCaseInThisFileIsRegistered) {
       found += suite->total_test_count();
     }
   }
-  EXPECT_EQ(found, 36) << "the DatabentoCsv* suites in this file lost or gained a "
+  EXPECT_EQ(found, 38) << "the DatabentoCsv* suites in this file lost or gained a "
                           "case; update the number deliberately rather than "
                           "letting the count drift";
 }
