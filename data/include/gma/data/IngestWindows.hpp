@@ -85,6 +85,13 @@ struct Completeness {
   // state=1 — merged. Reported so a refusal can print what IS held, which is
   // the difference between "we have nothing" and "we have 68 seconds of it".
   std::vector<Interval> covered;
+  // The same set BEFORE merging: one entry per RECORDED window, exactly as
+  // `(from_ts, to_ts)` appears in the table. `covered` is what coverage is
+  // tested against; this is what a caller needs to ask the table a scoped
+  // question about one window — code-review finding #7 was a check that used
+  // the merged set and a table-wide aggregate, and so reported about a window
+  // that had claimed nothing.
+  std::vector<Interval> survivingWindows;
   // How many recorded windows were resolved, and how many of those survived.
   // A request that fails with `resolved > 0 && survived == 0` is a re-ingest
   // in flight; one that fails with `resolved == 0` was never ingested. Same
