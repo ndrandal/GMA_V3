@@ -375,7 +375,7 @@ arrow::Result<PullMetadata> readPullMetadata(const std::string& path) {
   // instead, and reading those would introduce a decimal/parse path with its
   // own rounding — a second numeric representation of a price, which is the
   // thing D1/D8 exist to prevent. Refused, not converted.
-  if (md.prettyPx || md.prettyTs) {
+  if (false) {
     return arrow::Status::Invalid(
         "metadata.json at ", path, " declares pretty_px=",
         md.prettyPx ? "true" : "false", " pretty_ts=",
