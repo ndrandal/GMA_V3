@@ -186,7 +186,7 @@ Resolve before the ticket that depends on each. None block the first slice.
 | **Q10** | Chart fill depth at scene-init: accept bounded attach-with-N-bars, or change the wire? *Recommend accept.* | embassy ticket |
 | **Q11** | Persist derived series as a cache? If yes, invalidation key is graph identity. | after B3 |
 | ~~**Q14**~~ | ~~Databento client library, or decode DBN directly?~~ **RESOLVED by T4 (ENC-1482): decode DBN ourselves.** See Q14 below. | — |
-| **Q15** | Confirm the planner **refuses** a graph reading `trades` + `book_events` for one symbol/window (D12) rather than reconciling. *Recommend refuse.* | the planner |
+| **Q15** | Confirm the planner **refuses** a graph reading `trades` + `book_events` for one symbol/window (D12) rather than reconciling. *Recommend refuse — and T5 measured the evidence: 157 of 157 `mbo` executions are also `trades` rows at the same `(ts_event, sequence)`.* | the planner |
 
 **Q14 — resolved by T4 (ENC-1482): we decode DBN ourselves; we do not link
 `databento-cpp`.** The deciding number is dependency weight, and it is larger than it looks.
@@ -243,9 +243,12 @@ memory":**
 below); whether `ob::Provider` consults `isStale` before serving `ob.*` (post-measurement).
 `book_events` sort-key uniqueness is **measured** — see T5's block. And one T4 added:
 
-- **Does a DBN `Fill` arrive with a separate `Cancel`/`Modify` carrying the resting order's
-  reduction?** DBN's own documentation says `Fill` "Does not affect the book", which implies
-  yes; `ItchAdapter` does the opposite because ITCH has no such separate message and
+- ~~**Does a DBN `Fill` arrive with a separate `Cancel`/`Modify` carrying the resting
+  order's reduction?**~~ **RESOLVED by T5 (ENC-1483) against real MBO: YES — 91 of 91, so
+  `fillReducesRestingOrder` stays `false`.** See T5's block below for the measurement. The
+  original statement of the question is kept because the hazard it names is permanent for any
+  future provider: DBN's own documentation says `Fill` "Does not affect the book", which
+  implies yes; `ItchAdapter` does the opposite because ITCH has no such separate message and
   `routeOrderExecuted` must apply the reduction itself. **Applying both double-reduces the
   order; applying neither leaves phantom size**, and the public sample fixtures contain only
   `Cancel` records so it cannot be measured from them. The adapter defaults to DBN's contract
