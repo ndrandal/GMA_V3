@@ -72,6 +72,7 @@ class TempDir {
     return p.string();
   }
   std::string at(const std::string& name) const { return (path_ / name).string(); }
+  std::string dir() const { return path_.string(); }
 
  private:
   std::filesystem::path path_;
@@ -834,6 +835,164 @@ TEST(DatabentoCsvTranscode, ActionNoneOnAnMboRecordYieldsNoBookRow) {
 }
 
 // ===========================================================================
+// THE INGEST JOB'S RAW HALF, DRIVEN DIRECTLY — no ClickHouse involved.
+//
+// `ingest::run` with `noInsert` resolves a target and constructs a client but
+// issues no query and returns before pass 2, so the whole raw half — metadata,
+// transcode, retain, decode, the round trip — is testable with no server at
+// all. That matters for finding #11: its fix lives in the job's round-trip
+// EXPECTATION, so a test of the adapter alone cannot reach it, and a
+// falsification sweep duly showed the adapter-level test staying green while
+// the job-level bug was reintroduced.
+// ===========================================================================
+
+// A complete fake data root: the filenames and metadata the job expects.
+// Invented rows only — no part of the licensed sample appears here.
+void writeFakeRoot(const TempDir& d, const std::string& tradesRows,
+                   const std::string& mboRows, std::uint64_t limit = 0) {
+  d.file("xnas-itch-20220610.trades.csv", std::string(kTradesHeader) + tradesRows);
+  d.file("xnas-itch-20220610.mbo.csv", std::string(kMboHeader) + mboRows);
+  for (const char* schema : {"mbo", "trades"}) {
+    d.file(std::string("metadata.") + schema + ".json",
+           std::string(R"({"version":1,"job_id":"FAKE","query":{)") +
+               R"("dataset":"XNAS.ITCH","schema":")" + schema +
+               R"(","symbols":["ZZZZ"],"stype_in":"raw_symbol",)" +
+               R"("stype_out":"instrument_id","start":1654864200000000000,)" +
+               R"("end":1654869600000000000,"limit":)" + std::to_string(limit) +
+               R"(,"encoding":"csv"},"customizations":{"pretty_px":false,)" +
+               R"("pretty_ts":false,"map_symbols":true}})");
+  }
+}
+
+ingest::Options fakeOptions(const TempDir& d) {
+  ingest::Options o;
+  o.dataRoot = d.dir();
+  o.noInsert = true;
+  // An explicit URL so target resolution cannot wander onto another worktree's
+  // port. Nothing connects to it on this path.
+  o.url = std::string("http://127.0.0.1:1/");
+  return o;
+}
+
+TEST(DatabentoCsvJob, ATradesRecordWithActionNoneDoesNotFailTheRoundTrip) {
+  const TempDir d;
+  // One trades row whose ACTION is 'N'. `onTrade` emits a TickRecord for it,
+  // so excluding `N` from the expected multiset (as the MBO path must) makes
+  // the round trip falsely fail and aborts a valid ingest.
+  const std::string tradesRows =
+      "1654864201000000013,1654864201000000000,0,2,4242,T,A,0,100,10,0,13,5,ZZZZ\n"
+      "1654864201000000014,1654864201000000001,0,2,4242,N,A,0,101,11,0,13,6,ZZZZ\n";
+  const std::string mboRows = mboRow(kT0, 'A', 'B', 100, 10, 9, 5);
+  writeFakeRoot(d, tradesRows, mboRows);
+
+  const auto rep = ingest::run(fakeOptions(d));
+  ASSERT_TRUE(rep.ok()) << rep.status().ToString();
+  ASSERT_EQ(rep->kinds.size(), 2u);
+  for (const auto& k : rep->kinds) {
+    EXPECT_TRUE(k.roundTripOk) << k.kind << ": " << k.roundTripNote;
+  }
+  // The trades kind produced TWO canonical rows from two records, one of which
+  // had action 'N' — which is the fact the expectation has to agree with.
+  for (const auto& k : rep->kinds) {
+    if (k.kind == "trades") {
+      EXPECT_EQ(k.csvRecords, 2u);
+      EXPECT_EQ(k.canonicalRows, 2u);
+    }
+  }
+}
+
+TEST(DatabentoCsvJob, AnMboActionNoneRecordProducesNoRowAndStillRoundTrips) {
+  const TempDir d;
+  // The mirror: an `N` on the MBO side emits nothing, so the expectation MUST
+  // exclude it there. Asserting both directions is what keeps the asymmetry
+  // from being "fixed" by making the two paths the same again.
+  writeFakeRoot(d,
+                "1654864201000000013,1654864201000000000,0,2,4242,T,A,0,100,10,0,13,5,ZZZZ\n",
+                mboRow(kT0, 'A', 'B', 100, 10, 9, 5) +
+                    mboRow(kT0 + 1, 'N', 'B', 101, 10, 10, 6));
+  const auto rep = ingest::run(fakeOptions(d));
+  ASSERT_TRUE(rep.ok()) << rep.status().ToString();
+  for (const auto& k : rep->kinds) {
+    EXPECT_TRUE(k.roundTripOk) << k.kind << ": " << k.roundTripNote;
+    if (k.kind == "book_events") {
+      EXPECT_EQ(k.csvRecords, 2u);
+      EXPECT_EQ(k.canonicalRows, 1u) << "the 'N' record emits no book row";
+    }
+  }
+}
+
+TEST(DatabentoCsvJob, TheRecordedWindowIsTheDeliveredOneNotTheRequestedOne) {
+  const TempDir d;
+  // `limit: 2` with exactly 2 records delivered — the real sample's shape in
+  // miniature, driven through the JOB rather than through the transcoder, so
+  // what lands in `KindReport` is what `gma.ingest_windows` would have been
+  // told.
+  writeFakeRoot(
+      d,
+      "1654864201000000013,1654864201000000000,0,2,4242,T,A,0,100,10,0,13,5,ZZZZ\n"
+      "1654864201000000024,1654864201000000011,0,2,4242,T,A,0,101,11,0,13,6,ZZZZ\n",
+      mboRow(kT0, 'A', 'B', 100, 10, 9, 5) + mboRow(kT0 + 11, 'A', 'B', 101, 10, 10, 6),
+      /*limit=*/2);
+  const auto rep = ingest::run(fakeOptions(d));
+  ASSERT_TRUE(rep.ok()) << rep.status().ToString();
+  for (const auto& k : rep->kinds) {
+    EXPECT_TRUE(k.truncatedByLimit) << k.kind;
+    EXPECT_EQ(k.requestedToNs, 1654869600000000000LL);
+    EXPECT_LT(k.recordedToNs, k.requestedToNs)
+        << k.kind
+        << ": a truncated pull must NOT record the requested end — that is the "
+           "docs 8.8 failure in the table that exists to prevent it";
+    EXPECT_EQ(k.recordedFromNs, 1654864200000000000LL)
+        << "from_ts is the REQUESTED start: the vendor delivers everything from "
+           "`start`, so a quiet opening second is data";
+  }
+}
+
+TEST(DatabentoCsvJob, TheRetainedDbnIsWrittenAndIsReproducedByASecondRun) {
+  const TempDir d;
+  writeFakeRoot(d,
+                "1654864201000000013,1654864201000000000,0,2,4242,T,A,0,100,10,0,13,5,ZZZZ\n",
+                mboRow(kT0, 'A', 'B', 100, 10, 9, 5));
+  const auto first = ingest::run(fakeOptions(d));
+  ASSERT_TRUE(first.ok()) << first.status().ToString();
+  for (const auto& k : first->kinds) {
+    EXPECT_FALSE(k.dbnExisted);
+    EXPECT_TRUE(k.dbnRewritten);
+    EXPECT_TRUE(std::filesystem::exists(k.dbnPath));
+  }
+  // SPEC D6 retention, and the determinism check that comes with it: the same
+  // CSV must transcode to the same bytes, reported as `unchanged`.
+  const auto second = ingest::run(fakeOptions(d));
+  ASSERT_TRUE(second.ok()) << second.status().ToString();
+  for (const auto& k : second->kinds) {
+    EXPECT_TRUE(k.dbnExisted);
+    EXPECT_FALSE(k.dbnRewritten)
+        << k.kind << ": a second transcode of the same CSV changed the bytes";
+  }
+}
+
+TEST(DatabentoCsvJob, AMetadataJsonForTheWrongSchemaIsRefused) {
+  const TempDir d;
+  writeFakeRoot(d,
+                "1654864201000000013,1654864201000000000,0,2,4242,T,A,0,100,10,0,13,5,ZZZZ\n",
+                mboRow(kT0, 'A', 'B', 100, 10, 9, 5));
+  // Two vendor jobs extracted into one directory leave ONE metadata.json,
+  // silently the wrong one for one of the two CSVs — and `start`/`end`/`limit`
+  // from the wrong job are exactly what the completeness claim is built from.
+  // Remove the sidecars and leave a shared file describing only `mbo`.
+  std::filesystem::remove(d.at("metadata.trades.json"));
+  std::filesystem::remove(d.at("metadata.mbo.json"));
+  d.file("metadata.json", metadataJson("mbo", "false", "false", 0));
+  const auto rep = ingest::run(fakeOptions(d));
+  ASSERT_FALSE(rep.ok());
+  EXPECT_NE(rep.status().message().find("describes the `mbo` job"),
+            std::string::npos)
+      << rep.status().message();
+  EXPECT_NE(rep.status().message().find("unzip -p"), std::string::npos)
+      << "the refusal must print the command that fixes it";
+}
+
+// ===========================================================================
 // THE EXIT-CODE CLASSIFICATION — code-review finding #1.
 // ===========================================================================
 
@@ -914,7 +1073,7 @@ TEST(DatabentoCsvAntiVacuity, EveryCaseInThisFileIsRegistered) {
       found += suite->total_test_count();
     }
   }
-  EXPECT_EQ(found, 38) << "the DatabentoCsv* suites in this file lost or gained a "
+  EXPECT_EQ(found, 43) << "the DatabentoCsv* suites in this file lost or gained a "
                           "case; update the number deliberately rather than "
                           "letting the count drift";
 }
