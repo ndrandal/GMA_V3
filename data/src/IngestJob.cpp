@@ -340,6 +340,31 @@ struct Staged {
 
 }  // namespace
 
+// ===========================================================================
+// retainOnlyIfDecodable — see IngestJob.hpp for what the old order destroyed.
+// ===========================================================================
+
+arrow::Result<csv::RetentionResult> retainOnlyIfDecodable(
+    const std::string& path, const std::vector<std::byte>& bytes) {
+  // The decode is done for its STATUS, not its records: the question is only
+  // whether the adapter accepts these bytes end to end, including the metadata
+  // block, the symbology section and `finish()`'s refusal of a stream that ends
+  // mid-record. `sessionId` is irrelevant to decodability, so a fixed 1 is
+  // passed rather than threading the real one in and implying it matters.
+  const arrow::Status decodes = decodeDbn(bytes, 1u, bytes.size()).status();
+  if (!decodes.ok()) {
+    return asFinding(arrow::Status::Invalid(
+        "REFUSING to write ", path,
+        ": the bytes do not decode through DatabentoAdapter, and that file is "
+        "the SPEC D6 baseline L1 is rebuilt from — overwriting it with "
+        "undecodable bytes is what makes a later `reload` fail permanently. "
+        "Nothing was written; any existing file is untouched.\n  the decoder "
+        "said: ",
+        decodes.message()));
+  }
+  return csv::retain(path, bytes);
+}
+
 std::string formatNs(std::int64_t ns) { return isoFromNs(ns); }
 
 std::string formatWindow(std::int64_t fromNs, std::int64_t toNs) {
@@ -515,8 +540,30 @@ arrow::Result<Report> run(const Options& opts) {
       st.mappings                 = tc.mappings;
       probes                      = tc.probes;
 
-      if (opts.forceReencode && fileExists(dbnPath)) std::remove(dbnPath.c_str());
-      ARROW_ASSIGN_OR_RAISE(const auto ret, csv::retain(dbnPath, tc.dbn));
+      // DECODE, THEN RETAIN (finding #3). `retainOnlyIfDecodable` proves the
+      // bytes decode through the real adapter BEFORE the D6 baseline moves, so
+      // a bad `--dbn-version`, a bad CSV or an encoder regression fails with
+      // the previous file intact instead of destroying it.
+      //
+      // `--force-reencode` deletes the existing file, so the deletion also
+      // waits until the replacement has been proven: the old order deleted
+      // first and could leave NO file at all.
+      {
+        const arrow::Status decodes =
+            decodeDbn(tc.dbn, 1u, tc.dbn.size()).status();
+        if (!decodes.ok()) {
+          return asFinding(arrow::Status::Invalid(
+              "the DBN transcoded from ", csvPath,
+              " does not decode through DatabentoAdapter, so it was NOT "
+              "written: ",
+              decodes.message()));
+        }
+        if (opts.forceReencode && fileExists(dbnPath)) {
+          std::remove(dbnPath.c_str());
+        }
+      }
+      ARROW_ASSIGN_OR_RAISE(const auto ret,
+                            retainOnlyIfDecodable(dbnPath, tc.dbn));
       st.rep.dbnExisted   = ret.existed;
       st.rep.dbnRewritten = ret.changed;
       retainedMatched     = ret.existed && !ret.changed;
@@ -526,11 +573,14 @@ arrow::Result<Report> run(const Options& opts) {
       // it was handed, this is where it shows.
       ARROW_ASSIGN_OR_RAISE(dbnBytes, csv::readFile(dbnPath));
       if (dbnBytes != tc.dbn) {
-        return arrow::Status::IOError(
+        // A FINDING (exit 1), not a could-not-run: the file was written and
+        // read back fine, and what came back is wrong. Was IOError, which
+        // `main` mapped to exit 2 — finding #1.
+        return asFinding(arrow::Status::Invalid(
             "the retained DBN at ", dbnPath,
             " does not read back as the bytes just written. L1 is a rebuildable "
             "projection of these files (SPEC D6); a file that does not read back "
-            "is not a baseline.");
+            "is not a baseline."));
       }
     }
     st.rep.dbnBytes = dbnBytes.size();
