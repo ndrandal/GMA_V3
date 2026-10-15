@@ -8,6 +8,7 @@
 #include "gma/data/SymbolTable.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <set>
@@ -201,12 +202,12 @@ arrow::Result<Decoded> decodeDbn(const std::vector<std::byte>& bytes,
   for (const auto& t : d.ticks) noteHeader(t.header);
   for (const auto& b : d.book) noteHeader(b.header);
   if (symbolIds.size() != 1 || instrumentIds.size() != 1) {
-    return arrow::Status::Invalid(
+    return asFinding(arrow::Status::Invalid(
         "decode yielded ", symbolIds.size(), " symbol(s) and ",
         instrumentIds.size(),
         " instrument_id(s). This slice is one symbol (SPEC 6) and the window is "
         "recorded PER SYMBOL in gma.ingest_windows, so a multi-symbol file is "
-        "refused rather than recorded under one of them.");
+        "refused rather than recorded under one of them."));
   }
   d.symbol       = symbols.name(*symbolIds.begin());
   d.venue        = venues.name(venueId);
@@ -619,8 +620,24 @@ arrow::Result<Report> run(const Options& opts) {
     if (ok && !probes.empty()) {
       using Triple = std::tuple<std::int64_t, std::uint64_t, std::int64_t>;
       std::vector<Triple> want;
+      // ⚠ CODE-REVIEW FINDING #11: the exclusion is MBO-ONLY. `onMbo` accepts
+      // `Action::None` and deliberately produces no book row ("there is no
+      // BookAction for 'no effect' and inventing one would put a no-op mutation
+      // into the replay stream"), but `onTrade` emits a `TickRecord` for EVERY
+      // `trades` record whatever its action. Excluding `N` for both schemas
+      // therefore made a `trades` CSV containing one `action='N'` row fail the
+      // round trip and abort a perfectly valid ingest.
+      //
+      // UNTRIGGERED ON THIS SAMPLE, and the near-miss is worth naming: our
+      // `trades` action column is 1000/1000 `T`. The 546 `N` values are in
+      // `side`, a DIFFERENT COLUMN with a different meaning ("no side specified
+      // by the original source"), and conflating the two is exactly how this
+      // bug would have been argued away as already covered.
+      const bool skipActionNone = std::string(spec.dbnSchema) == "mbo";
       for (const auto& p : probes) {
-        if (p.action == static_cast<char>(dbn::Action::None)) continue;
+        if (skipActionNone && p.action == static_cast<char>(dbn::Action::None)) {
+          continue;
+        }
         want.emplace_back(static_cast<std::int64_t>(p.tsEvent),
                           static_cast<std::uint64_t>(p.sequence),
                           p.price == dbn::kUndefPrice ? kNoPrice : p.price);
@@ -660,8 +677,37 @@ arrow::Result<Report> run(const Options& opts) {
     st.rep.roundTripOk   = ok;
     st.rep.roundTripNote = note.str();
     if (!ok) {
-      return arrow::Status::Invalid("round-trip failed for ", spec.kind, ": ",
-                                    st.rep.roundTripNote);
+      // A FINDING (exit 1). The header's own exit-code table names the
+      // round-trip mismatch as the archetypal one; `main` nonetheless reported
+      // it as could-not-run until finding #1.
+      return asFinding(arrow::Status::Invalid(
+          "round-trip failed for ", spec.kind, ": ", st.rep.roundTripNote));
+    }
+
+    // ⚠ CODE-REVIEW FINDING #12. The insert below renders ONLY `ticks` for
+    // `trades` and ONLY `book` for `book_events`, so a file that decoded into
+    // the other vector inserted ZERO rows and the window was still recorded
+    // `state=1` — a completeness claim over nothing, which is the one thing
+    // this table must never say. Unreachable on the CSV path (the transcoder's
+    // rtype gate refuses a schema/rtype mismatch) and REACHABLE on `reload`,
+    // where the DBN on disk is constrained by nothing at all: rename
+    // `*.trades.dbn` over `*.mbo.dbn` and the mbo kind decodes 1000 ticks, zero
+    // book events, and claims the window.
+    {
+      const bool wantTicks = std::string(spec.kind) == "trades";
+      const std::size_t wanted = wantTicks ? whole.ticks.size() : whole.book.size();
+      const std::size_t other  = wantTicks ? whole.book.size() : whole.ticks.size();
+      if (other != 0 || wanted == 0) {
+        return asFinding(arrow::Status::Invalid(
+            "the DBN for kind `", spec.kind, "` decoded into ",
+            whole.ticks.size(), " tick record(s) and ", whole.book.size(),
+            " book record(s), but gma.", spec.table, " holds only the ",
+            wantTicks ? "tick" : "book",
+            " kind. Inserting the matching half and recording the window "
+            "complete would assert coverage over rows that were silently "
+            "dropped (SPEC D11). Check that ", dbnPath,
+            " really is the `", spec.dbnSchema, "` pull."));
+      }
     }
 
     st.rep.decodedRecords  = whole.stats.recordsIn;
@@ -706,22 +752,21 @@ arrow::Result<Report> run(const Options& opts) {
       st.rep.recordedToNs = st.rep.truncatedByLimit ? lastTs : st.rep.requestedToNs;
       for (const auto& m : whole.meta.mappings) {
         for (const auto& iv : m.intervals) {
-          char* endp = nullptr;
-          const unsigned long id = std::strtoul(iv.symbol.c_str(), &endp, 10);
-          if (endp == nullptr || *endp != '\0' || iv.symbol.empty()) continue;
+          std::uint32_t id = 0;
+          if (!parseExact(iv.symbol, id)) continue;  // not an id in this interval
           st.mappings.push_back(csv::Transcoded::Mapping{
-              static_cast<std::uint32_t>(id), m.rawSymbol, iv.startDate,
+              id, m.rawSymbol, iv.startDate,
               iv.endDate > iv.startDate ? iv.endDate - 1 : iv.startDate});
         }
       }
     }
 
     if (st.rep.recordedToNs <= st.rep.recordedFromNs) {
-      return arrow::Status::Invalid(
+      return asFinding(arrow::Status::Invalid(
           "the delivered window for ", spec.kind, " came out empty (",
           formatWindow(st.rep.recordedFromNs, st.rep.recordedToNs),
           "). Writing it as an ingested window would assert coverage of "
-          "nothing.");
+          "nothing."));
     }
 
     st.decoded = std::move(whole);
@@ -763,16 +808,36 @@ arrow::Result<Report> run(const Options& opts) {
       const std::int64_t dayTo = dayFrom + 86400000000000LL;
       std::ostringstream q;
       q << "SELECT DISTINCT symbol, toUnixTimestamp64Nano(from_ts), "
-           "toUnixTimestamp64Nano(to_ts) FROM gma.ingest_windows WHERE kind = '"
-        << st.rep.kind << "' AND symbol != '" << st.rep.symbol
-        << "' AND from_ts < fromUnixTimestamp64Nano(toInt64(" << dayTo
+           "toUnixTimestamp64Nano(to_ts) FROM gma.ingest_windows WHERE kind = "
+        << ch::sqlQuote(st.rep.kind) << " AND symbol != "
+        << ch::sqlQuote(st.rep.symbol)
+        << " AND from_ts < fromUnixTimestamp64Nano(toInt64(" << dayTo
         << "), 'UTC') AND to_ts > fromUnixTimestamp64Nano(toInt64(" << dayFrom
         << "), 'UTC') FORMAT TabSeparated";
       ARROW_ASSIGN_OR_RAISE(const auto others, client.select(q.str()));
       for (const auto& r : others) {
-        if (r.size() != 3) continue;
+        // ⚠ CODE-REVIEW FINDING #6. This was `if (r.size() != 3) continue;` —
+        // a SILENT SKIP, inside the block whose entire stated purpose is
+        // preventing `isComplete` from returning true over an emptied
+        // partition. Skipping a row here means some other symbol keeps a
+        // `state=1` row over data this loop is about to drop, which is the
+        // exact failure the block exists to prevent, reached by the code meant
+        // to prevent it. It refuses now.
+        if (r.size() != 3) {
+          return arrow::Status::Invalid(
+              "a gma.ingest_windows row came back with ", r.size(),
+              " field(s) instead of 3 while collecting the other symbols whose "
+              "completeness this DROP PARTITION invalidates. Refusing rather "
+              "than skipping: a skipped row leaves another symbol asserting "
+              "state=1 over a partition about to be emptied. Nothing has been "
+              "dropped yet.");
+        }
+        std::int64_t otherFrom = 0;
+        std::int64_t otherTo   = 0;
+        if (!parseExact(r[1], otherFrom)) return badField("from_ts", r[1]);
+        if (!parseExact(r[2], otherTo)) return badField("to_ts", r[2]);
         ARROW_RETURN_NOT_OK(writeWindowRow(
-            client, r[0], st.rep.kind, std::stoll(r[1]), std::stoll(r[2]),
+            client, r[0], st.rep.kind, otherFrom, otherTo,
             /*state=*/3, /*rowsInserted=*/0, st.sessionId,
             "invalidated by DROP PARTITION " + std::to_string(day) + " for " +
                 st.rep.symbol));
@@ -858,12 +923,17 @@ arrow::Result<Report> run(const Options& opts) {
       const std::uint64_t validTo =
           csv::midnightUtcNs(m.lastDay) + 86400000000000ULL;
       std::ostringstream q;
+      // `dataset` and `raw_symbol` come out of the vendor DBN's own metadata,
+      // and `source_ref` is either a vendor job id or a filesystem path — all
+      // three are quoted rather than concatenated (finding #5).
       q << "INSERT INTO gma.symbology (dataset, instrument_id, raw_symbol, "
-           "valid_from, valid_to, source_ref, ingested_at) SELECT '"
-        << st.dataset << "', " << m.instrumentId << ", '" << m.rawSymbol
-        << "', fromUnixTimestamp64Nano(toInt64(" << validFrom
-        << "), 'UTC'), fromUnixTimestamp64Nano(toInt64(" << validTo << "), 'UTC'), '"
-        << (st.rep.jobId.empty() ? st.rep.dbnPath : st.rep.jobId) << "', now64(3)";
+           "valid_from, valid_to, source_ref, ingested_at) SELECT "
+        << ch::sqlQuote(st.dataset) << ", " << m.instrumentId << ", "
+        << ch::sqlQuote(m.rawSymbol) << ", fromUnixTimestamp64Nano(toInt64("
+        << validFrom << "), 'UTC'), fromUnixTimestamp64Nano(toInt64(" << validTo
+        << "), 'UTC'), "
+        << ch::sqlQuote(st.rep.jobId.empty() ? st.rep.dbnPath : st.rep.jobId)
+        << ", now64(3)";
       ARROW_RETURN_NOT_OK(client.exec(q.str()).status());
       ++rep.symbologyRows;
     }
