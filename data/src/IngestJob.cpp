@@ -505,6 +505,7 @@ arrow::Result<Report> run(const Options& opts) {
             : deriveSessionId(st.dataset, spec.dbnSchema,
                               st.rep.jobId.empty() ? std::string("from-dbn")
                                                    : st.rep.jobId);
+    st.rep.sessionId = st.sessionId;
 
     // ---- decode twice, at two chunkings, and compare the RENDERED rows ---
     ARROW_ASSIGN_OR_RAISE(auto whole,
@@ -584,6 +585,25 @@ arrow::Result<Report> run(const Options& opts) {
 
     st.rep.decodedRecords  = whole.stats.recordsIn;
     st.rep.canonicalRows   = whole.ticks.size() + whole.book.size();
+
+    // ENC-1484's number, free while the records are in hand and measured HERE
+    // rather than beside the insert so `--no-insert` reports it too: D5 picked
+    // plain MergeTree because (symbol, ts_event, provider_seq) is NOT unique,
+    // and this is by how much. One symbol, so the symbol leg is constant.
+    {
+      std::vector<std::pair<std::int64_t, std::uint64_t>> keys;
+      keys.reserve(st.rep.canonicalRows);
+      for (const auto& t : whole.ticks) {
+        keys.emplace_back(t.header.tsEventNs, t.header.providerSeq);
+      }
+      for (const auto& b2 : whole.book) {
+        keys.emplace_back(b2.header.tsEventNs, b2.header.providerSeq);
+      }
+      std::sort(keys.begin(), keys.end());
+      const auto last = std::unique(keys.begin(), keys.end());
+      st.rep.distinctSortKeys = static_cast<std::size_t>(last - keys.begin());
+      st.rep.duplicateSortKeys = keys.size() - st.rep.distinctSortKeys;
+    }
     st.rep.sideUnspecified = whole.stats.sideUnspecified;
     st.rep.symbol          = whole.symbol;
     st.rep.venue           = whole.venue;
@@ -626,8 +646,6 @@ arrow::Result<Report> run(const Options& opts) {
     st.decoded = std::move(whole);
     staged.push_back(std::move(st));
   }
-
-  if (!staged.empty()) rep.sessionId = staged.front().sessionId;
 
   if (opts.noInsert) {
     for (const auto& st : staged) rep.kinds.push_back(st.rep);
@@ -729,16 +747,6 @@ arrow::Result<Report> run(const Options& opts) {
       return a.tsEventNs != b.tsEventNs ? a.tsEventNs < b.tsEventNs
                                         : a.providerSeq < b.providerSeq;
     });
-
-    // ENC-1484's number, free while the keys are in hand: D5 picked plain
-    // MergeTree because this sort key is NOT unique, and this is by how much.
-    std::vector<std::pair<std::int64_t, std::uint64_t>> keys;
-    keys.reserve(rows.size());
-    for (const auto& r : rows) keys.emplace_back(r.tsEventNs, r.providerSeq);
-    std::sort(keys.begin(), keys.end());
-    const auto last = std::unique(keys.begin(), keys.end());
-    st.rep.distinctSortKeys  = static_cast<std::size_t>(last - keys.begin());
-    st.rep.duplicateSortKeys = rows.size() - st.rep.distinctSortKeys;
 
     std::string body = "INSERT INTO gma.";
     body += st.table;

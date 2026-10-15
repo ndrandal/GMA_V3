@@ -135,6 +135,7 @@ void printKind(const ingest::KindReport& k) {
   if (!k.jobId.empty()) std::cout << "  vendor job_id  : " << k.jobId << "\n";
   std::cout << "  symbol         : " << k.symbol << "  instrument_id "
             << k.instrumentId << "  venue " << k.venue << "\n";
+  std::cout << "  session_id     : " << k.sessionId << "\n";
   if (k.csvRecords != 0) std::cout << "  csv records    : " << k.csvRecords << "\n";
   std::cout << "  dbn records    : " << k.decodedRecords << "\n";
   std::cout << "  canonical rows : " << k.canonicalRows << "\n";
@@ -162,7 +163,7 @@ void printKind(const ingest::KindReport& k) {
   std::cout << "  DBN side 'N' on a row (kGmaFlagSideUnspecified) : "
             << k.sideUnspecified << "\n";
   std::cout << "  sort key (symbol, ts_event, provider_seq): "
-            << k.distinctSortKeys << " distinct over " << k.rowsInserted
+            << k.distinctSortKeys << " distinct over " << k.canonicalRows
             << " rows, " << k.duplicateSortKeys
             << " row(s) share a key with another"
             << (k.duplicateSortKeys != 0
@@ -214,7 +215,8 @@ int cmdIngest(const Args& a, bool fromDbnOnly) {
   }
   const auto& rep = *res;
   printTarget(rep.target);
-  std::cout << "session_id : " << rep.sessionId << "  (derived — see the ruling below)\n";
+  std::cout << "session_id : derived PER KIND from (dataset | schema | job_id) — "
+               "see the ruling below\n";
   for (const auto& k : rep.kinds) printKind(k);
 
   std::cout << "\nsymbology rows written : " << rep.symbologyRows << "\n";
