@@ -33,6 +33,7 @@
 //
 
 #include "gma/data/DatabentoAdapter.hpp"
+#include "gma/data/DbnEncoder.hpp"
 
 #include <arrow/array.h>
 #include <arrow/record_batch.h>
@@ -253,6 +254,30 @@ TEST(DbnEncoderTest, EncoderReproducesEveryFixtureByteForByte) {
                 static_cast<unsigned>(std::to_integer<std::uint8_t>(want[i])))
           << "byte " << i << " differs — the DBN layout in DatabentoAdapter.hpp, or "
              "the values in PROVENANCE.md, are wrong";
+    }
+  }
+}
+
+// The fixed metadata block is 100 bytes in EVERY DBN version and what fills it
+// differs per version (v1 spends 8 bytes on `record_count` that v2+ spend on
+// `symbol_cstr_len` plus six more reserved bytes). A per-version field list
+// that does not add up to 100 shifts every subsequent byte of the file — the
+// same failure mode as reading records at a 7-byte offset.
+//
+// Inside the encoder this is a thrown `std::logic_error`, because gma_data
+// cannot link gtest. THIS is where the check is observed: `build()`'s
+// out-param reports what it actually wrote, and the assertion is made here.
+// Without this test the promotion would have moved a gtest assertion into a
+// throw nobody ever looks at.
+TEST(DbnEncoderTest, BuildWritesTheHundredByteFixedBlockInEveryVersion) {
+  for (std::uint8_t version = dbn::kMinVersion; version <= dbn::kMaxVersion; ++version) {
+    SCOPED_TRACE("DBN v" + std::to_string(static_cast<unsigned>(version)));
+    for (const bool mbo : {true, false}) {
+      std::size_t fixedLen = 0;
+      const auto bytes = fixtureWriter(version, mbo).build(&fixedLen);
+      EXPECT_EQ(fixedLen, dbn::kFixedMetadataLen);
+      EXPECT_GT(bytes.size(), dbn::kPrefixLen + dbn::kMetadataLenLen +
+                                  dbn::kFixedMetadataLen);
     }
   }
 }
