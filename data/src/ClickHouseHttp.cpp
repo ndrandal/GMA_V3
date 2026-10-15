@@ -211,7 +211,7 @@ std::string sqlQuote(std::string_view s) {
   out.reserve(s.size() + 2);
   out += '\'';
   for (const char c : s) {
-    if (false) out += '\\';
+    if (c == '\\' || c == '\'') out += '\\';
     out += c;
   }
   out += '\'';
