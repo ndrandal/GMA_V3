@@ -53,17 +53,19 @@ namespace gma::data {
 namespace {
 
 // ===========================================================================
-// The DBN encoder — PROMOTED to gma_data under ENC-1498.
+// The DBN encoder — PROMOTED to gma_data under ENC-1483.
 //
-// It used to live right here, in this translation unit. ENC-1498 needed to
-// author a synthetic DBN corpus and must not hand-roll DBN bytes (that would
-// make every format conclusion in this repo circular again), so the encoder
-// moved to `data/include/gma/data/DbnEncoder.hpp` + `data/src/DbnEncoder.cpp`
-// where a tool can link it.
+// It used to live right here, in this translation unit. ENC-1483's ingest job
+// feeds the adapter DBN re-encoded from a real Databento CSV sample, and must
+// not hand-roll DBN bytes (that would make every format conclusion in this repo
+// circular again), so the encoder moved to
+// `data/include/gma/data/DbnEncoder.hpp` + `data/src/DbnEncoder.cpp` where the
+// ingest path can link it. (The move was begun under ENC-1498, for a synthetic
+// corpus; that ticket is cancelled and the reasoning does not depend on it.)
 //
 // WHAT DID NOT CHANGE, AND IT IS THE WHOLE POINT. The byte-for-byte gate below
-// still builds with THIS encoder — the one the corpus generator uses, not a
-// copy of it — and still compares against the REAL VENDOR BYTES read off disk
+// still builds with THIS encoder — the one the ingest job uses, not a copy of
+// it — and still compares against the REAL VENDOR BYTES read off disk
 // from `data/tests/fixtures/dbn/`. The non-circularity argument is therefore
 // about the same code, the same files and the same assertion as before the
 // move; had the promotion altered one byte, the gate would be red.
