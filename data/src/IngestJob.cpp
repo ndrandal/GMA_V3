@@ -23,31 +23,41 @@ namespace gma::data::ingest {
 // ===========================================================================
 
 const char* const kSessionIdRuling =
-    "A RE-INGEST REUSES ITS session_id, AND session_id IS DERIVED FROM THE PULL "
-    "RATHER THAN ALLOCATED PER RUN.\n"
-    "  Decided here because the alternative breaks two locked decisions. D6 "
+    "A RE-INGEST REUSES ITS session_id, AND session_id IS THE IDENTITY OF THE "
+    "RETAINED DBN FILE RATHER THAN A PER-RUN COUNTER.\n"
+    "  session_id = FNV-1a-32 over the whole retained .dbn, forced non-zero. "
+    "The same bytes give the same number on every machine, every rebuild and "
+    "every reload; a CORRECTED pull is different bytes and therefore a "
+    "different session, which is the one case where the distinction is real.\n"
+    "  Decided this way because the alternatives break locked decisions. D6 "
     "makes L1 'a derived, rebuildable projection of the raw DBN files'; a "
     "projection whose output changes when rebuilt from unchanged input has a "
-    "hidden input, and a per-run counter is exactly that. D5's re-ingest "
-    "('DROP PARTITION + reload reproduces identical rows') and ENC-1487's "
+    "hidden input, and a per-run counter is exactly that. D5's re-ingest ('DROP "
+    "PARTITION + reload reproduces identical rows') and ENC-1487's "
     "bit-identical assertions both fail on the session_id column alone if a "
     "reload renumbers it. And DatabentoAdapter's own note on provider_seq -- "
     "'FROM DATABENTO, NEVER SYNTHESIZED ... stable across a re-download, which "
     "is what makes re-ingest converge and the splice's dedup exact' -- is about "
     "the PAIR (session_id, provider_seq) (docs 8.3); a fresh session_id each run "
     "makes the stable half useless.\n"
-    "  So session_id = FNV-1a-32(dataset | schema | vendor job_id), forced "
-    "non-zero. Same retained file, same rows, forever; a NEW PULL of the same "
-    "window gets a new job_id and therefore a new session, which is the one case "
-    "where the distinction is real.\n"
-    "  AND A CORRECTION TO docs/data-layer.md 8.8 THAT THE RULING DOES NOT "
-    "RESCUE: 8.8 calls (symbol, kind, from_ts, session_id) 'unique by "
-    "construction'. THAT IS FALSE UNDER BOTH ANSWERS, not only under reuse. "
-    "ENC-1480 made the table an append-only transition log, so one window and "
-    "one session write at least two rows (state=0 then state=1) and a failed run "
-    "writes three. The claim dates from revision 2's one-row-per-window "
-    "ReplacingMergeTree and was voided by the rewrite that replaced it. What "
-    "makes the table readable is the READ RULE, never uniqueness.";
+    "  WHY THE FILE AND NOT THE VENDOR job_id, WHICH WAS THE FIRST ANSWER: the "
+    "job_id is in metadata.json and is NOT IN DBN AT ALL. Deriving from it "
+    "makes `gma_ingest reload` -- the pure D6 reload, which reads only the "
+    "retained file -- produce a DIFFERENT session_id from the run that created "
+    "it, so the reload's rows would differ from the originals in exactly the "
+    "column that is supposed to prove they do not. Measured on this sample "
+    "before the change. The job_id stays on every ingest_windows and symbology "
+    "row as `source_ref`, so nothing traceable is lost; it is provenance, not "
+    "identity.\n"
+    "  AND A CORRECTION TO docs/data-layer.md 8.8 THAT NO ANSWER HERE RESCUES: "
+    "8.8 calls (symbol, kind, from_ts, session_id) 'unique by construction'. "
+    "THAT IS FALSE UNDER EVERY ANSWER, not only under reuse. ENC-1480 made the "
+    "table an append-only transition log, so one window and one session write at "
+    "least two rows (state=0 then state=1) and a failed run writes three -- "
+    "observed on this ingest as exactly 4 rows for 2 windows. The claim dates "
+    "from revision 2's one-row-per-window ReplacingMergeTree and was voided by "
+    "the rewrite that replaced it. What makes the table readable is the READ "
+    "RULE, never uniqueness.";
 
 const char* const kGapsNote =
     "ZERO gma.gaps ROWS WRITTEN, AND NOT FOR LACK OF SCOPE: THE SEQ-"
@@ -71,23 +81,18 @@ namespace {
 // ---------------------------------------------------------------------------
 // session_id derivation — see kSessionIdRuling.
 // ---------------------------------------------------------------------------
-std::uint32_t deriveSessionId(const std::string& dataset, const std::string& schema,
-                              const std::string& jobId) {
-  // FNV-1a 32. Chosen for being a fixed, written-down function of its input
-  // rather than for its distribution: the property that matters is that the
-  // same pull yields the same number on every machine and every rebuild.
+std::uint32_t deriveSessionId(const std::vector<std::byte>& dbnBytes) {
+  // FNV-1a 32 over the retained file. Chosen for being a fixed, written-down
+  // function of its input rather than for its distribution: the property that
+  // matters is that the same bytes yield the same number on every machine,
+  // every rebuild and every reload. The file already contains the dataset, the
+  // schema, the requested window, the limit and the symbology in its metadata
+  // block, so hashing the file subsumes hashing those.
   std::uint32_t h = 0x811C9DC5u;
-  const auto mix = [&h](std::string_view s) {
-    for (const char c : s) {
-      h ^= static_cast<std::uint8_t>(c);
-      h *= 0x01000193u;
-    }
-    h ^= static_cast<std::uint8_t>('|');
+  for (const std::byte b : dbnBytes) {
+    h ^= static_cast<std::uint8_t>(b);
     h *= 0x01000193u;
-  };
-  mix(dataset);
-  mix(schema);
-  mix(jobId);
+  }
   // 0 is reserved: a zero session_id on an event row is indistinguishable from
   // a default-constructed header.
   return h == 0 ? 1u : h;
@@ -499,12 +504,8 @@ arrow::Result<Report> run(const Options& opts) {
     }
     st.rep.dbnBytes = dbnBytes.size();
 
-    st.sessionId =
-        opts.sessionId != 0
-            ? opts.sessionId
-            : deriveSessionId(st.dataset, spec.dbnSchema,
-                              st.rep.jobId.empty() ? std::string("from-dbn")
-                                                   : st.rep.jobId);
+    st.sessionId = opts.sessionId != 0 ? opts.sessionId : deriveSessionId(dbnBytes);
+    st.rep.sessionId = st.sessionId;
 
     // ---- decode twice, at two chunkings, and compare the RENDERED rows ---
     ARROW_ASSIGN_OR_RAISE(auto whole,
@@ -584,6 +585,25 @@ arrow::Result<Report> run(const Options& opts) {
 
     st.rep.decodedRecords  = whole.stats.recordsIn;
     st.rep.canonicalRows   = whole.ticks.size() + whole.book.size();
+
+    // ENC-1484's number, free while the records are in hand and measured HERE
+    // rather than beside the insert so `--no-insert` reports it too: D5 picked
+    // plain MergeTree because (symbol, ts_event, provider_seq) is NOT unique,
+    // and this is by how much. One symbol, so the symbol leg is constant.
+    {
+      std::vector<std::pair<std::int64_t, std::uint64_t>> keys;
+      keys.reserve(st.rep.canonicalRows);
+      for (const auto& t : whole.ticks) {
+        keys.emplace_back(t.header.tsEventNs, t.header.providerSeq);
+      }
+      for (const auto& b2 : whole.book) {
+        keys.emplace_back(b2.header.tsEventNs, b2.header.providerSeq);
+      }
+      std::sort(keys.begin(), keys.end());
+      const auto last = std::unique(keys.begin(), keys.end());
+      st.rep.distinctSortKeys = static_cast<std::size_t>(last - keys.begin());
+      st.rep.duplicateSortKeys = keys.size() - st.rep.distinctSortKeys;
+    }
     st.rep.sideUnspecified = whole.stats.sideUnspecified;
     st.rep.symbol          = whole.symbol;
     st.rep.venue           = whole.venue;
@@ -626,8 +646,6 @@ arrow::Result<Report> run(const Options& opts) {
     st.decoded = std::move(whole);
     staged.push_back(std::move(st));
   }
-
-  if (!staged.empty()) rep.sessionId = staged.front().sessionId;
 
   if (opts.noInsert) {
     for (const auto& st : staged) rep.kinds.push_back(st.rep);
@@ -729,16 +747,6 @@ arrow::Result<Report> run(const Options& opts) {
       return a.tsEventNs != b.tsEventNs ? a.tsEventNs < b.tsEventNs
                                         : a.providerSeq < b.providerSeq;
     });
-
-    // ENC-1484's number, free while the keys are in hand: D5 picked plain
-    // MergeTree because this sort key is NOT unique, and this is by how much.
-    std::vector<std::pair<std::int64_t, std::uint64_t>> keys;
-    keys.reserve(rows.size());
-    for (const auto& r : rows) keys.emplace_back(r.tsEventNs, r.providerSeq);
-    std::sort(keys.begin(), keys.end());
-    const auto last = std::unique(keys.begin(), keys.end());
-    st.rep.distinctSortKeys  = static_cast<std::size_t>(last - keys.begin());
-    st.rep.duplicateSortKeys = rows.size() - st.rep.distinctSortKeys;
 
     std::string body = "INSERT INTO gma.";
     body += st.table;

@@ -24,8 +24,9 @@
 --
 -- Apply it with data/schema/apply.sh. Every statement is IF NOT EXISTS, so
 -- applying it twice is a no-op; apply.sh proves that by doing exactly that.
--- Nothing in the C++ build applies this yet — the ingest job (ENC-1483) is the
--- first caller.
+-- Nothing in the C++ build applies this; ENC-1483's `gma_ingest` is the first
+-- WRITER against an already-applied schema, and it refuses rather than issues
+-- DDL if a table is missing.
 --
 -- =========================================================================
 -- THIS IS AN L1 RAW STORE. IT COMPUTES NOTHING.
@@ -576,13 +577,28 @@ SETTINGS index_granularity = 1024;
 -- a number any operator consumes. An ORDER BY … LIMIT 1, or an argMax over
 -- updated_at, computes nothing about the market.
 --
--- OPEN, and it belongs to the ingest job (ENC-1483) rather than to the schema:
--- whether a re-ingest reuses its window's session_id or takes a new one. The
--- read rule above is correct under both, which is why session_id is out of the
--- key and out of the rule. (docs §8.8 states the recorded-never-inferred rule
--- and the three-situations table; it specifies NO DDL and NO sort key, so the
--- key here — and its divergence from revision 2's — is this file's decision to
--- own, not a doc citation to lean on.)
+-- ~~OPEN~~ RULED BY ENC-1483: a re-ingest REUSES its window's session_id, and
+-- session_id is FNV-1a-32 over the retained .dbn file -- the identity of the
+-- bytes L1 is a projection of, not a per-run counter. Same bytes, same rows,
+-- every reload; a corrected pull is different bytes and so a different session.
+-- SPEC §5 under T5 carries the reasoning and records that the first answer
+-- (derive from the vendor job_id) was wrong, because the job_id lives in
+-- metadata.json and is not in DBN at all, so the pure D6 reload renumbered it.
+-- The read rule above is correct under either answer, which is why session_id
+-- is out of the key and out of the rule -- and that independence is what let
+-- the ruling be made after the reader was already shipped.
+--
+-- ⚠ AND THE "UNIQUE BY CONSTRUCTION" CLAIM IN docs §8.8 IS WITHDRAWN, under
+-- every answer rather than only under reuse: this table is an append-only
+-- transition log, so one window and one session write at least two rows
+-- (state=0 then state=1) and a failed run writes three. ENC-1483's first ingest
+-- of two windows produced exactly four rows. Nothing dedups here and nothing
+-- needs to; the read rule is what makes the table readable.
+--
+-- (docs §8.8 states the recorded-never-inferred rule and the three-situations
+-- table; it specifies NO DDL and NO sort key, so the key here — and its
+-- divergence from revision 2's — is this file's decision to own, not a doc
+-- citation to lean on.)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS gma.ingest_windows
 (

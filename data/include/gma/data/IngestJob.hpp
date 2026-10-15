@@ -95,6 +95,9 @@ struct KindReport {
   std::string symbol;
   std::uint32_t instrumentId = 0;
   std::string venue;
+  // PER KIND, not per run: it is FNV-1a-32(dataset | schema | job_id), and the
+  // two kinds are two vendor jobs. See `Report::sessionIdRuling`.
+  std::uint32_t sessionId = 0;
 
   std::size_t csvRecords  = 0;
   std::size_t dbnBytes    = 0;
@@ -136,7 +139,6 @@ struct KindReport {
 
 struct Report {
   ch::Target target;
-  std::uint32_t sessionId = 0;
   std::vector<KindReport> kinds;
   std::size_t symbologyRows = 0;
   std::vector<std::string> partitionsDropped;
