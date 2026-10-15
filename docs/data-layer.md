@@ -621,7 +621,9 @@ returns a flat market:
 So completeness is **recorded by the ingest job, never inferred from row counts** (a quiet
 window and a missing window have the same count, which is the whole problem), and
 `IL1Store::isComplete` makes a query over an incomplete window **fail** rather than answer
-short.
+short. It also makes bulk ingest restartable: a ClickHouse insert is atomic per block, not
+per batch, so an interrupted batch leaves some blocks committed and recovery is re-running
+the window — which §8.6 makes exact.
 
 **⚠ `(symbol, kind, from_ts, session_id)` IS NOT "UNIQUE BY CONSTRUCTION" — THAT CLAIM IS
 WITHDRAWN (ENC-1483).** It was true of revision 2's one-row-per-window
@@ -653,9 +655,7 @@ code obligation of the ingest job, so a `DROP PARTITION` issued *outside* the jo
 table asserting a window whose data is gone — measured, and `isComplete` duly returned
 complete over an empty table with the rule behaving perfectly. A row count cannot *establish*
 completeness, but it can *refute* a claim: a `state=1` window claiming `rows_inserted > 0`
-whose range holds zero rows is a lie, and `gma_ingest verify` checks exactly that. It also makes ingest restartable: a ClickHouse insert is atomic per block, not per
-batch, so an interrupted batch leaves some blocks committed and recovery is re-running the
-window — which §8.6 makes exact.
+whose range holds zero rows is a lie, and `gma_ingest verify` checks exactly that.
 
 ### 8.9 Symbol identity — ticker as the key, `instrument_id` for provenance
 
