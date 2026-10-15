@@ -556,7 +556,9 @@ TEST(DatabentoCsvTranscode, EveryDbnVersionTheAdapterAcceptsRoundTrips) {
     // ENC-1482 found by measurement, and the one that makes a decoder read
     // every record at a 7-byte offset. The ingest job emits v3 by default
     // precisely so this path runs on every real ingest.
-    if (v < dbn::kFirstAlignedVersion) EXPECT_EQ(adapter.metadata()->endPadding, 0u);
+    if (v < dbn::kFirstAlignedVersion) {
+      EXPECT_EQ(adapter.metadata()->endPadding, 0u);
+    }
   }
 }
 
