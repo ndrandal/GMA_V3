@@ -388,7 +388,7 @@ arrow::Result<Completeness> queryCompleteness(const ch::Client& client,
   std::ostringstream q;
   q << "SELECT toUnixTimestamp64Nano(from_ts), toUnixTimestamp64Nano(to_ts), "
        "toUInt16(state), toUnixTimestamp64Milli(updated_at) "
-       "FROM gma.ingest_windows WHERE symbol = '"
+       "FROM gma.ingest_windows WHERE symbol = "
     << ch::sqlQuote(symbol) << " AND kind = " << ch::sqlQuote(kind)
     << " FORMAT TabSeparated";
   ARROW_ASSIGN_OR_RAISE(const auto rows, client.select(q.str()));
