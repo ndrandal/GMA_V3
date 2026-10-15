@@ -42,7 +42,7 @@ std::vector<Interval> mergeIntervals(std::vector<Interval> in) {
     // `<=` rather than `<`: these are half-open, so [a, b) and [b, c) are
     // ADJACENT and join. That is what makes a seven-day request over seven
     // daily windows complete.
-    if (!out.empty() && i.fromNs <= out.back().toNs) {
+    if (!out.empty() && i.fromNs < out.back().toNs) {
       out.back().toNs = std::max(out.back().toNs, i.toNs);
     } else {
       out.push_back(i);
