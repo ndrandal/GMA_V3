@@ -98,6 +98,28 @@ std::uint32_t deriveSessionId(const std::vector<std::byte>& dbnBytes) {
   return h == 0 ? 1u : h;
 }
 
+// CODE-REVIEW FINDING #8. Every other line in this file is scrupulous about
+// returning a `Status`; four used `std::stoll`/`std::stoul`, which THROW. The
+// inputs are ClickHouse response fields, where `\N`, an empty field or a
+// truncated body are all reachable — and an exception escaping an
+// `arrow::Status`-returning function skips every refusal path this job has,
+// including the `state=2` write that records a failed window.
+template <typename T>
+bool parseExact(const std::string& text, T& out) {
+  if (text.empty()) return false;
+  const char* first = text.data();
+  const char* last  = text.data() + text.size();
+  const auto r = std::from_chars(first, last, out);
+  return r.ec == std::errc{} && r.ptr == last;
+}
+
+arrow::Status badField(const char* what, const std::string& text) {
+  return arrow::Status::Invalid(
+      "ClickHouse returned \"", text, "\" for ", what,
+      ", which is not an integer. This is a COULD-NOT-RUN rather than a "
+      "finding: no verdict about the data was reached.");
+}
+
 std::string expandTilde(const std::string& p) {
   if (p.empty() || p[0] != '~') return p;
   const char* home = std::getenv("HOME");
@@ -265,15 +287,16 @@ arrow::Status writeWindowRow(const ch::Client& client, const std::string& symbol
   std::ostringstream q;
   q << "INSERT INTO gma.ingest_windows (symbol, kind, from_ts, to_ts, state, "
        "rows_inserted, updated_at, completed_at, session_id, source, source_ref) "
-       "SELECT '"
-    << symbol << "', '" << kind << "', fromUnixTimestamp64Nano(toInt64(" << fromNs
+       "SELECT "
+    << ch::sqlQuote(symbol) << ", " << ch::sqlQuote(kind)
+    << ", fromUnixTimestamp64Nano(toInt64(" << fromNs
     << "), 'UTC'), fromUnixTimestamp64Nano(toInt64(" << toNs << "), 'UTC'), "
     << static_cast<unsigned>(state) << ", " << rowsInserted << ", now64(3), "
     // completed_at: a COMPLETION clock. Zero unless this row IS the completion
     // — the DDL is explicit that it is zero while in flight and that ordering
     // by it is what made the revision-2 engine delete the in-flight row.
     << (state == 1 ? "now64(3)" : "fromUnixTimestamp64Milli(toInt64(0), 'UTC')")
-    << ", " << sessionId << ", 'databento', '" << sourceRef << "'";
+    << ", " << sessionId << ", 'databento', " << ch::sqlQuote(sourceRef);
   return client.exec(q.str()).status();
 }
 
@@ -340,7 +363,8 @@ arrow::Result<Completeness> queryCompleteness(const ch::Client& client,
   q << "SELECT toUnixTimestamp64Nano(from_ts), toUnixTimestamp64Nano(to_ts), "
        "toUInt16(state), toUnixTimestamp64Milli(updated_at) "
        "FROM gma.ingest_windows WHERE symbol = '"
-    << symbol << "' AND kind = '" << kind << "' FORMAT TabSeparated";
+    << ch::sqlQuote(symbol) << " AND kind = " << ch::sqlQuote(kind)
+    << " FORMAT TabSeparated";
   ARROW_ASSIGN_OR_RAISE(const auto rows, client.select(q.str()));
 
   std::vector<IngestWindowRow> parsed;
@@ -351,10 +375,12 @@ arrow::Result<Completeness> queryCompleteness(const ch::Client& client,
                                     " field(s), expected 4");
     }
     IngestWindowRow w;
-    w.fromTsNs    = std::stoll(r[0]);
-    w.toTsNs      = std::stoll(r[1]);
-    w.state       = static_cast<std::uint8_t>(std::stoul(r[2]));
-    w.updatedAtMs = std::stoll(r[3]);
+    std::uint16_t state = 0;
+    if (!parseExact(r[0], w.fromTsNs)) return badField("from_ts", r[0]);
+    if (!parseExact(r[1], w.toTsNs)) return badField("to_ts", r[1]);
+    if (!parseExact(r[2], state)) return badField("state", r[2]);
+    if (!parseExact(r[3], w.updatedAtMs)) return badField("updated_at", r[3]);
+    w.state = static_cast<std::uint8_t>(state);
     parsed.push_back(w);
   }
   return isComplete(parsed, reqFromNs, reqToNs);
@@ -365,12 +391,17 @@ arrow::Result<std::int64_t> rowCount(const ch::Client& client,
                                      const std::string& symbol,
                                      std::int64_t fromNs, std::int64_t toNs) {
   std::ostringstream q;
-  q << "SELECT count() FROM gma." << table << " WHERE symbol = '" << symbol
-    << "' AND ts_event >= fromUnixTimestamp64Nano(toInt64(" << fromNs
-    << "), 'UTC') AND ts_event < fromUnixTimestamp64Nano(toInt64(" << toNs
-    << "), 'UTC')";
-  ARROW_ASSIGN_OR_RAISE(const auto s, client.scalar(q.str()));
-  return std::stoll(s);
+  // `table` is NOT interpolated from user input — it is one of two string
+  // literals chosen by the caller's `KindSpec` — but `symbol` is, and comes
+  // from vendor DBN symbology as well as from the CLI.
+  q << "SELECT count() FROM gma." << table << " WHERE symbol = "
+    << ch::sqlQuote(symbol) << " AND ts_event >= fromUnixTimestamp64Nano(toInt64("
+    << fromNs << "), 'UTC') AND ts_event < fromUnixTimestamp64Nano(toInt64("
+    << toNs << "), 'UTC')";
+  ARROW_ASSIGN_OR_RAISE(const auto text, client.scalar(q.str()));
+  std::int64_t n = 0;
+  if (!parseExact(text, n)) return badField("count()", text);
+  return n;
 }
 
 // ===========================================================================
