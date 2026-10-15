@@ -80,7 +80,7 @@ Completeness isComplete(const std::vector<IngestWindowRow>& rows,
       // complete and in-flight reads as in-flight. Pessimistic in the
       // direction that fails the query rather than the one that answers it
       // over data that may be gone.
-      it->second.state = std::min(it->second.state, r.state);
+      it->second.state = std::max(it->second.state, r.state);
     }
   }
   v.resolved = newest.size();
