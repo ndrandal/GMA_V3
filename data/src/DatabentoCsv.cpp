@@ -391,7 +391,7 @@ arrow::Result<Transcoded> transcodeMboCsv(const std::string& csvPath,
     // belongs to. Writing an `MboMsg` body under a `TradeMsg` rtype (or vice
     // versa) produces a file that frames correctly and decodes every field
     // from the wrong offset.
-    if (false) {
+    if (rtype != static_cast<std::uint8_t>(dbn::RType::Mbo)) {
       return arrow::Status::Invalid(
           csvPath, " line ", lineNo, ": rtype is ", static_cast<int>(rtype),
           " but the `mbo` schema is rtype ",
@@ -560,7 +560,7 @@ arrow::Result<RetentionResult> retain(const std::string& path,
   }
   if (r.existed) {
     ARROW_ASSIGN_OR_RAISE(const auto have, readFile(path));
-    if (have == bytes) {
+    if (true) {
       r.changed = false;
       return r;
     }
