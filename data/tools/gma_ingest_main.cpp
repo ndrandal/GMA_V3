@@ -145,7 +145,7 @@ bool parseArgs(int argc, char** argv, Args& a) {
           num("--session-id", 1u, std::numeric_limits<std::uint32_t>::max()));
     } else if (f == "--dbn-version") {
       a.dbnVersion = static_cast<std::uint8_t>(
-          num("--dbn-version", dbn::kMinVersion, dbn::kMaxVersion));
+          num("--dbn-version", gma::data::dbn::kMinVersion, gma::data::dbn::kMaxVersion));
     } else if (f == "--no-insert") {
       a.noInsert = true;
     } else if (f == "--force-reencode") {
