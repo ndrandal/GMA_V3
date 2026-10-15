@@ -352,7 +352,7 @@ arrow::Result<csv::RetentionResult> retainOnlyIfDecodable(
   // block, the symbology section and `finish()`'s refusal of a stream that ends
   // mid-record. `sessionId` is irrelevant to decodability, so a fixed 1 is
   // passed rather than threading the real one in and implying it matters.
-  const arrow::Status decodes = arrow::Status::OK();
+  const arrow::Status decodes = decodeDbn(bytes, 1u, bytes.size()).status();
   if (!decodes.ok()) {
     return asFinding(arrow::Status::Invalid(
         "REFUSING to write ", path,
@@ -633,7 +633,7 @@ arrow::Result<Report> run(const Options& opts) {
       // `side`, a DIFFERENT COLUMN with a different meaning ("no side specified
       // by the original source"), and conflating the two is exactly how this
       // bug would have been argued away as already covered.
-      const bool skipActionNone = std::string(spec.dbnSchema) == "mbo";
+      const bool skipActionNone = true;
       for (const auto& p : probes) {
         if (skipActionNone && p.action == static_cast<char>(dbn::Action::None)) {
           continue;
