@@ -241,9 +241,16 @@ TEST(IngestWindowsReadRule, AnInvertedOrEmptyRequestIsNotTriviallyComplete) {
 }
 
 TEST(IngestWindowsReadRule, AnEmptyRecordedWindowCannotBridgeAHole) {
-  // A recorded [t, t) covers nothing. If `mergeIntervals` kept it, it would sit
-  // between two real windows and join them, manufacturing coverage of the hole
-  // it sits in.
+  // A recorded [t, t) covers nothing, and a window sitting exactly at a hole's
+  // start must not manufacture coverage of it.
+  //
+  // This is a REGRESSION test, not a falsifiable one, and the distinction is
+  // worth writing down: a sweep that removed `mergeIntervals`' empty-interval
+  // filter left this case GREEN, because an empty interval cannot extend a
+  // merged run (see the long note in IngestWindows.cpp). The behaviour asserted
+  // here is right and is worth pinning; what it does not do is prove that
+  // filter earns its line. `IngestWindowsMerge` below is where the filter
+  // itself is asserted.
   const std::vector<IngestWindowRow> rows{
       row(0, kD, 1, 100),
       row(kD, kD, 1, 100),  // empty, exactly at the hole's start
