@@ -20,7 +20,9 @@
 #include "gma/data/DatabentoCsv.hpp"
 
 #include "gma/data/DatabentoAdapter.hpp"
+#include "gma/data/IngestJob.hpp"
 #include "gma/data/SymbolTable.hpp"
+#include "gma/data/Verdict.hpp"
 
 #include <gtest/gtest.h>
 
@@ -649,6 +651,184 @@ TEST(DatabentoCsvRetention, ReadingAnAbsentFileIsAnErrorNotAnEmptyBuffer) {
 }
 
 // ===========================================================================
+// MONOTONICITY — code-review finding #10, the one that sat under the
+// completeness claim.
+// ===========================================================================
+
+TEST(DatabentoCsvTruncation, OutOfOrderTsEventIsRefusedRatherThanPublished) {
+  const TempDir d;
+  // `deliveredEnd()` publishes the LAST record's ts_event as the exclusive end
+  // written to gma.ingest_windows, and that is only the delivered end if the
+  // vendor emits in time order. The justification was an unchecked assumption
+  // about the input; now it is asserted, and a violation is a REFUSAL rather
+  // than a quietly smaller window.
+  const auto p = d.file("x.csv", std::string(kMboHeader) +
+                                     mboRow(kT0, 'A', 'B', 100, 1, 9, 5) +
+                                     mboRow(kT0 + 50, 'A', 'B', 101, 1, 10, 6) +
+                                     mboRow(kT0 + 10, 'A', 'B', 102, 1, 11, 7));
+  const auto r = transcodeMboCsv(p, md("mbo"));
+  ASSERT_FALSE(r.ok());
+  EXPECT_NE(r.status().message().find("ts_event went BACKWARDS"),
+            std::string::npos)
+      << r.status().message();
+  // And it is a FINDING, not a could-not-run: the file read fine and what it
+  // says is wrong.
+  EXPECT_TRUE(isFinding(r.status()));
+  EXPECT_EQ(exitCodeFor(r.status()), 1);
+
+  // In order, the same three rows are accepted — so the refusal above is about
+  // the ordering and not about the rows.
+  const auto ok = d.file("ok.csv", std::string(kMboHeader) +
+                                       mboRow(kT0, 'A', 'B', 100, 1, 9, 5) +
+                                       mboRow(kT0 + 10, 'A', 'B', 102, 1, 11, 7) +
+                                       mboRow(kT0 + 50, 'A', 'B', 101, 1, 10, 6));
+  const auto good = transcodeMboCsv(ok, md("mbo"));
+  ASSERT_TRUE(good.ok()) << good.status().ToString();
+  EXPECT_EQ(good->lastTsEvent, kT0 + 50);
+}
+
+TEST(DatabentoCsvTruncation, RepeatedTimestampsAreNotADescent) {
+  const TempDir d;
+  // Equal consecutive ts_event is normal — one venue message group yields
+  // several records — and must not trip the monotonicity check.
+  const auto p = d.file("x.csv", std::string(kMboHeader) +
+                                     mboRow(kT0, 'T', 'A', 100, 1, 0, 5) +
+                                     mboRow(kT0, 'F', 'B', 100, 1, 9, 5) +
+                                     mboRow(kT0, 'C', 'B', 100, 1, 9, 5));
+  const auto r = transcodeMboCsv(p, md("mbo", 3));
+  ASSERT_TRUE(r.ok()) << r.status().ToString();
+  EXPECT_EQ(r->recordsAtLastTsEvent, 3u);
+  EXPECT_TRUE(r->truncatedByLimit);
+}
+
+// ===========================================================================
+// RETAIN ONLY IF DECODABLE — code-review finding #3, the worst of the review.
+// ===========================================================================
+
+TEST(DatabentoCsvRetention, AnExistingBaselineSurvivesUndecodableReplacement) {
+  const TempDir d;
+  const auto path = d.at("sample.dbn");
+
+  // A good baseline, written the normal way.
+  const auto csvPath = d.file(
+      "x.csv", std::string(kMboHeader) + mboRow(kT0, 'A', 'B', 100, 10, 9, 5));
+  const auto good = transcodeMboCsv(csvPath, md("mbo"));
+  ASSERT_TRUE(good.ok()) << good.status().ToString();
+  ASSERT_TRUE(ingest::retainOnlyIfDecodable(path, good->dbn).ok());
+  {
+    const auto back = readFile(path);
+    ASSERT_TRUE(back.ok());
+    EXPECT_EQ(*back, good->dbn);
+  }
+
+  // Now try to replace it with bytes the adapter refuses. The encoder writes
+  // what it is told, including a DBN version that does not exist; the DECODER
+  // refuses an unknown version rather than guessing, which is correct — and is
+  // exactly why the old order was fatal: it wrote first and discovered second.
+  std::vector<std::byte> undecodable = good->dbn;
+  ASSERT_GT(undecodable.size(), 4u);
+  undecodable[3] = std::byte{7};  // the version byte
+
+  const auto refused = ingest::retainOnlyIfDecodable(path, undecodable);
+  ASSERT_FALSE(refused.ok());
+  EXPECT_NE(refused.status().message().find("REFUSING to write"),
+            std::string::npos)
+      << refused.status().message();
+  EXPECT_TRUE(isFinding(refused.status()));
+
+  // THE ASSERTION THAT MATTERS: the D6 baseline is byte-for-byte intact. Before
+  // the fix this file held the undecodable bytes and `gma_ingest reload` — whose
+  // entire premise is "a reload must reload FROM something" — failed on it
+  // permanently.
+  const auto after = readFile(path);
+  ASSERT_TRUE(after.ok());
+  EXPECT_EQ(*after, good->dbn)
+      << "the retained DBN was replaced by bytes the adapter refuses";
+
+  // And the undecodable bytes really are undecodable, so the test is not
+  // passing because the mutation was a no-op.
+  EXPECT_NE(undecodable, good->dbn);
+}
+
+TEST(DatabentoCsvRetention, NoTempFileIsLeftBehindByARefusal) {
+  const TempDir d;
+  const auto path = d.at("sample.dbn");
+  std::vector<std::byte> junk{std::byte{'D'}, std::byte{'B'}, std::byte{'N'},
+                              std::byte{9}};
+  EXPECT_FALSE(ingest::retainOnlyIfDecodable(path, junk).ok());
+  EXPECT_FALSE(std::filesystem::exists(path));
+  // The unique temp name (finding #9) is `<path>.partial.XXXXXX`, so check the
+  // directory holds nothing matching rather than one fixed name.
+  for (const auto& e : std::filesystem::directory_iterator(
+           std::filesystem::path(path).parent_path())) {
+    EXPECT_EQ(e.path().string().find(".partial"), std::string::npos)
+        << "a temporary survived: " << e.path();
+  }
+}
+
+// ===========================================================================
+// THE EXIT-CODE CLASSIFICATION — code-review finding #1.
+// ===========================================================================
+
+TEST(DatabentoCsvVerdict, AnUntaggedStatusIsCouldNotRunAndATaggedOneIsAFinding) {
+  const arrow::Status plain = arrow::Status::Invalid("something");
+  EXPECT_FALSE(isFinding(plain));
+  EXPECT_EQ(exitCodeFor(plain), 2) << "the default is COULD NOT RUN";
+
+  const arrow::Status tagged = asFinding(arrow::Status::Invalid("something"));
+  EXPECT_TRUE(isFinding(tagged));
+  EXPECT_EQ(exitCodeFor(tagged), 1);
+  EXPECT_NE(tagged.message().find("something"), std::string::npos)
+      << "tagging must not eat the message";
+
+  EXPECT_EQ(exitCodeFor(arrow::Status::OK()), 0);
+  EXPECT_FALSE(isFinding(arrow::Status::OK()));
+  // Tagging an OK status is a no-op rather than a lie.
+  EXPECT_TRUE(asFinding(arrow::Status::OK()).ok());
+  EXPECT_FALSE(isFinding(asFinding(arrow::Status::OK())));
+
+  // An IOError tagged as a finding IS one: the classification is the site's
+  // decision, not the status code's. "The retained DBN does not read back" was
+  // naturally an IOError and is a finding.
+  EXPECT_EQ(exitCodeFor(asFinding(arrow::Status::IOError("x"))), 1);
+}
+
+TEST(DatabentoCsvVerdict, TheFindingSitesInTheCsvReaderAreTagged) {
+  const TempDir d;
+  // Two tickers for one instrument_id: the data read fine and is wrong.
+  auto second = mboRow(kT0 + 1, 'A', 'B', 100, 1, 10, 6);
+  second.replace(second.rfind("ZZZZ"), 4, "YYYY");
+  const auto twoTickers = transcodeMboCsv(
+      d.file("a.csv", std::string(kMboHeader) +
+                          mboRow(kT0, 'A', 'B', 100, 1, 9, 5) + second),
+      md("mbo"));
+  ASSERT_FALSE(twoTickers.ok());
+  EXPECT_EQ(exitCodeFor(twoTickers.status()), 1);
+
+  // A malformed header is a COULD-NOT-RUN: nothing about the data was judged,
+  // the file simply is not the file this reader processes. The two must not
+  // collapse onto one code — that is the whole point of finding #1.
+  const auto badHeader = transcodeMboCsv(d.file("b.csv", "nope,nothing\n"), md("mbo"));
+  ASSERT_FALSE(badHeader.ok());
+  EXPECT_EQ(exitCodeFor(badHeader.status()), 2);
+}
+
+// ===========================================================================
+// SQL QUOTING — code-review finding #5.
+// ===========================================================================
+
+TEST(DatabentoCsvSql, SqlQuoteEscapesWhatClickHousesGrammarNeeds) {
+  EXPECT_EQ(ch::sqlQuote("MSFT"), "'MSFT'");
+  EXPECT_EQ(ch::sqlQuote(""), "''");
+  // The exploit from the review: `verify --symbol "x' OR 1=1 --"` made the
+  // completeness read answer over every symbol in the table.
+  EXPECT_EQ(ch::sqlQuote("x' OR 1=1 --"), "'x\\' OR 1=1 --'");
+  EXPECT_EQ(ch::sqlQuote("back\\slash"), "'back\\\\slash'");
+  // A value that is nothing but quote characters still comes out balanced.
+  EXPECT_EQ(ch::sqlQuote("''"), "'\\'\\''");
+}
+
+// ===========================================================================
 // ANTI-VACUITY. `data/CMakeLists.txt` globs `tests/*.cpp` WITHOUT
 // CONFIGURE_DEPENDS (ENC-1495): a new file that was never configured in is not
 // compiled and the binary reports "0 tests from 0 test suites" at EXIT 0. This
@@ -667,7 +847,7 @@ TEST(DatabentoCsvAntiVacuity, EveryCaseInThisFileIsRegistered) {
       found += suite->total_test_count();
     }
   }
-  EXPECT_EQ(found, 29) << "the DatabentoCsv* suites in this file lost or gained a "
+  EXPECT_EQ(found, 38) << "the DatabentoCsv* suites in this file lost or gained a "
                           "case; update the number deliberately rather than "
                           "letting the count drift";
 }
