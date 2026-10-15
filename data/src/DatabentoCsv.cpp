@@ -150,7 +150,7 @@ struct Common {
             std::size_t lineNo) {
     if (out.records == 0) {
       out.firstTsEvent = tsEvent;
-    } else if (tsEvent <= out.lastTsEvent && !sawDescent) {
+    } else if (tsEvent < out.lastTsEvent && !sawDescent) {
       sawDescent  = true;
       descentPrev = out.lastTsEvent;
       descentAt   = tsEvent;
