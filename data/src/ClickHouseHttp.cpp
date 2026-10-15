@@ -10,8 +10,10 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 
+#include <algorithm>
 #include <charconv>
 #include <cstdlib>
+#include <cstring>
 #include <sstream>
 
 namespace gma::data::ch {
@@ -105,6 +107,9 @@ Client::Client(Target target) : target_(std::move(target)) {
 }
 
 arrow::Result<std::string> Client::exec(std::string_view sql) const {
+  // Whether the request reached the server. It decides what the catch block is
+  // allowed to CLAIM — see there (code-review finding #13).
+  bool sent = false;
   try {
     boost::asio::io_context ioc;
     tcp::resolver resolver(ioc);
@@ -118,6 +123,7 @@ arrow::Result<std::string> Client::exec(std::string_view sql) const {
     req.body() = std::string(sql);
     req.prepare_payload();
     http::write(stream, req);
+    sent = true;
 
     beast::flat_buffer buffer;
     http::response<http::string_body> res;
@@ -137,11 +143,32 @@ arrow::Result<std::string> Client::exec(std::string_view sql) const {
     }
     return res.body();
   } catch (const std::exception& e) {
+    // THE MESSAGE IS CONDITIONAL ON `sent`, because the unconditional version
+    // was false (code-review finding #13). It said "nothing was read and
+    // nothing was written" — true when the connect or the write failed, and a
+    // LIE when the throw came from reading the response to a `DROP PARTITION`
+    // or an `INSERT`: the server may well have applied it, and in this job
+    // those are the two statements whose application matters most. In a file
+    // this careful about not over-claiming, an unconditional reassurance is the
+    // one sentence that must not be there.
+    if (!sent) {
+      return arrow::Status::IOError(
+          "cannot reach ClickHouse at ", target_.url, " (", target_.how, "): ",
+          e.what(),
+          ".\nThis is a COULD-NOT-RUN, not a finding: the request was never "
+          "sent, so nothing was read and nothing was written. Start the server "
+          "(tools/stack.sh up clickhouse) or point --url / CH_HTTP_URL at the "
+          "right one.");
+    }
     return arrow::Status::IOError(
-        "cannot reach ClickHouse at ", target_.url, " (", target_.how, "): ", e.what(),
-        ".\nThis is a COULD-NOT-RUN, not a finding: nothing was read and "
-        "nothing was written. Start the server (tools/stack.sh up clickhouse) or "
-        "point --url / CH_HTTP_URL at the right one.");
+        "the request to ClickHouse at ", target_.url, " (", target_.how,
+        ") was SENT and then failed: ", e.what(),
+        ".\n⚠ WHETHER THE SERVER APPLIED IT IS UNKNOWN. This is a "
+        "COULD-NOT-RUN rather than a finding — no verdict was reached — but it "
+        "is not a no-op: if the statement was a DROP PARTITION or an INSERT, L1 "
+        "may have changed. Re-run `gma_ingest ingest` (DROP PARTITION + reload "
+        "is exact, SPEC D5) and then `gma_ingest verify`.\n--- statement ---\n",
+        std::string(sql.substr(0, std::min<std::size_t>(sql.size(), 400))));
   }
 }
 
@@ -177,6 +204,18 @@ arrow::Result<std::string> Client::scalar(std::string_view sql) const {
     return arrow::Status::Invalid("expected exactly one field from:\n", sql);
   }
   return rows[0][0];
+}
+
+std::string sqlQuote(std::string_view s) {
+  std::string out;
+  out.reserve(s.size() + 2);
+  out += '\'';
+  for (const char c : s) {
+    if (c == '\\' || c == '\'') out += '\\';
+    out += c;
+  }
+  out += '\'';
+  return out;
 }
 
 std::string tsvEscape(std::string_view s) {
