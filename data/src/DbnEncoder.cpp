@@ -1,8 +1,9 @@
 //
 // DbnEncoder — see DbnEncoder.hpp for why this is a library component.
 //
-// EVERY LINE HERE WAS MOVED, NOT REWRITTEN. It is byte-identical in behaviour
-// to the encoder that lived in `DatabentoAdapterTest.cpp` under ENC-1482, with
+// EVERY LINE HERE WAS MOVED, NOT REWRITTEN (ENC-1483; begun under the cancelled
+// ENC-1498). It is byte-identical in behaviour to the encoder that lived in
+// `DatabentoAdapterTest.cpp` under ENC-1482, with
 // exactly one change: the fixed-metadata-block size check was a gtest
 // `EXPECT_EQ` and is now a thrown `std::logic_error` plus an out-param, since
 // a library cannot link gtest. `DbnEncoderTest.EncoderReproducesEveryFixtureByteForByte`

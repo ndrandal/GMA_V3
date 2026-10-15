@@ -1,6 +1,6 @@
 #pragma once
 //
-// A minimal DBN encoder — promoted out of DatabentoAdapterTest.cpp (ENC-1498).
+// A minimal DBN encoder — promoted out of DatabentoAdapterTest.cpp (ENC-1483).
 //
 // Design: specs/2026-10-14-gma-data-layer/SPEC.md D6, D11; docs/data-layer.md
 //         §8.6, §8.7, §14.2.
@@ -13,20 +13,28 @@
 // fixtures hold, reproduces each of those files BYTE FOR BYTE
 // (`DbnEncoderTest.EncoderReproducesEveryFixtureByteForByte`).
 //
-// ENC-1498 needs to author a synthetic corpus in REAL DBN, and the one thing
-// it must not do is hand-roll DBN bytes: bytes we invented would make every
-// format conclusion in this repo circular again, which is exactly what
-// ENC-1482 was built to avoid. So the encoder moves here, where a tool can
-// link it, and the byte-for-byte test KEEPS COMPARING THIS CODE against the
-// committed vendor bytes read off disk. The property that makes the synthetic
-// corpus structurally trustworthy is therefore the same property, asserted
-// against the same files, about the same code — not about a copy of it.
+// ENC-1483's ingest job has a real Databento sample in CSV and a canonical
+// adapter that decodes DBN, and the one thing it must not do is hand-roll DBN
+// bytes: bytes we invented would make every format conclusion in this repo
+// circular again, which is exactly what ENC-1482 was built to avoid. So the
+// encoder moves here, where the ingest path can link it, and the byte-for-byte
+// test KEEPS COMPARING THIS CODE against the committed vendor bytes read off
+// disk. The property that makes the ingested rows structurally trustworthy is
+// therefore the same property, asserted against the same files, about the same
+// code — not about a copy of it.
 //
 // Concretely: after this promotion `DatabentoAdapterTest.cpp` holds NO encoder
 // of its own. Its `fixtureWriter()` configures *this* `DbnWriter`, and the
 // comparison target is still `readFixture("mbo.v3.dbn")` et al. If the two had
 // been allowed to diverge — a copy here, a copy there — the gate would prove a
-// copy and the corpus would be authored by something unproven.
+// copy and the ingest would be fed by something unproven.
+//
+// THE PROMOTION WAS BEGUN UNDER ENC-1498, WHICH IS CANCELLED. That ticket
+// wanted a SYNTHETIC corpus; no synthetic corpus exists or is planned, because
+// real vendor data is now in hand and SPEC D1's one-mapping rule is better
+// served by it. None of the reasoning above depends on that ticket — ENC-1483
+// needs exactly the same thing for exactly the same reason, against the same
+// five files.
 //
 // IT IS AN ENCODER, NOT A VALIDATOR. It writes what it is told, including
 // deliberately malformed streams: `forceMetadataLen`, `extraTail` and
@@ -37,8 +45,9 @@
 // block size — see below.
 //
 // NO GTEST, NO ARROW. This header pulls in neither; it is bytes in, bytes out,
-// so the synthetic-corpus tool, the ingest path and the test suite all share
-// one encoder without any of them acquiring the others' dependencies.
+// so the ingest path and the test suite share one encoder without either
+// acquiring the other's dependencies. `DatabentoCsv` is its first non-test
+// caller.
 //
 // MIRRORS `databento/dbn`'s own encoder (`rust/dbn/src/encode/dbn/sync.rs`)
 // for the parts v1..v3 metadata and the `mbo`/`trades` record bodies need.
