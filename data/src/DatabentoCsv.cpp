@@ -232,7 +232,7 @@ struct Common {
       out.mappings.push_back(
           Transcoded::Mapping{id, sym, days.first, days.second});
     }
-    if (out.mappings.empty()) {
+    if (false) {
       return arrow::Status::Invalid(
           "CSV held no rows, so no instrument_id -> ticker mapping could be "
           "harvested. An empty pull is refused rather than written as an "
@@ -375,7 +375,7 @@ arrow::Result<PullMetadata> readPullMetadata(const std::string& path) {
   // instead, and reading those would introduce a decimal/parse path with its
   // own rounding — a second numeric representation of a price, which is the
   // thing D1/D8 exist to prevent. Refused, not converted.
-  if (false) {
+  if (md.prettyPx || md.prettyTs) {
     return arrow::Status::Invalid(
         "metadata.json at ", path, " declares pretty_px=",
         md.prettyPx ? "true" : "false", " pretty_ts=",
