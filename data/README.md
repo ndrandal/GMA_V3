@@ -103,6 +103,11 @@ row is the gate's **positive control**: its closure must trip a forbidden patter
 | `../include/gma/data/Record.hpp` | **real** — the engine-facing PODs (in `gma_engine`) |
 | `../include/gma/data/SymbolTable.hpp` | **real** — ticker/venue interning (in `gma_engine`) |
 | `include/gma/data/DatabentoAdapter.hpp` + `src/DatabentoAdapter.cpp` | **real** — the DBN decoder and the DBN→canonical mapping (ENC-1482) |
+| `include/gma/data/DbnEncoder.hpp` + `src/DbnEncoder.cpp` | **real** — a DBN *encoder*, promoted out of the test TU (ENC-1483). It is a non-circularity instrument first and a component second: the layout claims in `DatabentoAdapter.hpp` are believed only because this code reproduces five real vendor files byte for byte |
+| `include/gma/data/DatabentoCsv.hpp` + `src/DatabentoCsv.cpp` | **real** — vendor CSV → the vendor's own PODs → real DBN, plus `metadata.json` and D6 retention (ENC-1483). It stops at `dbn::MboMsg`/`dbn::TradeMsg`: one mapping to canonical form exists and it is the adapter's (D1) |
+| `include/gma/data/IngestWindows.hpp` + `src/IngestWindows.cpp` | **real** — the `gma.ingest_windows` read rule, as code (ENC-1483) |
+| `include/gma/data/ClickHouseHttp.hpp` + `src/ClickHouseHttp.cpp` | **real** — a minimal Boost.Beast HTTP client, for the ingest job only. Not the native-protocol client: that is one arm of ENC-1485's B1 measurement and shipping it here would pre-answer it |
+| `include/gma/data/IngestJob.hpp` + `src/IngestJob.cpp` + `tools/gma_ingest_main.cpp` | **real** — the ingest job and the `gma_ingest` binary (ENC-1483) |
 | `tests/fixtures/dbn/` | **real Databento DBN bytes**, Apache-2.0 — see `PROVENANCE.md` there |
 | `include/gma/data/IProviderAdapter.hpp` | sketch — the `IProviderAdapter` / `INormalizer` interfaces. `DatabentoAdapter` deliberately does **not** implement it yet: that interface carries `subscribeFrame` / `snapshotRequestFrame` / `fetchHistory`, which are live-gateway and HTTP concerns outside ENC-1482's scope |
 | `include/gma/data/Shim.hpp` | sketch — ENC-1485 and the post-measurement plan |
@@ -136,6 +141,37 @@ layout is established by five committed files of **real vendor bytes** (`tests/f
 Apache-2.0) rather than by assertion — the test's first act is to prove a DBN encoder
 reproduces each of them byte for byte, and only then uses it to reach the actions a
 two-record sample cannot.
+
+## The ingest job in one paragraph
+
+`gma_ingest` (ENC-1483) is the only writer into L1. The path is **vendor CSV →
+`DatabentoCsv` → the vendor's own 56-/48-byte PODs → `DbnEncoder` → real DBN bytes written to
+disk → read back from disk → `DatabentoAdapter` → `TickRecord`/`BookRecord` →
+`FORMAT TabSeparated` into `gma.trades`/`gma.book_events`**. The DBN leg is not a detour: the
+canonical adapter is a DBN decoder, and a second CSV→canonical mapping is what SPEC D1
+refuses, so the CSV is translated into the *vendor's* encoding and stops there. The read-back
+is not ceremony either — D5's re-ingest is `DROP PARTITION` + reload and D6 makes the retained
+files what it reloads *from*, so the reload path is the only insert path and runs on the first
+ingest rather than first being used in anger during a recovery. `gma_ingest reload` drops the
+CSV legs entirely; the DBN's own metadata block carries `start`, `end` and `limit`, which is
+what makes "reload needs nothing but the file" true, and `session_id` is `FNV-1a-32` of that
+file so a reload reproduces **bit-identical** rows.
+
+`gma_ingest verify` is the D11 demonstration, and every verdict in it goes through the read
+rule in `IngestWindows.hpp` — *newest row by `updated_at` per recorded window, require
+`state = 1`, then test coverage of the request* — never through a row count. On the real
+sample a request for the full trading day **refuses** (90 minutes were requested and 68
+seconds delivered, because the pull carried `limit: 1000`), a request for exactly the recorded
+window succeeds, and a request one nanosecond past its end refuses. Row counts are printed
+beside every verdict and labelled as diagnostics, because a quiet window and a missing window
+have the same count — on this data the day-wide request that *refuses* reports **more** rows
+than the in-window request that *succeeds*.
+
+**It is an executable, not a `ctest` case, deliberately.** It needs a live ClickHouse, and a
+test that skips when the server is absent looks exactly like a test that passed — the
+ENC-1095 failure. So the logic that can be wrong is unit-tested with no server at all
+(`tests/IngestWindowsTest.cpp`, `tests/DatabentoCsvTest.cpp`), and `gma_ingest`'s exit code is
+the verdict: **0** clean, **1** a finding, **2** could not run.
 
 ## The schema in one paragraph
 

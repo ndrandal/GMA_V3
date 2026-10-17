@@ -186,7 +186,7 @@ Resolve before the ticket that depends on each. None block the first slice.
 | **Q10** | Chart fill depth at scene-init: accept bounded attach-with-N-bars, or change the wire? *Recommend accept.* | embassy ticket |
 | **Q11** | Persist derived series as a cache? If yes, invalidation key is graph identity. | after B3 |
 | ~~**Q14**~~ | ~~Databento client library, or decode DBN directly?~~ **RESOLVED by T4 (ENC-1482): decode DBN ourselves.** See Q14 below. | — |
-| **Q15** | Confirm the planner **refuses** a graph reading `trades` + `book_events` for one symbol/window (D12) rather than reconciling. *Recommend refuse.* | the planner |
+| **Q15** | Confirm the planner **refuses** a graph reading `trades` + `book_events` for one symbol/window (D12) rather than reconciling. *Recommend refuse — and T5 measured the evidence: 157 of 157 `mbo` executions are also `trades` rows at the same `(ts_event, sequence)`.* | the planner |
 
 **Q14 — resolved by T4 (ENC-1482): we decode DBN ourselves; we do not link
 `databento-cpp`.** The deciding number is dependency weight, and it is larger than it looks.
@@ -239,13 +239,16 @@ memory":**
   record at a 7-byte offset.
 
 **Still unverified, to be established by measurement rather than assertion:** whether
-`instrument_id` is stable within a dataset-day (T5 — one id in a two-record sample proves
-nothing); `book_events` sort-key uniqueness against real MBO (T6); whether `ob::Provider`
-consults `isStale` before serving `ob.*` (post-measurement). And one T4 added:
+`instrument_id` is stable within a dataset-day (**T5 narrowed it, did not close it** — see
+below); whether `ob::Provider` consults `isStale` before serving `ob.*` (post-measurement).
+`book_events` sort-key uniqueness is **measured** — see T5's block. And one T4 added:
 
-- **Does a DBN `Fill` arrive with a separate `Cancel`/`Modify` carrying the resting order's
-  reduction?** DBN's own documentation says `Fill` "Does not affect the book", which implies
-  yes; `ItchAdapter` does the opposite because ITCH has no such separate message and
+- ~~**Does a DBN `Fill` arrive with a separate `Cancel`/`Modify` carrying the resting
+  order's reduction?**~~ **RESOLVED by T5 (ENC-1483) against real MBO: YES — 91 of 91, so
+  `fillReducesRestingOrder` stays `false`.** See T5's block below for the measurement. The
+  original statement of the question is kept because the hazard it names is permanent for any
+  future provider: DBN's own documentation says `Fill` "Does not affect the book", which
+  implies yes; `ItchAdapter` does the opposite because ITCH has no such separate message and
   `routeOrderExecuted` must apply the reduction itself. **Applying both double-reduces the
   order; applying neither leaves phantom size**, and the public sample fixtures contain only
   `Cancel` records so it cannot be measured from them. The adapter defaults to DBN's contract
@@ -253,6 +256,141 @@ consults `isStale` before serving `ob.*` (post-measurement). And one T4 added:
   `DatabentoAdapter::Config::fillReducesRestingOrder`, with both branches tested. **T5
   (ENC-1483) must settle this against real MBO before the first ingest** — it is a wrong
   *answer*, not a cosmetic bug.
+
+**Facts T5 (ENC-1483) settled by measurement, against the real Databento sample Nick
+pulled** — `XNAS.ITCH`, `MSFT`, `mbo` + `trades`, requested `2022-06-10 12:30:00–14:00:00
+UTC`, `limit: 1000`, CSV with `pretty_px: false` / `pretty_ts: false`. The files live at
+`~/market-data/databento/XNAS.ITCH/MSFT/20220610/`, **outside every git working tree**,
+because §14.2 names committing Databento data a redistribution question not worth answering.
+Driven by `gma_ingest`, which transcodes CSV → the vendor's own PODs → **real DBN** via the
+byte-for-byte-verified `DbnEncoder`, retains the `.dbn` beside the CSVs (D6), and decodes it
+back through ENC-1482's adapter. One mapping to canonical form exists and it is the adapter's
+(D1).
+
+- **`Config::fillReducesRestingOrder` is `false`, and the default is now MEASURED.** **91 of
+  91** `F` records are accompanied by a `C` for the **same `order_id`** at the same
+  `(ts_event, sequence)` — the shape is `T`, `F`, `C` in one message group. The venue emits
+  the resting reduction itself, so applying the fill as a second reduction double-reduces on
+  **100%** of fills. T4's open question, the one flagged as "a wrong *answer*, not a cosmetic
+  bug", is closed in the direction DBN's own documentation implies.
+- **`ts_recv == ts_event + ts_in_delta`, 1000/1000, both kinds.** `ts_recv` is derivable and
+  `ts_in_delta` is exactly the gateway delta, which supports §8.3 confining `ts_recv` to
+  diagnostics. (Beware measuring this with `awk`: these are 19-digit integers, past 2^53, and
+  floating-point arithmetic reports ~20% false mismatches. Measured exactly in Python and in
+  C++.)
+- **`book_events`' sort key is NOT unique, and this is T6/ENC-1484's number: 676 distinct
+  `(symbol, ts_event, provider_seq)` over 1000 rows — 324 rows share a key with another
+  row.** `trades` is 1000 distinct over 1000. The cause is visible in the first three lines of
+  the file: one DBN message group yields a trade print, a fill and a cancel, all three
+  carrying one `ts_event` and one `sequence`. **D5's plain `MergeTree` is therefore
+  load-bearing on real data, not defensive** — a `ReplacingMergeTree` on this key would
+  collapse 324 real rows in a way indistinguishable from a gap (C12). T6 still owns the
+  *second* half of its question: whether adding discriminating columns to the key earns its
+  insert cost.
+- **`instrument_id` is constant at 7370 across the window — and this does NOT close the
+  dataset-day question. Scoped, not settled.** The delivered data is 68 seconds of `mbo` and
+  22 minutes of `trades` (next bullet), nowhere near a dataset-day, and reassignment is a
+  between-days event. The full-day question still needs a full day.
+- **D12/C13 is real and total: 157 of 157 `mbo` `action='T'` records appear in `trades` at the
+  same `(ts_event, sequence)`.** Every execution is in the store twice, so the planner's
+  refusal of a graph reading `trades` and `book_events` for one symbol and window (Q15) is
+  load-bearing. This is the evidence for recommending **refuse**.
+- **Action mix, and what it does NOT exercise:** `mbo` is `C` 407, `A` 345, `T` 157, `F` 91 —
+  **no `M` and no `R`**. `trades` is `T` 1000. **The replace and clear/epoch-bump paths are
+  unexercised by real data**; only the synthetic branches in `DatabentoAdapterTest` cover
+  them. Stated plainly rather than implied by an absence. Canonically the 1000 `mbo` records
+  become `Add` 345, `Delete` 402, `Update` 5 (the five partial cancels), `Trade` 248
+  (= 157 `T` + 91 `F`). `side` `N` appears on 65 `mbo` rows (all `Trade`, all carrying
+  `kGmaFlagSideUnspecified`) and on 546 of 1000 `trades` rows (all `Aggressor::Unknown`).
+
+**And three facts T5 found that nothing in the design anticipated:**
+
+- **⚠ THE PULL IS TRUNCATED, AND `ingest_windows` MUST RECORD THE DELIVERED WINDOW, NOT THE
+  REQUESTED ONE.** Both jobs carried `limit: 1000` and returned exactly 1000 records, so the
+  delivered data is a **prefix**: `mbo` spans `[12:30:01.100846675, 12:31:09.372036574]` —
+  **68.3 seconds** — and `trades` spans `[12:30:01.100846675, 12:52:21.448758549]` —
+  **22.3 minutes**. Recording the requested `[12:30, 14:00)` as complete would be the §8.8
+  failure *in the one table that exists to prevent it*: a research run over 13:00–13:30 would
+  read complete and get a flat market. So the job records
+  `[requested_start, last_ts_event)` when `records == limit`, and
+  `[requested_start, requested_end)` otherwise. Two clauses are deliberate: **`from_ts` is the
+  requested start, not the first record's `ts_event`** — the vendor delivers everything from
+  `start`, so a quiet opening second is *data*; and **`to_ts` is the last `ts_event`
+  EXCLUSIVE, not `+1ns`** — the cut may have landed inside a group of records sharing one
+  instant (ten records carry `mbo`'s last `ts_event`) and the file cannot say whether it did,
+  so the possibly-partial final instant is dropped from the *claim* while its rows are still
+  inserted. **Truncation is detectable at all only because `limit` is written into the
+  retained DBN's metadata block**, which is what makes the D6 reload self-sufficient.
+- **`gma.gaps` cannot be populated from a symbol-filtered pull, and zero rows is the honest
+  answer.** §8.8 detects a provider hole as "a seq discontinuity", but Databento's `sequence`
+  is the **venue's**, not the symbol's: consecutive MSFT records step
+  `11404021 → 11404028 → 11423666`. `provider_seq` is **monotonic** within
+  `(session_id, symbol)` exactly as §8.3 says — sorted, 1000/1000, both kinds — but it is not
+  **contiguous**, and gap detection needs contiguity. A gap row per jump would have
+  manufactured hundreds of phantom holes per kind, each of which a research run joining `gaps`
+  reads as "there was no data here" — the same wrong-answer class the table exists to prevent.
+  A real detector for a filtered pull needs an unfiltered channel feed or the vendor's
+  `condition.json` (which for 2022-06-10 reads `available`). **New ticket, not a line in
+  T5.**
+- **Two batch jobs extracted into one directory leave ONE `metadata.json`, and it is silently
+  the wrong one for one of the two CSVs.** Each vendor zip carries its own; the `trades` job's
+  was overwritten on extraction, so the surviving file describes the `mbo` job. Since
+  `start`, `end` and `limit` are exactly what `ingest_windows` forms its claim from, the job
+  **refuses** a `metadata.json` whose `query.schema` does not match the CSV being read, and
+  prints the `unzip -p` command that extracts per-job sidecars. It refused on the first run.
+
+**§8.10's codec question is NOT answerable from this sample, and the reason is structural.**
+1000 rows per table is under ClickHouse's `min_bytes_for_wide_part` (10 MB), so both parts are
+**Compact** — one file for all columns — and `system.parts_columns` reports **0 compressed
+bytes per column**. Whole-part ratios are `book_events` 70,099 → 16,322 (4.29×) and `trades`
+54,090 → 14,884 (3.63×), and at this size those are dominated by per-column codec headers and
+say nothing about §8.10's claim that `order_id` will dominate the table. Same reason B1/B2 are
+not reported here (D13, ENC-1485/ENC-1487): fixed costs dominate.
+
+**Q-level: `session_id` reuse on re-ingest — RULED, and the first answer was wrong.**
+Assigned to T5 from ENC-1480.
+
+> **A re-ingest reuses its `session_id`, and `session_id` is the identity of the retained DBN
+> file rather than a per-run counter: `FNV-1a-32` over the whole `.dbn`, forced non-zero.**
+
+The same bytes give the same number on every machine, every rebuild and every reload; a
+*corrected* pull is different bytes and therefore a different session, which is the only case
+where the distinction is real. The reasoning is D6 and D5: D6 makes L1 "a derived, rebuildable
+projection of the raw DBN files", and a projection whose output changes when rebuilt from
+unchanged input has a hidden input — a per-run counter is exactly that. D5's re-ingest and
+ENC-1487's bit-identical assertions both fail on the `session_id` column alone if a reload
+renumbers it. And the adapter's own note that `provider_seq` is "stable across a re-download,
+which is what makes re-ingest converge and the splice's dedup exact" is about the **pair**
+`(session_id, provider_seq)` (§8.3); a fresh `session_id` each run makes the stable half
+useless.
+
+**The first version derived it from the vendor `job_id`, and that was a bug caught by running
+it:** the `job_id` is in `metadata.json` and is **not in DBN at all**, so the pure D6 reload —
+which reads only the retained file — produced a *different* `session_id` from the run that
+created the file, i.e. the reload's rows differed from the originals in exactly the column
+meant to prove they did not. The `job_id` stays on every `ingest_windows` and `symbology` row
+as `source_ref`; it is provenance, not identity. **Verified after the fix:** `ingest` re-run,
+`reload` (DBN only, no CSV) and a hand `DROP PARTITION` followed by `reload` all produce
+**bit-identical** rows — `sum(cityHash64(*))` equal across all four states, both tables.
+
+**A correction to §8.8 that no answer to the `session_id` question rescues.** §8.8 calls
+`(symbol, kind, from_ts, session_id)` "unique by construction". **That is false under every
+answer.** ENC-1480 made the table an append-only transition log, so one window and one session
+write at least two rows (`state=0` then `state=1`) and a failed run writes three — observed on
+this ingest as exactly **4 rows for 2 windows**. The claim dates from revision 2's
+one-row-per-window `ReplacingMergeTree` and was voided by the rewrite that replaced it. What
+makes the table readable is the **read rule**, never uniqueness. §8.8 is amended.
+
+**A residual hazard T5 measured and could not close in the schema.** The DDL's invariant block
+makes maintaining `ingest_windows` across a `DROP PARTITION` a **code obligation of the ingest
+job** — it writes a `state=3`/`state=0` row first. A `DROP PARTITION` typed at the server by
+hand bypasses that entirely, and when it was, `isComplete` for the in-window request returned
+**COMPLETE over an empty table**, with every coverage probe still green because the rule was
+behaving correctly over a table that had been lied to. There is no foreign key and no trigger
+that can prevent it. `gma_ingest verify` now carries the one sound counter-check — **a count
+cannot *establish* completeness (D11), but it can *refute* a claim**: a `state=1` window
+claiming `rows_inserted > 0` whose range holds **zero** rows is not quiet, it is a lie. That
+check was observed red on exactly that condition and green after `gma_ingest reload`.
 
 **One gap T4 found in ENC-1481's schema, reported rather than patched around:**
 `BookRecord::side` is two-valued (`Bid`/`Ask`) and `gma.book_events.side` is its `UInt8`, but

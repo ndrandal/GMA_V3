@@ -37,6 +37,25 @@ add_library(gma_data STATIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include/gma/data/Schema.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/DatabentoAdapter.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/include/gma/data/DatabentoAdapter.hpp"
+  # Promoted out of DatabentoAdapterTest.cpp (ENC-1483, begun under the
+  # cancelled ENC-1498). The byte-for-byte gate against the five real vendor
+  # fixtures still compares THIS code, so the non-circularity argument is
+  # unchanged -- see DbnEncoder.hpp.
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/DbnEncoder.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/gma/data/DbnEncoder.hpp"
+  # ENC-1483: the ingest job.
+  # Verdict first, because everything below classifies its refusals through it:
+  # a finding (exit 1) is not an inability to run (exit 2).
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/Verdict.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/gma/data/Verdict.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/DatabentoCsv.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/gma/data/DatabentoCsv.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/ClickHouseHttp.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/gma/data/ClickHouseHttp.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/IngestWindows.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/gma/data/IngestWindows.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/IngestJob.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/gma/data/IngestJob.hpp"
 )
 
 # PUBLIC: a consumer of gma_data sees the L1 schema headers.
@@ -50,6 +69,23 @@ target_link_libraries(gma_data PUBLIC gma_engine gma::arrow)
 gma_apply_warnings(gma_data)
 
 message(STATUS "gma_data: enabled (Arrow: ${GMA_DATA_ARROW_PROVENANCE})")
+
+# ---------------------------------------------------------------------------
+# gma_ingest -- the ENC-1483 ingest job's command line.
+# ---------------------------------------------------------------------------
+# An EXECUTABLE in `data/`, not a ctest case, and that is deliberate. It talks
+# to a live ClickHouse, and a test that SKIPS when the server is absent looks
+# exactly like a test that passed -- the ENC-1095 failure, where three sessions
+# read a green 188/188 as renderer coverage. So the logic that can be wrong
+# (the gma.ingest_windows read rule, the CSV parse, the window arithmetic) is
+# unit-tested in gma_data_tests with no server at all, and the live exercise is
+# this binary, whose exit code is the verdict: 0 clean, 1 a finding, 2 COULD
+# NOT RUN. A missing server exits 2 and cannot be mistaken for a pass.
+#
+# It is not registered with ctest for the same reason.
+add_executable(gma_ingest "${CMAKE_CURRENT_SOURCE_DIR}/tools/gma_ingest_main.cpp")
+target_link_libraries(gma_ingest PRIVATE gma_data)
+gma_apply_warnings(gma_ingest)
 
 # ---------------------------------------------------------------------------
 # Tests — a SEPARATE binary from gma_tests, on purpose.

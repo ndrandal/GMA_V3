@@ -621,9 +621,41 @@ returns a flat market:
 So completeness is **recorded by the ingest job, never inferred from row counts** (a quiet
 window and a missing window have the same count, which is the whole problem), and
 `IL1Store::isComplete` makes a query over an incomplete window **fail** rather than answer
-short. It also makes ingest restartable: a ClickHouse insert is atomic per block, not per
-batch, so an interrupted batch leaves some blocks committed and recovery is re-running the
-window — which §8.6 makes exact.
+short. It also makes bulk ingest restartable: a ClickHouse insert is atomic per block, not
+per batch, so an interrupted batch leaves some blocks committed and recovery is re-running
+the window — which §8.6 makes exact.
+
+**⚠ `(symbol, kind, from_ts, session_id)` IS NOT "UNIQUE BY CONSTRUCTION" — THAT CLAIM IS
+WITHDRAWN (ENC-1483).** It was true of revision 2's one-row-per-window
+`ReplacingMergeTree`, and ENC-1480 replaced that with an **append-only transition log**: one
+window and one session write at least two rows (`state=0` then `state=1`), and a failed run
+writes three. ENC-1483's first ingest of two windows produced exactly **four** rows.
+Uniqueness is not what makes the table readable and never was — **the read rule is**, written
+out in full beside `CREATE TABLE gma.ingest_windows` in `data/schema/clickhouse.sql`:
+*newest row by `updated_at` per recorded `(symbol, kind, from_ts, to_ts)`, require
+`state = 1`, then test **coverage** of the request.* It is implemented once, in
+`data/include/gma/data/IngestWindows.hpp`, and it is correct whether or not a re-ingest reuses
+its session.
+
+**It does, and `session_id` is the retained DBN file's own identity** —
+`FNV-1a-32` over the `.dbn`, so a reload of unchanged bytes reproduces bit-identical rows
+(SPEC §5 under T5 carries the reasoning and what the first, wrong answer cost).
+
+**And the window a job records is the window it was DELIVERED, not the window it requested.**
+A Databento pull carrying a `limit` stops at that many records in time order, so a pull that
+returns exactly its limit is a **prefix** of the requested range — measured: ENC-1483's
+`mbo` job requested 90 minutes and delivered **68 seconds**. Recording the request would be
+this section's failure in the one table written to prevent it. The job records
+`[requested_start, last_ts_event)` when `records == limit`, dropping the possibly-partial
+final instant from the claim while still inserting its rows, and `[requested_start,
+requested_end)` otherwise.
+
+**A hazard the schema cannot close.** Maintaining this table across a `DROP PARTITION` is a
+code obligation of the ingest job, so a `DROP PARTITION` issued *outside* the job leaves the
+table asserting a window whose data is gone — measured, and `isComplete` duly returned
+complete over an empty table with the rule behaving perfectly. A row count cannot *establish*
+completeness, but it can *refute* a claim: a `state=1` window claiming `rows_inserted > 0`
+whose range holds zero rows is a lie, and `gma_ingest verify` checks exactly that.
 
 ### 8.9 Symbol identity — ticker as the key, `instrument_id` for provenance
 
@@ -660,21 +692,38 @@ tiny.)
 different company. `valid_from`/`valid_to` lets you **detect** it; what a continuous series
 should do about it is reference data and out of scope.
 
-**~~Unverified~~ — half of it is now measured (T4, ENC-1482).** The exact DBN field names
+**~~Unverified~~ — now measured, in two passes (T4/ENC-1482 and T5/ENC-1483).** The exact DBN field names
 and the whole record/metadata layout were established against real vendor DBN bytes committed
 at `data/tests/fixtures/dbn/`; they are written down in `dbn::` in
 `data/include/gma/data/DatabentoAdapter.hpp` and in SPEC §5 under Q14, and the names there are
 the vendor's own spellings — `instrument_id` included, so this section's field name is right.
-**Whether `instrument_id` is stable within a dataset-day is still open**: a two-record public
-sample naming one instrument proves nothing about reassignment, so **T5 confirms that against
-a real 7-day file.**
+**Whether `instrument_id` is stable within a dataset-day is STILL OPEN, and T5 narrowed it
+rather than closing it**: on the real `XNAS.ITCH`/`MSFT` sample `instrument_id` is constant at
+**7370** across the delivered window — but that window is 68 seconds of `mbo` and 22 minutes
+of `trades`, not a dataset-day, and reassignment is a between-days event. The full-day
+question still needs a full day. What T5 *did* settle here is that the mapping arrives
+correctly: the vendor's `symbol` column (with `map_symbols: true`) is the symbology carrier,
+it reaches the adapter through the DBN metadata's mappings section, and
+`gma.symbology` holds `XNAS.ITCH / 7370 / MSFT / [2022-06-10, 2022-06-11)` with the batch id
+as `source_ref`. Note the half-open interval is **day-granular** because DBN's mapping
+intervals are.
 
 ### 8.10 Codecs
 
 `DoubleDelta` on `ts_event` / `ts_recv` / `provider_seq`; `Delta(8), ZSTD(3)` on prices;
 `T64, ZSTD(1)` on sizes; `Delta(8), ZSTD(1)` on `order_id` and `priority`. MBO prices are
 highly repetitive (many orders at one price) and `order_id` is the high-cardinality column
-that will dominate the table — worth confirming against real data in T5.
+that will dominate the table.
+
+**T5 (ENC-1483) could NOT confirm that, and the reason is structural rather than an
+omission.** 1000 rows per table is far under ClickHouse's `min_bytes_for_wide_part` (10 MB),
+so both parts are written **Compact** — one file for every column — and
+`system.parts_columns` reports **zero compressed bytes per column**, which is a hard floor on
+what any per-column claim can be measured from. Whole-part ratios on the real sample are
+`book_events` 70,099 → 16,322 bytes (**4.29×**) and `trades` 54,090 → 14,884 (**3.63×**), and
+at that size they are dominated by per-column codec headers. **Per-column codec validation
+needs a part over 10 MB**, i.e. roughly a million MBO rows — the same volume B1/B2 need
+(§14), and the same reason they are not reported from this sample.
 
 ---
 
